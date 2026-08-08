@@ -1,6 +1,7 @@
 package com.unsupportedpastels.hermesandroid.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
@@ -29,9 +31,12 @@ import androidx.compose.material3.adaptive.layout.calculatePaneScaffoldDirective
 import androidx.compose.material3.adaptive.navigation3.ListDetailSceneStrategy
 import androidx.compose.material3.adaptive.navigation3.rememberListDetailSceneStrategy
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -39,6 +44,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.dropUnlessResumed
 import androidx.navigation3.runtime.NavKey
@@ -48,11 +54,16 @@ import androidx.navigation3.ui.NavDisplay
 import androidx.window.core.layout.WindowSizeClass.Companion.WIDTH_DP_MEDIUM_LOWER_BOUND
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
+import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
+import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
+import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionListRoute
+import com.unsupportedpastels.hermesandroid.navigation.ServerSettingsRoute
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
+import kotlinx.coroutines.launch
 
 private val DraftsSaver = Saver<SnapshotStateMap<String, String>, ArrayList<String>>(
     save = { drafts ->
@@ -72,8 +83,13 @@ private val DraftsSaver = Saver<SnapshotStateMap<String, String>, ArrayList<Stri
 fun HermesApp(
     snapshot: HermesGatewaySnapshot,
     modifier: Modifier = Modifier,
+    serverSettingsState: ServerSettingsState = ServerSettingsState.Ready(null),
+    onSaveServerOrigin: suspend (ServerOrigin) -> Result<Unit> = { Result.success(Unit) },
+    onSignIn: () -> Unit = {},
 ) {
     val sessions = snapshot.durableSessions
+    val serverOrigin = (serverSettingsState as? ServerSettingsState.Ready)?.serverOrigin
+    var observedServerOrigin by remember { mutableStateOf(serverOrigin) }
     val backStack = rememberNavBackStack(SessionListRoute)
     val drafts = rememberSaveable(saver = DraftsSaver) { mutableStateMapOf() }
     val windowAdaptiveInfo = currentWindowAdaptiveInfoV2()
@@ -93,6 +109,21 @@ fun HermesApp(
         if (backStack.size > 1) backStack.removeLastOrNull()
         Unit
     }
+    val openServerSettings = {
+        if (backStack.lastOrNull() is SessionDetailRoute ||
+            backStack.lastOrNull() is ServerSettingsRoute
+        ) {
+            backStack.removeLastOrNull()
+        }
+        backStack.add(ServerSettingsRoute)
+        Unit
+    }
+    LaunchedEffect(serverOrigin) {
+        if (observedServerOrigin != serverOrigin && backStack.lastOrNull() is SessionDetailRoute) {
+            backStack.removeLastOrNull()
+        }
+        observedServerOrigin = serverOrigin
+    }
 
     NavDisplay(
         backStack = backStack,
@@ -107,7 +138,10 @@ fun HermesApp(
             ) {
                 SessionListScreen(
                     sessions = sessions,
-                    connectionState = snapshot.connectionState,
+                    snapshot = snapshot,
+                    serverSettingsState = serverSettingsState,
+                    onConfigureServer = openServerSettings,
+                    onSignIn = onSignIn,
                     onSessionSelected = { sessionId ->
                         if (backStack.lastOrNull() is SessionDetailRoute) {
                             backStack.removeLastOrNull()
@@ -123,14 +157,25 @@ fun HermesApp(
                 if (session == null) {
                     MissingSessionScreen()
                 } else {
+                    val draftKey = "${serverOrigin?.value.orEmpty()}\u0000${session.id.value}"
                     SessionDetailScreen(
                         session = session,
-                        draft = drafts[session.id.value].orEmpty(),
-                        onDraftChanged = { drafts[session.id.value] = it },
+                        draft = drafts[draftKey].orEmpty(),
+                        onDraftChanged = { drafts[draftKey] = it },
                         showBack = !supportsListDetail,
                         onBack = navigateBack,
                     )
                 }
+            }
+            entry<ServerSettingsRoute>(
+                metadata = ListDetailSceneStrategy.detailPane(),
+            ) {
+                ServerSettingsScreen(
+                    serverOrigin = serverOrigin,
+                    showBack = !supportsListDetail,
+                    onBack = navigateBack,
+                    onSave = onSaveServerOrigin,
+                )
             }
         },
     )
@@ -140,22 +185,52 @@ fun HermesApp(
 @Composable
 private fun SessionListScreen(
     sessions: List<SessionSummary>,
-    connectionState: ConnectionState,
+    snapshot: HermesGatewaySnapshot,
+    serverSettingsState: ServerSettingsState,
+    onConfigureServer: () -> Unit,
+    onSignIn: () -> Unit,
     onSessionSelected: (DurableSessionId) -> Unit,
 ) {
+    val connectionState = snapshot.connectionState
+    val serverOrigin = (serverSettingsState as? ServerSettingsState.Ready)?.serverOrigin
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
-        topBar = { TopAppBar(title = { Text("Sessions") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Sessions") },
+                actions = {
+                    TextButton(
+                        enabled = serverSettingsState !is ServerSettingsState.Loading,
+                        onClick = dropUnlessResumed { onConfigureServer() },
+                    ) {
+                        Text("Server")
+                    }
+                },
+            )
+        },
     ) { innerPadding ->
         if (sessions.isEmpty()) {
-            val (title, supportingText) = when (connectionState) {
-                ConnectionState.Disconnected ->
-                    "No server configured" to "Connection setup is the next milestone."
-                ConnectionState.Connecting ->
+            val (title, supportingText) = when {
+                serverSettingsState is ServerSettingsState.Loading ->
+                    "Loading server settings" to "Reading the saved server origin."
+                serverSettingsState is ServerSettingsState.Unavailable ->
+                    "Server settings unavailable" to "Open Server to replace the saved origin."
+                connectionState == ConnectionState.Connected &&
+                    snapshot.authenticationState == AuthenticationState.SignInRequired ->
+                    "Server reachable" to
+                        "Hermes ${snapshot.serverVersion ?: "unknown"} · Sign in required"
+                connectionState == ConnectionState.Connected &&
+                    snapshot.authenticationState == AuthenticationState.SigningIn ->
+                    "Signing in to Hermes" to "Complete sign-in in your browser"
+                connectionState == ConnectionState.Disconnected && serverOrigin == null ->
+                    "No server configured" to "Add the HTTPS origin of your Hermes server."
+                connectionState == ConnectionState.Disconnected ->
+                    "Server configured" to serverOrigin?.value.orEmpty()
+                connectionState == ConnectionState.Connecting ->
                     "Connecting" to "Waiting for the Hermes server."
-                ConnectionState.Connected ->
+                connectionState == ConnectionState.Connected ->
                     "No saved sessions" to "This server has no durable transcripts yet."
-                ConnectionState.Recovering ->
+                else ->
                     "Reconnecting" to "Reconciling sessions with the Hermes server."
             }
             Box(
@@ -166,12 +241,38 @@ private fun SessionListScreen(
                     .padding(24.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
                     Text(title, style = MaterialTheme.typography.titleMedium)
                     Text(
                         supportingText,
                         style = MaterialTheme.typography.bodyMedium,
                     )
+                    snapshot.connectionError?.let { connectionError ->
+                        Text(
+                            connectionError,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (
+                        snapshot.authenticationState == AuthenticationState.SignInRequired &&
+                        snapshot.nativeOAuthSupported &&
+                        snapshot.authProviders.any { it.name == "nous" }
+                    ) {
+                        Button(onClick = dropUnlessResumed { onSignIn() }) {
+                            Text("Sign in with Nous")
+                        }
+                    } else if (
+                        connectionState == ConnectionState.Disconnected &&
+                        serverSettingsState is ServerSettingsState.Ready
+                    ) {
+                        Button(onClick = dropUnlessResumed { onConfigureServer() }) {
+                            Text(if (serverOrigin == null) "Configure server" else "Edit server")
+                        }
+                    }
                 }
             }
         } else {
@@ -188,6 +289,130 @@ private fun SessionListScreen(
                         ),
                     )
                     HorizontalDivider()
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun ServerSettingsScreen(
+    serverOrigin: ServerOrigin?,
+    showBack: Boolean,
+    onBack: () -> Unit,
+    onSave: suspend (ServerOrigin) -> Result<Unit>,
+) {
+    var value by rememberSaveable(serverOrigin?.value) {
+        mutableStateOf(serverOrigin?.value.orEmpty())
+    }
+    var isSaving by remember { mutableStateOf(false) }
+    var saveError by rememberSaveable { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+    val parsedOrigin = remember(value) {
+        runCatching { ServerOrigin.parse(value) }.getOrNull()
+    }
+    val validationMessage = remember(value) {
+        if (value.isBlank()) {
+            null
+        } else {
+            runCatching { ServerOrigin.parse(value) }
+                .exceptionOrNull()
+                ?.message
+        }
+    }
+
+    Scaffold(
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = {
+            TopAppBar(
+                title = { Text("Hermes server") },
+                navigationIcon = {
+                    if (showBack) {
+                        TextButton(
+                            enabled = !isSaving,
+                            onClick = dropUnlessResumed { onBack() },
+                        ) {
+                            Text("Back")
+                        }
+                    }
+                },
+                actions = {
+                    if (!showBack) {
+                        TextButton(
+                            enabled = !isSaving,
+                            onClick = dropUnlessResumed { onBack() },
+                        ) {
+                            Text("Close")
+                        }
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .consumeWindowInsets(innerPadding)
+                .padding(horizontal = 24.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text(
+                "Enter the public HTTPS origin of your unchanged Hermes Serve instance.",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            OutlinedTextField(
+                value = value,
+                onValueChange = {
+                    value = it
+                    saveError = null
+                },
+                label = { Text("Server origin") },
+                supportingText = {
+                    Text(
+                        validationMessage
+                            ?: "HTTPS origin only — no path, credentials, query, or ticket.",
+                    )
+                },
+                isError = validationMessage != null,
+                enabled = !isSaving,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            saveError?.let { message ->
+                Text(
+                    message,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    enabled = parsedOrigin != null && !isSaving,
+                    onClick = {
+                        val origin = parsedOrigin ?: return@Button
+                        coroutineScope.launch {
+                            isSaving = true
+                            saveError = null
+                            val result = onSave(origin)
+                            isSaving = false
+                            if (result.isSuccess) {
+                                onBack()
+                            } else {
+                                saveError = "Could not save server. Try again."
+                            }
+                        }
+                    },
+                ) {
+                    Text(if (isSaving) "Saving…" else "Save")
+                }
+                TextButton(
+                    enabled = !isSaving,
+                    onClick = dropUnlessResumed { onBack() },
+                ) {
+                    Text("Cancel")
                 }
             }
         }
@@ -232,8 +457,16 @@ private fun SessionDetailScreen(
                     .weight(1f),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("No messages yet", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "Transcript loading is not connected in this milestone. " +
+                        "Only the authenticated durable-session list is available.",
+                    style = MaterialTheme.typography.bodyLarge,
+                )
             }
+            Text(
+                "Local draft only. Sending is disabled until explicit live-session takeover is implemented.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -242,7 +475,7 @@ private fun SessionDetailScreen(
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraftChanged,
-                    label = { Text("Message") },
+                    label = { Text("Local draft") },
                     modifier = Modifier.weight(1f),
                     minLines = 1,
                     maxLines = 5,

@@ -8,4 +8,7 @@ import kotlinx.serialization.Serializable
 data object SessionListRoute : NavKey
 
 @Serializable
+data object ServerSettingsRoute : NavKey
+
+@Serializable
 data class SessionDetailRoute(val durableSessionId: DurableSessionId) : NavKey

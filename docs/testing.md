@@ -6,7 +6,7 @@
 ./gradlew testDebugUnitTest
 ```
 
-Use local tests for reducers, origin normalization, protocol parsing, observer/controller policy, request correlation, reconnect reconciliation, and state restoration models. Prefer explicit fakes over mocks.
+Use local tests for reducers, origin normalization, origin persistence, server setup UI, protocol parsing, observer/controller policy, request correlation, reconnect reconciliation, and state restoration models. Prefer explicit fakes over mocks.
 
 ## Build and static gate
 
@@ -21,6 +21,7 @@ Every screen-level adaptive screenshot suite must cover compact, medium, and exp
 Behavior checks must cover:
 
 - compact one-pane list -> detail -> back;
+- configure and edit a canonical HTTPS server origin, including inline rejection of cleartext and credential-bearing input;
 - unfolded list/detail selection;
 - fold/unfold with selected session and composer draft preserved;
 - resize while streaming and while blocking input is pending;

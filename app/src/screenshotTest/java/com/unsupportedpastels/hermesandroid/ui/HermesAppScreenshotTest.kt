@@ -9,6 +9,7 @@ import androidx.navigationevent.compose.rememberNavigationEventDispatcherOwner
 import com.android.tools.screenshot.PreviewTest
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
+import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
@@ -62,6 +63,31 @@ fun HermesAppAccessibilityScreenshot() {
         HermesAndroidTheme(darkTheme = true) {
             HermesApp(snapshot = screenshotSnapshot)
         }
+    }
+}
+
+@PreviewTest
+@Preview(name = "Compact server setup", widthDp = 400, heightDp = 900, showBackground = true)
+@Composable
+fun HermesServerSetupScreenshot() {
+    ScreenshotNavigationHost {
+        HermesAndroidTheme(darkTheme = false) {
+            HermesApp(snapshot = HermesGatewaySnapshot())
+        }
+    }
+}
+
+@PreviewTest
+@Preview(name = "Compact server settings", widthDp = 400, heightDp = 900, showBackground = true)
+@Composable
+fun HermesServerDialogScreenshot() {
+    HermesAndroidTheme(darkTheme = false) {
+        ServerSettingsScreen(
+            serverOrigin = ServerOrigin.parse("https://hermes.example"),
+            showBack = true,
+            onBack = {},
+            onSave = { Result.success(Unit) },
+        )
     }
 }
 

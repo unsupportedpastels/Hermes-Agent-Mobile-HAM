@@ -15,4 +15,12 @@ class RoutesTest {
 
         assertEquals(DurableSessionId("stored-1"), decoded.durableSessionId)
     }
+
+    @Test
+    fun serverSettingsRouteIsSerializable() {
+        val encoded = Json.encodeToString(ServerSettingsRoute.serializer(), ServerSettingsRoute)
+        val decoded = Json.decodeFromString(ServerSettingsRoute.serializer(), encoded)
+
+        assertEquals(ServerSettingsRoute, decoded)
+    }
 }

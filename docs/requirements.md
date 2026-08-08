@@ -27,6 +27,8 @@ The version catalog is authoritative for resolved library versions. `local.prope
 ## Product
 
 - Connect to official REST and ticketed JSON-RPC/WebSocket endpoints exposed by an unchanged `hermes serve` process.
+- Let users configure and edit a canonical HTTPS server origin without embedding credentials, endpoint paths, queries, fragments, or WebSocket tickets.
+- Persist only the normalized origin as connection metadata; derive REST and WebSocket endpoint paths in the client.
 - Keep authentication, storage, cached data, and TLS/trust choices isolated per normalized server origin.
 - Browse durable stored sessions separately from transient process-local live runtimes.
 - Released-server default is observer mode. Any action that transfers a live session transport requires explicit confirmation.
@@ -48,6 +50,8 @@ Primary physical target: standard/non-Ultra Samsung Galaxy Z Fold 8.
 ## Local security
 
 - No plaintext credentials in files, preferences, logs, backups, or crash reports.
+- This milestone keeps native access/refresh tokens in memory only; process recreation intentionally requires a new sign-in until encrypted origin-scoped storage and refresh rotation are implemented.
+- Never persist authorization codes, PKCE verifiers, WebSocket tickets, or credential-bearing URLs.
 - Disable backup for secret-bearing state unless a reviewed encrypted backup design is introduced.
 - Export only the launcher activity.
 - Production network security must reject cleartext by default.
