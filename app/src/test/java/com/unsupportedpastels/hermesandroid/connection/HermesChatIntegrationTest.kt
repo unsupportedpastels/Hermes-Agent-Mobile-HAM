@@ -1,7 +1,10 @@
 package com.unsupportedpastels.hermesandroid.connection
 
+import com.unsupportedpastels.hermesandroid.app.ComposerAttachment
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
+import com.unsupportedpastels.hermesandroid.attachment.AttachmentByteReader
+import com.unsupportedpastels.hermesandroid.attachment.AttachmentReadException
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
@@ -45,6 +48,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.Base64
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class HermesChatIntegrationTest {
@@ -133,6 +137,140 @@ class HermesChatIntegrationTest {
         assertFalse(chat.isSending)
         assertEquals(durableId, session.resumedDurableId)
         assertEquals("New question", session.submittedText)
+    }
+
+    @Test
+    fun sendMessageStagesFileAttachmentBeforeSubmitAndPrependsRefText() = runTest(dispatcher) {
+        val session = StreamingChatSession()
+        val viewModel = chatViewModel(
+            session,
+            attachmentReader = AttachmentByteReader { "hello".toByteArray() },
+        )
+        advanceUntilIdle()
+
+        viewModel.addAttachments(
+            durableId,
+            listOf(ComposerAttachment("a1", "content://provider/report", "report.txt", "text/plain", 5)),
+        )
+        assertEquals(1, viewModel.attachments.value[durableId].orEmpty().size)
+
+        viewModel.sendMessage(durableId, "summarize")
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf(Triple("report.txt", "text/plain", Base64.getEncoder().encodeToString("hello".toByteArray()))),
+            session.fileAttachCalls,
+        )
+        assertEquals("@file:.hermes/desktop-attachments/report.txt\n\nsummarize", session.submittedText)
+        assertTrue(session.imageAttachCalls.isEmpty())
+        // Chips clear once staging + submit are underway.
+        assertTrue(viewModel.attachments.value[durableId].orEmpty().isEmpty())
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertFalse(chat.isSending)
+    }
+
+    @Test
+    fun sendMessageStagesImageAttachmentToRideNextPrompt() = runTest(dispatcher) {
+        val session = StreamingChatSession()
+        val viewModel = chatViewModel(
+            session,
+            attachmentReader = AttachmentByteReader { "pngbytes".toByteArray() },
+        )
+        advanceUntilIdle()
+
+        viewModel.addAttachments(
+            durableId,
+            listOf(ComposerAttachment("a1", "content://provider/photo", "photo.png", "image/png", 8)),
+        )
+        viewModel.sendMessage(durableId, "what is this")
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf("photo.png" to Base64.getEncoder().encodeToString("pngbytes".toByteArray())),
+            session.imageAttachCalls,
+        )
+        assertTrue(session.fileAttachCalls.isEmpty())
+        assertEquals("what is this", session.submittedText)
+        assertTrue(viewModel.attachments.value[durableId].orEmpty().isEmpty())
+    }
+
+    @Test
+    fun stagingFailureKeepsDraftEditableAndChipsIntact() = runTest(dispatcher) {
+        val session = StreamingChatSession()
+        val viewModel = chatViewModel(
+            session,
+            attachmentReader = AttachmentByteReader { throw AttachmentReadException("provider unreachable") },
+        )
+        advanceUntilIdle()
+
+        viewModel.addAttachments(
+            durableId,
+            listOf(ComposerAttachment("a1", "content://provider/report", "report.txt", "text/plain", 5)),
+        )
+        viewModel.sendMessage(durableId, "summarize")
+        advanceUntilIdle()
+
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertFalse(chat.isSending)
+        assertTrue(chat.error.orEmpty().contains("provider unreachable"))
+        assertNull(session.submittedText)
+        assertTrue(session.fileAttachCalls.isEmpty())
+        // No user bubble was appended and the chips survive for a retry.
+        assertFalse(chat.messages.any { it.role == ChatMessageRole.User })
+        assertTrue(viewModel.attachments.value[durableId].orEmpty().isNotEmpty())
+    }
+
+    @Test
+    fun promptRejectionAfterFileStagingKeepsAttachmentForRetry() = runTest(dispatcher) {
+        val session = StreamingChatSession(
+            submitFailure = HermesChatProtocolException("prompt rejected"),
+        )
+        val viewModel = chatViewModel(
+            session,
+            attachmentReader = AttachmentByteReader { "hello".toByteArray() },
+        )
+        advanceUntilIdle()
+
+        viewModel.addAttachments(
+            durableId,
+            listOf(ComposerAttachment("a1", "content://provider/report", "report.txt", "text/plain", 5)),
+        )
+        viewModel.sendMessage(durableId, "summarize")
+        advanceUntilIdle()
+
+        assertEquals(1, session.fileAttachCalls.size)
+        assertTrue(viewModel.attachments.value[durableId].orEmpty().isNotEmpty())
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertTrue(chat.error != null)
+        assertFalse(chat.isSending)
+    }
+
+    @Test
+    fun stagingFailureOnFreshDraftTearsDownTheRuntime() = runTest(dispatcher) {
+        val session = StreamingChatSession()
+        val viewModel = chatViewModel(
+            session,
+            attachmentReader = AttachmentByteReader { throw AttachmentReadException("provider unreachable") },
+        )
+        advanceUntilIdle()
+
+        val draftId = viewModel.createNewSession()
+        viewModel.addAttachments(
+            draftId,
+            listOf(ComposerAttachment("a1", "content://provider/report", "report.txt", "text/plain", 5)),
+        )
+        viewModel.openSession(draftId)
+        advanceUntilIdle()
+
+        viewModel.sendMessage(draftId, "summarize")
+        advanceUntilIdle()
+
+        val chat = viewModel.snapshots.value.chatSessions.getValue(draftId)
+        assertFalse(chat.isSending)
+        assertTrue(chat.error != null)
+        // The fresh draft runtime was torn down so the next send starts clean.
+        assertTrue(session.closed)
+        assertTrue(viewModel.attachments.value[draftId].orEmpty().isNotEmpty())
     }
 
     @Test
@@ -283,12 +421,118 @@ class HermesChatIntegrationTest {
         assertNull(viewModel.slashCompletions.value[durableId])
     }
 
-    private fun chatViewModel(session: HermesChatSession) = HermesConnectionViewModel(
+    @Test
+    fun createNewSessionAddsDraftAndPublishesRuntimeOnOpen() = runTest(dispatcher) {
+        val session = CompletableSlashChatSession(
+            result = SlashCompletionResult(emptyList(), 0),
+        )
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        val draftId = viewModel.createNewSession()
+        advanceUntilIdle()
+
+        val snapshot = viewModel.snapshots.value
+        assertTrue(snapshot.durableSessions.any { it.id == draftId })
+        assertEquals(
+            "New chat",
+            snapshot.durableSessions.first { it.id == draftId }.title,
+        )
+
+        viewModel.openSession(draftId)
+        advanceUntilIdle()
+
+        assertEquals(draftId, session.createdForDurableId)
+    }
+
+    @Test
+    fun createNewSessionRefreshesListAfterFirstSend() = runTest(dispatcher) {
+        val client = ChatConnectionClient()
+        val session = StreamingChatSession()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> session },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        val draftId = viewModel.createNewSession()
+        advanceUntilIdle()
+        viewModel.openSession(draftId)
+        advanceUntilIdle()
+
+        val loadsBefore = client.transcriptLoads
+        viewModel.sendMessage(draftId, "First prompt")
+        advanceUntilIdle()
+
+        assertEquals("First prompt", session.submittedText)
+        assertFalse(viewModel.snapshots.value.chatSessions[draftId]?.isSending ?: true)
+        assertTrue(client.transcriptLoads > loadsBefore)
+    }
+
+    @Test
+    fun closedDraftTransportReconnectsUsingServerDurableIdBeforeStagingAttachment() = runTest(dispatcher) {
+        val client = ChatConnectionClient()
+        val canonicalId = DurableSessionId("server-canonical-draft")
+        val first = CanonicalClosingDraftSession(canonicalId)
+        val second = StreamingChatSession()
+        val candidates = ArrayDeque<HermesChatSession>().apply {
+            add(first)
+            add(second)
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> candidates.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+            attachmentReader = AttachmentByteReader { byteArrayOf(7, 8, 9) },
+        )
+        advanceUntilIdle()
+
+        val draftId = viewModel.createNewSession()
+        viewModel.openSession(draftId)
+        advanceUntilIdle()
+        viewModel.sendMessage(draftId, "First prompt")
+        advanceUntilIdle()
+
+        assertEquals(canonicalId, client.lastTranscriptDurableId)
+        first.closeEvents()
+        advanceUntilIdle()
+        viewModel.addAttachments(
+            draftId,
+            listOf(
+                ComposerAttachment(
+                    id = "doc",
+                    uri = "content://picker/doc",
+                    displayName = "note.txt",
+                    mimeType = "text/plain",
+                    sizeBytes = 3,
+                ),
+            ),
+        )
+        viewModel.sendMessage(draftId, "Second prompt")
+        advanceUntilIdle()
+
+        assertEquals(canonicalId, second.resumedDurableId)
+        assertEquals("Second prompt", second.submittedText?.lineSequence()?.last())
+        assertEquals(listOf("note.txt"), second.fileAttachCalls.map { it.first })
+        assertTrue(viewModel.attachments.value[draftId].orEmpty().isEmpty())
+    }
+
+    private fun chatViewModel(
+        session: HermesChatSession,
+        attachmentReader: AttachmentByteReader =
+            AttachmentByteReader { error("no attachment reads expected") },
+    ) = HermesConnectionViewModel(
         settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
         client = ChatConnectionClient(),
         tokenStore = MemoryTokenStore(tokens),
         chatConnector = HermesChatConnector { _, _ -> session },
         nowEpochSeconds = { 1_900_000_000 },
+        attachmentReader = attachmentReader,
     )
 
     @Test
@@ -889,6 +1133,8 @@ private class MemoryTokenStore(initial: NativeTokenSet?) : NativeTokenStore {
 private class ChatConnectionClient : HermesConnectionClient {
     private val durableId = DurableSessionId("durable-1")
     var transcriptAccessToken: String? = null
+    var transcriptLoads = 0
+    var lastTranscriptDurableId: DurableSessionId? = null
 
     override suspend fun probe(serverOrigin: ServerOrigin) = HermesConnectionInfo(
         version = "0.20.0",
@@ -911,6 +1157,8 @@ private class ChatConnectionClient : HermesConnectionClient {
         durableSessionId: DurableSessionId,
     ): List<com.unsupportedpastels.hermesandroid.gateway.ChatMessage> {
         transcriptAccessToken = accessToken
+        transcriptLoads += 1
+        lastTranscriptDurableId = durableSessionId
         return listOf(
             com.unsupportedpastels.hermesandroid.gateway.ChatMessage(ChatMessageRole.User, "Earlier question"),
             com.unsupportedpastels.hermesandroid.gateway.ChatMessage(ChatMessageRole.Assistant, "Earlier answer"),
@@ -1138,6 +1386,15 @@ private class CompletableSlashChatSession(
     private val channel = Channel<HermesChatEvent>(Channel.UNLIMITED)
     override val events: Flow<HermesChatEvent> = channel.receiveAsFlow()
     val completionRequests = mutableListOf<String>()
+    var createdForDurableId: DurableSessionId? = null
+
+    override suspend fun createSession(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ): ResumedChatSession {
+        createdForDurableId = durableSessionId
+        return resume(durableSessionId, profile)
+    }
 
     override suspend fun resume(
         durableSessionId: DurableSessionId,
@@ -1164,11 +1421,59 @@ private class CompletableSlashChatSession(
     override suspend fun close() = Unit
 }
 
-private class StreamingChatSession : HermesChatSession {
+private class CanonicalClosingDraftSession(
+    private val canonicalId: DurableSessionId,
+) : HermesChatSession {
+    private val runtimeId = RuntimeSessionId("runtime-canonical-draft")
+    private val channel = Channel<HermesChatEvent>(Channel.UNLIMITED)
+    override val events: Flow<HermesChatEvent> = channel.receiveAsFlow()
+
+    override suspend fun createSession(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ) = ResumedChatSession(
+        runtimeSessionId = runtimeId,
+        durableSessionId = canonicalId,
+        resumed = false,
+        messages = emptyList(),
+        running = false,
+        inflight = null,
+    )
+
+    override suspend fun resume(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ) = error("draft should be created, not resumed")
+
+    override suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+    ): PromptSubmission {
+        channel.send(HermesChatEvent.MessageStart(runtimeId, null))
+        channel.send(HermesChatEvent.MessageComplete(runtimeId, "done", "complete", null))
+        return PromptSubmission("streaming")
+    }
+
+    fun closeEvents() = channel.close()
+
+    override suspend fun close() = Unit
+}
+
+private class StreamingChatSession(
+    private val submitFailure: Exception? = null,
+) : HermesChatSession {
     private val mutableEvents = MutableSharedFlow<HermesChatEvent>(extraBufferCapacity = 8)
     override val events: Flow<HermesChatEvent> = mutableEvents
     var resumedDurableId: DurableSessionId? = null
     var submittedText: String? = null
+    var closed = false
+    val fileAttachCalls = mutableListOf<Triple<String, String, String>>()
+    val imageAttachCalls = mutableListOf<Pair<String, String>>()
+
+    override suspend fun createSession(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ): ResumedChatSession = resume(durableSessionId, profile)
 
     override suspend fun resume(
         durableSessionId: DurableSessionId,
@@ -1190,6 +1495,7 @@ private class StreamingChatSession : HermesChatSession {
         text: String,
     ): PromptSubmission {
         submittedText = text
+        submitFailure?.let { throw it }
         mutableEvents.emit(HermesChatEvent.MessageStart(runtimeSessionId, null))
         mutableEvents.emit(HermesChatEvent.MessageDelta(runtimeSessionId, "Hello "))
         mutableEvents.emit(HermesChatEvent.MessageDelta(runtimeSessionId, "world"))
@@ -1197,9 +1503,28 @@ private class StreamingChatSession : HermesChatSession {
         return PromptSubmission("streaming")
     }
 
-    override suspend fun close() = Unit
-}
+    override suspend fun attachFile(
+        runtimeSessionId: RuntimeSessionId,
+        filename: String,
+        mimeType: String,
+        base64Content: String,
+    ): String {
+        fileAttachCalls += Triple(filename, mimeType, base64Content)
+        return "@file:.hermes/desktop-attachments/$filename"
+    }
 
+    override suspend fun attachImage(
+        runtimeSessionId: RuntimeSessionId,
+        filename: String,
+        base64Content: String,
+    ) {
+        imageAttachCalls += filename to base64Content
+    }
+
+    override suspend fun close() {
+        closed = true
+    }
+}
 private class ReconnectingChatSession(
     runtimeId: String,
     private val running: Boolean,

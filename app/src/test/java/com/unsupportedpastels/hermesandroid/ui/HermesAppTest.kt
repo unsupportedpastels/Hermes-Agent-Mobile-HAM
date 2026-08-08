@@ -1,14 +1,20 @@
 package com.unsupportedpastels.hermesandroid.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.unsupportedpastels.hermesandroid.app.ComposerAttachment
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.connection.HermesAuthProvider
@@ -153,6 +159,139 @@ class HermesAppTest {
         composeRule.onNode(hasSetTextAction()).performTextInput("New question")
         composeRule.onNodeWithText("Send").performClick()
         assertEquals(sessions.first().id to "New question", sent)
+    }
+
+    @Test
+    fun selectedAttachmentsRenderAsRemovableInputChips() {
+        var removed: Pair<DurableSessionId, String>? = null
+        val sessionId = sessions.first().id
+        val attachment = ComposerAttachment(
+            id = "attachment-1",
+            uri = "content://provider/report",
+            displayName = "report.pdf",
+            mimeType = "application/pdf",
+            sizeBytes = 42,
+        )
+        val snapshot = connectedSnapshot.copy(authenticationState = AuthenticationState.Authenticated)
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    attachments = mapOf(sessionId to listOf(attachment)),
+                    onRemoveAttachment = { id, attachmentId -> removed = id to attachmentId },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNodeWithContentDescription("Attach files").assertIsDisplayed()
+        composeRule.onNodeWithText("report.pdf").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Remove report.pdf").performClick()
+        assertEquals(sessionId to "attachment-1", removed)
+    }
+
+    @Test
+    fun attachmentOnlyDraftCanBeSentAndComposerControlsDisableWhileSending() {
+        var sent: Pair<DurableSessionId, String>? = null
+        val sessionId = sessions.first().id
+        val attachment = ComposerAttachment(
+            id = "attachment-1",
+            uri = "content://provider/report",
+            displayName = "report.pdf",
+            mimeType = "application/pdf",
+            sizeBytes = 42,
+        )
+        var isSending by mutableStateOf(false)
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+        )
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot.copy(
+                        chatSessions = mapOf(sessionId to ChatSessionSnapshot(isSending = isSending)),
+                    ),
+                    attachments = mapOf(sessionId to listOf(attachment)),
+                    onSendMessage = { id, text -> sent = id to text },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNodeWithText("Send").performClick()
+        assertEquals(sessionId to "", sent)
+
+        composeRule.runOnIdle { isSending = true }
+        composeRule.onNodeWithContentDescription("Attach files").assertIsNotEnabled()
+        composeRule.onNodeWithText("Send").assertIsNotEnabled()
+    }
+
+    @Test
+    fun failedSubmissionKeepsTypedDraftEditable() {
+        val sessionId = sessions.first().id
+        var snapshot by mutableStateOf(
+            connectedSnapshot.copy(
+                authenticationState = AuthenticationState.Authenticated,
+                chatSessions = mapOf(sessionId to ChatSessionSnapshot()),
+            ),
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    onSendMessage = { _, text ->
+                        snapshot = snapshot.copy(
+                            chatSessions = mapOf(
+                                sessionId to ChatSessionSnapshot(
+                                    messages = listOf(ChatMessage(ChatMessageRole.User, text)),
+                                    error = "prompt rejected",
+                                ),
+                            ),
+                        )
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNode(hasSetTextAction()).performTextInput("Keep this draft")
+        composeRule.onNodeWithText("Send").performClick()
+        composeRule.onNodeWithText("prompt rejected").assertIsDisplayed()
+        val inputText = composeRule.onNode(hasSetTextAction())
+            .fetchSemanticsNode().config[SemanticsProperties.InputText].text
+        assertEquals("Keep this draft", inputText)
+    }
+
+    @Test
+    fun removingLastAttachmentRemovesItsChip() {
+        var attachments by mutableStateOf(
+            mapOf(
+                sessions.first().id to listOf(
+                    ComposerAttachment(
+                        id = "attachment-1",
+                        uri = "content://provider/report",
+                        displayName = "report.pdf",
+                        mimeType = "application/pdf",
+                        sizeBytes = 42,
+                    ),
+                ),
+            ),
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(authenticationState = AuthenticationState.Authenticated),
+                    attachments = attachments,
+                    onRemoveAttachment = { sessionId, _ -> attachments = attachments - sessionId },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNodeWithContentDescription("Remove report.pdf").performClick()
+        composeRule.onNodeWithText("report.pdf").assertDoesNotExist()
     }
 
     @Test

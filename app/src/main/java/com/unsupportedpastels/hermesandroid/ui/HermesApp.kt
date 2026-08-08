@@ -1,6 +1,14 @@
 package com.unsupportedpastels.hermesandroid.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,7 +26,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -44,6 +55,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -53,8 +67,10 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.ui.NavDisplay
 import androidx.window.core.layout.WindowSizeClass.Companion.WIDTH_DP_MEDIUM_LOWER_BOUND
+import com.unsupportedpastels.hermesandroid.app.ComposerAttachment
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
+import com.unsupportedpastels.hermesandroid.attachment.AttachmentPolicy
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
 import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
@@ -93,8 +109,12 @@ fun HermesApp(
     onSignIn: () -> Unit = {},
     onOpenSession: (DurableSessionId) -> Unit = {},
     onSendMessage: (DurableSessionId, String) -> Unit = { _, _ -> },
+    onCreateSession: () -> DurableSessionId? = { null },
     slashCompletions: Map<DurableSessionId, SlashCompletionState> = emptyMap(),
     onSlashCompletionRequested: (DurableSessionId, String) -> Unit = { _, _ -> },
+    attachments: Map<DurableSessionId, List<ComposerAttachment>> = emptyMap(),
+    onAddAttachments: (DurableSessionId, List<ComposerAttachment>) -> List<String> = { _, _ -> emptyList() },
+    onRemoveAttachment: (DurableSessionId, String) -> Unit = { _, _ -> },
 ) {
     val sessions = snapshot.durableSessions
     val serverOrigin = (serverSettingsState as? ServerSettingsState.Ready)?.serverOrigin
@@ -157,6 +177,15 @@ fun HermesApp(
                         }
                         backStack.add(SessionDetailRoute(sessionId))
                     },
+                    onNewSession = {
+                        val newSessionId = onCreateSession()
+                        if (newSessionId != null) {
+                            if (backStack.lastOrNull() is SessionDetailRoute) {
+                                backStack.removeLastOrNull()
+                            }
+                            backStack.add(SessionDetailRoute(newSessionId))
+                        }
+                    },
                 )
             }
             entry<SessionDetailRoute>(
@@ -180,6 +209,11 @@ fun HermesApp(
                             onSlashCompletionRequested(session.id, updated)
                         },
                         canSend = snapshot.authenticationState == AuthenticationState.Authenticated,
+                        attachments = attachments[session.id].orEmpty(),
+                        onAddAttachments = { candidates -> onAddAttachments(session.id, candidates) },
+                        onRemoveAttachment = { attachmentId ->
+                            onRemoveAttachment(session.id, attachmentId)
+                        },
                         onSend = { text ->
                             onSlashCompletionRequested(session.id, "")
                             onSendMessage(session.id, text)
@@ -224,9 +258,11 @@ private fun SessionListScreen(
     onConfigureServer: () -> Unit,
     onSignIn: () -> Unit,
     onSessionSelected: (DurableSessionId) -> Unit,
+    onNewSession: () -> Unit = {},
 ) {
     val connectionState = snapshot.connectionState
     val serverOrigin = (serverSettingsState as? ServerSettingsState.Ready)?.serverOrigin
+    val canStartNewChat = snapshot.authenticationState == AuthenticationState.Authenticated
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
@@ -241,6 +277,15 @@ private fun SessionListScreen(
                     }
                 },
             )
+        },
+        floatingActionButton = {
+            if (canStartNewChat) {
+                ExtendedFloatingActionButton(
+                    onClick = dropUnlessResumed { onNewSession() },
+                ) {
+                    Text("New chat")
+                }
+            }
         },
     ) { innerPadding ->
         if (sessions.isEmpty()) {
@@ -461,18 +506,44 @@ private fun SessionDetailScreen(
     draft: String,
     onDraftChanged: (String) -> Unit,
     canSend: Boolean,
+    attachments: List<ComposerAttachment>,
+    onAddAttachments: (List<ComposerAttachment>) -> List<String>,
+    onRemoveAttachment: (String) -> Unit,
     onSend: (String) -> Unit,
     slashCompletion: SlashCompletionState? = null,
     onSlashCompletionSelected: (SlashCompletionState, SlashCompletionItem) -> Unit = { _, _ -> },
     showBack: Boolean,
     onBack: () -> Unit,
 ) {
+    val context = LocalContext.current
+    var attachmentError by remember(session.id) { mutableStateOf<String?>(null) }
+    var pendingSend by remember(session.id) { mutableStateOf<Pair<String, Int>?>(null) }
+    val attachmentPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        val candidates = mutableListOf<ComposerAttachment>()
+        val errors = mutableListOf<String>()
+        uris.forEach { uri ->
+            runCatching { resolvePickedAttachment(context, uri) }
+                .onSuccess(candidates::add)
+                .onFailure { errors += it.message ?: "Could not read selected file" }
+        }
+        errors += onAddAttachments(candidates)
+        attachmentError = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
+    }
     val transcriptListState = rememberLazyListState(
         initialFirstVisibleItemIndex = chat.messages.lastIndex.coerceAtLeast(0),
     )
     LaunchedEffect(session.id, chat.messages.size, chat.messages.lastOrNull()?.text?.length) {
         if (chat.messages.isNotEmpty()) {
             transcriptListState.scrollToItem(chat.messages.lastIndex)
+        }
+    }
+    LaunchedEffect(session.id, chat.messages.size, chat.isSending, chat.error) {
+        val pending = pendingSend ?: return@LaunchedEffect
+        if (chat.messages.size > pending.second && !chat.isSending) {
+            if (chat.error == null && draft.trim() == pending.first) onDraftChanged("")
+            pendingSend = null
         }
     }
 
@@ -559,16 +630,54 @@ private fun SessionDetailScreen(
                     onItemSelected = { item -> onSlashCompletionSelected(slashCompletion, item) },
                 )
             }
+            attachmentError?.let { error ->
+                Text(
+                    error,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (attachments.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    attachments.forEach { attachment ->
+                        InputChip(
+                            selected = true,
+                            onClick = { onRemoveAttachment(attachment.id) },
+                            enabled = !chat.isSending && !chat.isLoading,
+                            label = { Text(attachment.displayName, maxLines = 1) },
+                            trailingIcon = { Text("×") },
+                            modifier = Modifier.semantics {
+                                contentDescription = "Remove ${attachment.displayName}"
+                            },
+                        )
+                    }
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
+                IconButton(
+                    onClick = {
+                        attachmentError = null
+                        attachmentPicker.launch(arrayOf("*/*"))
+                    },
+                    enabled = canSend && !chat.isSending && !chat.isLoading,
+                    modifier = Modifier.semantics { contentDescription = "Attach files" },
+                ) {
+                    Text("+", style = MaterialTheme.typography.titleLarge)
+                }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraftChanged,
                     label = { Text("Message") },
-                    enabled = !chat.isSending,
+                    enabled = !chat.isSending && !chat.isLoading,
                     modifier = Modifier.weight(1f),
                     minLines = 1,
                     maxLines = 5,
@@ -576,16 +685,56 @@ private fun SessionDetailScreen(
                 Button(
                     onClick = {
                         val message = draft.trim()
+                        pendingSend = message to chat.messages.size
                         onSend(message)
-                        onDraftChanged("")
                     },
-                    enabled = canSend && !chat.isSending && draft.isNotBlank(),
+                    enabled = canSend &&
+                        !chat.isSending &&
+                        !chat.isLoading &&
+                        (draft.isNotBlank() || attachments.isNotEmpty()),
                 ) {
                     Text("Send")
                 }
             }
         }
     }
+}
+
+private fun resolvePickedAttachment(context: Context, uri: Uri): ComposerAttachment {
+    require(uri.scheme == "content") { "Selected item was not a readable document" }
+    runCatching {
+        context.contentResolver.takePersistableUriPermission(
+            uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+        )
+    }
+
+    var rawName: String? = null
+    var sizeBytes = -1L
+    context.contentResolver.query(
+        uri,
+        arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+        null,
+        null,
+        null,
+    )?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            val sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (nameColumn >= 0 && !cursor.isNull(nameColumn)) rawName = cursor.getString(nameColumn)
+            if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) sizeBytes = cursor.getLong(sizeColumn)
+        }
+    }
+    val displayName = AttachmentPolicy.sanitizeDisplayName(
+        rawName ?: uri.lastPathSegment.orEmpty(),
+    )
+    return ComposerAttachment(
+        id = uri.toString(),
+        uri = uri.toString(),
+        displayName = displayName,
+        mimeType = context.contentResolver.getType(uri)?.takeIf(String::isNotBlank),
+        sizeBytes = sizeBytes,
+    )
 }
 
 @Composable

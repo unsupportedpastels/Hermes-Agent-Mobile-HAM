@@ -510,6 +510,134 @@ class HermesChatGatewayTest {
             urls,
         )
     }
+
+    @Test
+    fun stagesFileAttachmentAndReturnsRefText() = runTest {
+        val ticketClient = RecordingTicketClient("ticket-1")
+        val socket = ScriptedSocket()
+        val socketFactory = RecordingSocketFactory(socket)
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "file.attach") {
+                socket.offer(
+                    """
+                    {"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{
+                      "attached": true, "name": "report.txt",
+                      "path": "/workspace/.hermes/desktop-attachments/report.txt",
+                      "ref_path": ".hermes/desktop-attachments/report.txt",
+                      "ref_text": "@file:.hermes/desktop-attachments/report.txt",
+                      "uploaded": true
+                    }}
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val gateway = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = ticketClient,
+            socketFactory = socketFactory,
+            parentScope = backgroundScope,
+        )
+        val connection = gateway.connect()
+        val refText = connection.attachFile(
+            runtimeSessionId = RuntimeSessionId("runtime-1"),
+            filename = "report.txt",
+            mimeType = "text/plain",
+            base64Content = "aGVsbG8=",
+        )
+
+        assertEquals("@file:.hermes/desktop-attachments/report.txt", refText)
+        val request = Json.parseToJsonElement(socket.sentFrames.single()).jsonObject
+        assertEquals("file.attach", request["method"]!!.jsonPrimitive.content)
+        val params = request["params"]!!.jsonObject
+        assertEquals("runtime-1", params["session_id"]!!.jsonPrimitive.content)
+        assertEquals("report.txt", params["name"]!!.jsonPrimitive.content)
+        assertEquals("report.txt", params["path"]!!.jsonPrimitive.content)
+        assertEquals("data:text/plain;base64,aGVsbG8=", params["data_url"]!!.jsonPrimitive.content)
+
+        connection.close()
+    }
+
+    @Test
+    fun fileAttachWithoutRefTextFailsClosed() = runTest {
+        val ticketClient = RecordingTicketClient("ticket-1")
+        val socket = ScriptedSocket()
+        val socketFactory = RecordingSocketFactory(socket)
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "file.attach") {
+                socket.offer(
+                    """{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{"attached":true}}""",
+                )
+            }
+        }
+
+        val gateway = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = ticketClient,
+            socketFactory = socketFactory,
+            parentScope = backgroundScope,
+        )
+        val connection = gateway.connect()
+
+        val error = runCatching {
+            connection.attachFile(
+                runtimeSessionId = RuntimeSessionId("runtime-1"),
+                filename = "report.txt",
+                mimeType = "text/plain",
+                base64Content = "aGVsbG8=",
+            )
+        }.exceptionOrNull()
+        assertTrue(error is HermesChatProtocolException)
+
+        connection.close()
+    }
+
+    @Test
+    fun stagesImageAttachmentViaAttachBytes() = runTest {
+        val ticketClient = RecordingTicketClient("ticket-1")
+        val socket = ScriptedSocket()
+        val socketFactory = RecordingSocketFactory(socket)
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "image.attach_bytes") {
+                socket.offer(
+                    """
+                    {"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{
+                      "attached": true, "path": "/images/upload_1.png", "count": 1,
+                      "text": "[User attached image: upload_1.png]", "bytes": 7
+                    }}
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val gateway = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = ticketClient,
+            socketFactory = socketFactory,
+            parentScope = backgroundScope,
+        )
+        val connection = gateway.connect()
+        connection.attachImage(
+            runtimeSessionId = RuntimeSessionId("runtime-1"),
+            filename = "photo.png",
+            base64Content = "aGVsbG8=",
+        )
+
+        val request = Json.parseToJsonElement(socket.sentFrames.single()).jsonObject
+        assertEquals("image.attach_bytes", request["method"]!!.jsonPrimitive.content)
+        val params = request["params"]!!.jsonObject
+        assertEquals("runtime-1", params["session_id"]!!.jsonPrimitive.content)
+        assertEquals("photo.png", params["filename"]!!.jsonPrimitive.content)
+        assertEquals("aGVsbG8=", params["content_base64"]!!.jsonPrimitive.content)
+
+        connection.close()
+    }
 }
 
 private class RecordingTicketClient(private val ticket: String) : WsTicketClient {

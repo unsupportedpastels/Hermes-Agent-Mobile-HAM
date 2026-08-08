@@ -4,7 +4,15 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.unsupportedpastels.hermesandroid.app.ComposerAttachment
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
+import com.unsupportedpastels.hermesandroid.app.SessionSummary
+import com.unsupportedpastels.hermesandroid.attachment.AttachmentAddResult
+import com.unsupportedpastels.hermesandroid.attachment.AttachmentByteReader
+import com.unsupportedpastels.hermesandroid.attachment.AttachmentPolicy
+import com.unsupportedpastels.hermesandroid.attachment.AttachmentReadException
+import com.unsupportedpastels.hermesandroid.attachment.AttachmentStager
+import com.unsupportedpastels.hermesandroid.attachment.ContentAttachmentByteReader
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
@@ -12,6 +20,7 @@ import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatConnector
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatEvent
+import com.unsupportedpastels.hermesandroid.gateway.HermesChatException
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatGateway
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatSession
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatTransportException
@@ -38,6 +47,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -79,6 +89,8 @@ class HermesConnectionViewModel(
     private val refreshClient: NativeRefreshClient? = null,
     private val chatConnector: HermesChatConnector? = null,
     private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1_000L },
+    private val attachmentReader: AttachmentByteReader =
+        AttachmentByteReader { throw AttachmentReadException("Attachment reading is not available") },
 ) : ViewModel() {
     private val mutableSnapshots = MutableStateFlow(HermesGatewaySnapshot())
     val snapshots: StateFlow<HermesGatewaySnapshot> = mutableSnapshots.asStateFlow()
@@ -103,6 +115,19 @@ class HermesConnectionViewModel(
     private var slashCompletionJob: Job? = null
     private var slashCompletionGeneration = 0L
 
+    /** Composer attachments staged per session; uploaded to the host at send time. */
+    private val mutableAttachments =
+        MutableStateFlow<Map<DurableSessionId, List<ComposerAttachment>>>(emptyMap())
+    val attachments: StateFlow<Map<DurableSessionId, List<ComposerAttachment>>> =
+        mutableAttachments.asStateFlow()
+
+    /** Maps local draft IDs to the canonical durable IDs returned by session.create. */
+    private val serverDurableIds = mutableMapOf<DurableSessionId, DurableSessionId>()
+
+    /** Locally created chat drafts not yet persisted server-side (no durable row). */
+    private val pendingDraftSessions = mutableSetOf<DurableSessionId>()
+    private var draftCounter = 0L
+
     init {
         viewModelScope.launch {
             settingsStates.collect { settingsState ->
@@ -114,6 +139,8 @@ class HermesConnectionViewModel(
                 chatJob = null
                 disconnectChat()
                 chatRecoveryState = null
+                serverDurableIds.clear()
+                mutableAttachments.value = emptyMap()
                 activeTokens = null
                 activeOrigin = (settingsState as? ServerSettingsState.Ready)?.serverOrigin
                 when (settingsState) {
@@ -262,7 +289,110 @@ class HermesConnectionViewModel(
         return job
     }
 
+    /**
+     * Adds a local "New chat" draft to the session list. No runtime is created until
+     * the draft is opened, and the durable row is persisted server-side lazily on the
+     * first prompt — matching the gateway's session.create contract.
+     */
+    fun createNewSession(title: String = "New chat"): DurableSessionId {
+        val draftId = DurableSessionId("draft-${++draftCounter}")
+        pendingDraftSessions += draftId
+        val snapshot = mutableSnapshots.value
+        mutableSnapshots.value = snapshot.copy(
+            durableSessions = listOf(SessionSummary(draftId, title)) + snapshot.durableSessions,
+        )
+        return draftId
+    }
+
+    /**
+     * Stage new picker results into the composer, enforcing count/size caps at
+     * metadata time. Accepted attachments are published for the chip row; rejected
+     * ones are returned as reasons so the UI can surface them.
+     */
+    fun addAttachments(
+        durableSessionId: DurableSessionId,
+        candidates: List<ComposerAttachment>,
+    ): List<String> {
+        val current = mutableAttachments.value[durableSessionId].orEmpty()
+        val accepted = mutableListOf<ComposerAttachment>()
+        val rejected = mutableListOf<String>()
+        for (candidate in candidates) {
+            val safeCandidate = candidate.copy(
+                displayName = AttachmentPolicy.sanitizeDisplayName(candidate.displayName),
+            )
+            when (val result = AttachmentPolicy.checkAdd(current + accepted, safeCandidate)) {
+                is AttachmentAddResult.Accepted -> accepted += safeCandidate
+                is AttachmentAddResult.Rejected -> rejected += result.reason
+            }
+        }
+        if (accepted.isNotEmpty()) {
+            mutableAttachments.value = mutableAttachments.value + (durableSessionId to current + accepted)
+        }
+        return rejected
+    }
+
+    fun removeAttachment(durableSessionId: DurableSessionId, attachmentId: String) {
+        val updated = mutableAttachments.value[durableSessionId].orEmpty().filterNot { it.id == attachmentId }
+        mutableAttachments.value = if (updated.isEmpty()) {
+            mutableAttachments.value - durableSessionId
+        } else {
+            mutableAttachments.value + (durableSessionId to updated)
+        }
+    }
+
+    private fun clearAttachments(durableSessionId: DurableSessionId) {
+        if (mutableAttachments.value.containsKey(durableSessionId)) {
+            mutableAttachments.value = mutableAttachments.value - durableSessionId
+        }
+    }
+
+    private fun openDraftSession(durableSessionId: DurableSessionId): Job {
+        val operationGeneration = ++chatOperationGeneration
+        chatJob?.cancel()
+        clearTransientChatStates()
+        val job = viewModelScope.launch {
+            val origin = activeOrigin ?: return@launch
+            val originGeneration = generation
+            if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
+            disconnectChat()
+            updateChat(durableSessionId) {
+                it.copy(messages = emptyList(), isLoading = false, error = null)
+            }
+            if (mutableSnapshots.value.authenticationState != AuthenticationState.Authenticated) {
+                return@launch
+            }
+            try {
+                val accessToken = accessTokenForRequest(origin, originGeneration) ?: return@launch
+                if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
+                chatRecoveryState = ChatRecoveryState(operationGeneration)
+                ensureLiveSession(
+                    origin = origin,
+                    originGeneration = originGeneration,
+                    operationGeneration = operationGeneration,
+                    accessToken = accessToken,
+                    durableSessionId = durableSessionId,
+                    closeWhenIdle = false,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
+                updateChat(durableSessionId) {
+                    it.copy(
+                        error = error.message?.take(120)
+                            ?: "Could not create session (${error.javaClass.simpleName})",
+                    )
+                }
+            }
+        }
+        chatJob = job
+        return job
+    }
+
     fun openSession(durableSessionId: DurableSessionId): Job {
+        if (durableSessionId in pendingDraftSessions) {
+            return openDraftSession(durableSessionId)
+        }
         val operationGeneration = ++chatOperationGeneration
         chatJob?.cancel()
         clearTransientChatStates()
@@ -275,7 +405,11 @@ class HermesConnectionViewModel(
             try {
                 val accessToken = accessTokenForRequest(origin, originGeneration)
                 if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
-                val messages = client.loadTranscript(origin, accessToken, durableSessionId)
+                val messages = client.loadTranscript(
+                    origin,
+                    accessToken,
+                    serverDurableId(durableSessionId),
+                )
                 if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
                 updateChat(durableSessionId) {
                     it.copy(messages = messages, isLoading = false, error = null)
@@ -323,7 +457,8 @@ class HermesConnectionViewModel(
 
     fun sendMessage(durableSessionId: DurableSessionId, rawText: String): Job {
         val text = rawText.trim()
-        if (text.isEmpty()) return viewModelScope.launch { }
+        val hasAttachments = mutableAttachments.value[durableSessionId].orEmpty().isNotEmpty()
+        if (text.isEmpty() && !hasAttachments) return viewModelScope.launch { }
         val operationGeneration = ++chatOperationGeneration
         chatJob?.cancel()
         clearTransientChatStates()
@@ -332,6 +467,7 @@ class HermesConnectionViewModel(
             val originGeneration = generation
             if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
             var promptStaged = false
+            var stagingFailed = false
             try {
                 val accessToken = accessTokenForRequest(origin, originGeneration)
                     ?: throw HermesConnectionException("Sign in is required to send messages")
@@ -346,6 +482,28 @@ class HermesConnectionViewModel(
                 val runtimeId = checkNotNull(activeRuntimeSessionId)
                 if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
 
+                // Stage attachments on the host BEFORE the optimistic bubble: bytes
+                // live on this device, so nothing can be sent without uploading
+                // them first, and chips must survive a staging failure.
+                val pendingAttachments = mutableAttachments.value[durableSessionId].orEmpty()
+                var submittedText = text
+                if (pendingAttachments.isNotEmpty()) {
+                    try {
+                        val staged = AttachmentStager(session, runtimeId, attachmentReader)
+                            .stage(pendingAttachments)
+                        submittedText = AttachmentPolicy.composePromptText(
+                            typedText = text,
+                            fileRefs = staged.refTexts,
+                            attachedNames = staged.names,
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        stagingFailed = true
+                        throw error
+                    }
+                }
+
                 updateChat(durableSessionId) { current ->
                     current.copy(
                         messages = current.messages +
@@ -358,7 +516,8 @@ class HermesConnectionViewModel(
                 }
                 promptStaged = true
                 yield()
-                session.submitPrompt(runtimeId, text)
+                session.submitPrompt(runtimeId, submittedText)
+                if (pendingAttachments.isNotEmpty()) clearAttachments(durableSessionId)
             } catch (cancelled: CancellationException) {
                 if (isCurrentChatOperation(origin, originGeneration, operationGeneration)) {
                     clearSendingState(durableSessionId)
@@ -371,6 +530,29 @@ class HermesConnectionViewModel(
                 }
             } catch (error: Exception) {
                 if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
+                if (stagingFailed) {
+                    // Nothing was submitted; the draft stays editable with its chips.
+                    // A fresh draft runtime may hold partially staged orphaned files,
+                    // so drop it — the next send creates a clean runtime.
+                    if (durableSessionId in pendingDraftSessions || error is HermesChatException) {
+                        detachFailedRuntime()
+                    }
+                    clearSendingState(durableSessionId)
+                    updateChat(durableSessionId) { current ->
+                        current.copy(
+                            error = error.message?.take(160) ?: "Could not attach files",
+                        )
+                    }
+                    return@launch
+                }
+                if (
+                    promptStaged &&
+                    hasAttachments &&
+                    error is HermesChatException &&
+                    error !is HermesChatTransportException
+                ) {
+                    detachFailedRuntime()
+                }
                 if (promptStaged && error is HermesChatTransportException) {
                     val recoveryAttempt = startChatRecovery(operationGeneration)
                     if (recoveryAttempt != null) {
@@ -461,6 +643,9 @@ class HermesConnectionViewModel(
         mutableSlashCompletions.value = mutableSlashCompletions.value - durableSessionId
     }
 
+    private fun serverDurableId(localId: DurableSessionId): DurableSessionId =
+        serverDurableIds[localId] ?: localId
+
     private fun clearAllSlashCompletions() {
         slashCompletionGeneration += 1
         slashCompletionJob?.cancel()
@@ -496,7 +681,14 @@ class HermesConnectionViewModel(
         }
         val session = connector.connect(origin, accessToken)
         try {
-            val resumed = session.resume(durableSessionId, profile = "default")
+            val resumed = if (durableSessionId in pendingDraftSessions) {
+                session.createSession(durableSessionId, profile = "default")
+            } else {
+                session.resume(serverDurableId(durableSessionId), profile = "default")
+            }
+            resumed.durableSessionId
+                ?.takeIf { it != durableSessionId }
+                ?.let { serverDurableIds[durableSessionId] = it }
             if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) {
                 throw CancellationException("Chat operation was replaced")
             }
@@ -520,6 +712,40 @@ class HermesConnectionViewModel(
         } catch (error: Throwable) {
             runCatching { session.close() }
             throw error
+        }
+    }
+
+    /**
+     * After a draft's first turn completes, the server has persisted its durable row;
+     * reload the transcript (server title/messages) so the local draft converges with
+     * the durable session list.
+     */
+    private fun refreshSessionsAfterFirstTurn(
+        durableSessionId: DurableSessionId,
+        origin: ServerOrigin,
+        originGeneration: Long,
+        operationGeneration: Long,
+    ) {
+        viewModelScope.launch {
+            val accessToken = try {
+                accessTokenForRequest(origin, originGeneration)
+            } catch (_: Exception) {
+                null
+            } ?: return@launch
+            if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
+            val messages = try {
+                client.loadTranscript(origin, accessToken, serverDurableId(durableSessionId))
+            } catch (_: Exception) {
+                return@launch
+            }
+            if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) return@launch
+            updateChat(durableSessionId) { current ->
+                if (current.messages.isEmpty()) {
+                    current.copy(messages = messages)
+                } else {
+                    current
+                }
+            }
         }
     }
 
@@ -560,6 +786,17 @@ class HermesConnectionViewModel(
                         updateChat(durableSessionId) {
                             it.copy(isSending = false, error = terminalError)
                         }
+                        if (durableSessionId in pendingDraftSessions) {
+                            // The gateway persists the durable row on the first prompt;
+                            // the completed first turn means it now exists server-side.
+                            pendingDraftSessions -= durableSessionId
+                            refreshSessionsAfterFirstTurn(
+                                durableSessionId,
+                                origin,
+                                originGeneration,
+                                operationGeneration,
+                            )
+                        }
                     }
                     is HermesChatEvent.Error -> {
                         updateAssistant(durableSessionId, streaming = false) { current -> current }
@@ -568,6 +805,11 @@ class HermesConnectionViewModel(
                         }
                     }
                 }
+            }
+            if (activeChatSession === session) {
+                activeChatSession = null
+                activeChatDurableId = null
+                activeRuntimeSessionId = null
             }
             if (
                 isCurrentChatOperation(origin, originGeneration, operationGeneration) &&
@@ -642,7 +884,10 @@ class HermesConnectionViewModel(
                     candidate.close()
                     return
                 }
-                val resumed = candidate.resume(durableSessionId, profile = "default")
+                val resumed = candidate.resume(
+                    serverDurableId(durableSessionId),
+                    profile = "default",
+                )
                 if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) {
                     candidate.close()
                     return
@@ -662,7 +907,11 @@ class HermesConnectionViewModel(
                         operationGeneration,
                     )
                 } else {
-                    val messages = client.loadTranscript(origin, token, durableSessionId)
+                    val messages = client.loadTranscript(
+                        origin,
+                        token,
+                        serverDurableId(durableSessionId),
+                    )
                     if (!isCurrentChatOperation(origin, originGeneration, operationGeneration)) {
                         candidate.close()
                         return
@@ -904,6 +1153,21 @@ class HermesConnectionViewModel(
         )
     }
 
+    private fun detachFailedRuntime() {
+        clearAllSlashCompletions()
+        eventJob?.cancel()
+        eventJob = null
+        val failedSession = activeChatSession
+        activeChatSession = null
+        activeChatDurableId = null
+        activeRuntimeSessionId = null
+        if (failedSession != null) {
+            viewModelScope.launch {
+                withTimeoutOrNull(1_500) { failedSession.close() }
+            }
+        }
+    }
+
     private suspend fun disconnectChat() {
         clearAllSlashCompletions()
         eventJob?.cancel()
@@ -959,6 +1223,7 @@ class HermesConnectionViewModel(
                 configureHermesHttpClient()
                 install(WebSockets) {
                     maxFrameSize = HERMES_CHAT_MAX_FRAME_BYTES.toLong()
+                    pingIntervalMillis = 30_000L
                 }
             }
             val connector = HermesChatConnector { origin, accessToken ->
@@ -977,6 +1242,7 @@ class HermesConnectionViewModel(
                 tokenStore = EncryptedNativeTokenStore(context),
                 refreshClient = HttpHermesNativeRefreshClient(httpClient),
                 chatConnector = connector,
+                attachmentReader = ContentAttachmentByteReader(context),
             ) as T
         }
     }

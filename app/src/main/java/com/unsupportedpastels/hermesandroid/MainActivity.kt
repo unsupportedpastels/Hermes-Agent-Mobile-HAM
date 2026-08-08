@@ -12,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.net.toUri
+import com.unsupportedpastels.hermesandroid.app.ComposerAttachment
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.connection.HermesConnectionViewModel
 import com.unsupportedpastels.hermesandroid.connection.HermesWindowFocus
@@ -80,6 +81,9 @@ internal fun HermesAppHost(
     val slashCompletionsFlow = connectionViewModel?.slashCompletions
         ?: remember { MutableStateFlow(emptyMap<DurableSessionId, SlashCompletionState>()) }
     val slashCompletions by slashCompletionsFlow.collectAsStateWithLifecycle()
+    val attachmentsFlow = connectionViewModel?.attachments
+        ?: remember { MutableStateFlow(emptyMap<DurableSessionId, List<ComposerAttachment>>()) }
+    val attachments by attachmentsFlow.collectAsStateWithLifecycle()
 
     HermesApp(
         snapshot = snapshot,
@@ -88,7 +92,15 @@ internal fun HermesAppHost(
         onSignIn = onSignIn,
         onOpenSession = onOpenSession,
         onSendMessage = onSendMessage,
+        onCreateSession = { connectionViewModel?.createNewSession() },
         slashCompletions = slashCompletions,
+        attachments = attachments,
+        onAddAttachments = { sessionId, candidates ->
+            connectionViewModel?.addAttachments(sessionId, candidates).orEmpty()
+        },
+        onRemoveAttachment = { sessionId, attachmentId ->
+            connectionViewModel?.removeAttachment(sessionId, attachmentId)
+        },
         onSlashCompletionRequested = { sessionId, text ->
             connectionViewModel?.updateSlashCompletion(sessionId, text)
         },

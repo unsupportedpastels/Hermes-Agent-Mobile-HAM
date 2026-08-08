@@ -38,7 +38,10 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-internal const val HERMES_CHAT_MAX_FRAME_BYTES = 1024 * 1024
+// Latest unchanged Hermes Serve raises uvicorn's attachment WebSocket ceiling to
+// 384 MiB (desktop backend contract v5). Android remains deliberately far lower:
+// enough for a 24 MiB image after base64/JSON expansion, but bounded for memory.
+internal const val HERMES_CHAT_MAX_FRAME_BYTES = 36 * 1024 * 1024
 private const val MAX_CONFIGURED_FRAME_BYTES = HERMES_CHAT_MAX_FRAME_BYTES
 private const val DEFAULT_MAX_FRAME_BYTES = MAX_CONFIGURED_FRAME_BYTES
 private const val MAX_TICKET_RESPONSE_BYTES = 16 * 1024
@@ -161,10 +164,38 @@ interface HermesChatSession {
         profile: String? = null,
     ): ResumedChatSession
 
+    /**
+     * Creates a fresh runtime (gateway `session.create`). The server persists the
+     * durable row lazily on the first prompt; [durableSessionId] is the client-side
+     * draft identity used until that row exists.
+     */
+    suspend fun createSession(
+        durableSessionId: DurableSessionId,
+        profile: String? = null,
+    ): ResumedChatSession = throw HermesChatProtocolException("Session creation is not available")
+
     suspend fun submitPrompt(
         runtimeSessionId: RuntimeSessionId,
         text: String,
     ): PromptSubmission
+
+    /**
+     * Stage a non-image file on the remote host via `file.attach` and return its
+     * `@file:` ref text to prepend to the submitted prompt.
+     */
+    suspend fun attachFile(
+        runtimeSessionId: RuntimeSessionId,
+        filename: String,
+        mimeType: String,
+        base64Content: String,
+    ): String = throw HermesChatProtocolException("File attachment is not available")
+
+    /** Stage an image on the remote host via `image.attach_bytes`; it rides the next prompt. */
+    suspend fun attachImage(
+        runtimeSessionId: RuntimeSessionId,
+        filename: String,
+        base64Content: String,
+    ): Unit = throw HermesChatProtocolException("Image attachment is not available")
 
     /** Live slash-command completion from the connected host; never a static local list. */
     suspend fun completeSlash(text: String): SlashCompletionResult =
@@ -260,6 +291,62 @@ class HermesChatConnection internal constructor(
         val status = result.stringValue("status")
             ?: throw HermesChatProtocolException("Prompt response was incomplete")
         return PromptSubmission(status)
+    }
+
+    override suspend fun createSession(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ): ResumedChatSession {
+        val params = buildJsonObject {
+            put("close_on_disconnect", false)
+            profile?.let { put("profile", it) }
+        }
+        val result = request("session.create", params)
+        val runtimeSessionId = result.stringValue("session_id")?.let {
+            runCatching { RuntimeSessionId(it) }.getOrNull()
+        } ?: throw HermesChatProtocolException("Create response was incomplete")
+        val stored = result.stringValue("stored_session_id")
+            ?.takeIf(String::isNotBlank)
+            ?.let(::DurableSessionId)
+        return ResumedChatSession(
+            runtimeSessionId = runtimeSessionId,
+            durableSessionId = stored ?: durableSessionId,
+            resumed = false,
+            messages = emptyList(),
+            running = false,
+            inflight = null,
+        )
+    }
+
+    override suspend fun attachFile(
+        runtimeSessionId: RuntimeSessionId,
+        filename: String,
+        mimeType: String,
+        base64Content: String,
+    ): String {
+        val params = buildJsonObject {
+            put("session_id", runtimeSessionId.value)
+            put("path", filename)
+            put("name", filename)
+            put("data_url", "data:$mimeType;base64,$base64Content")
+        }
+        val result = request("file.attach", params)
+        return result.stringValue("ref_text")
+            ?.takeIf(String::isNotBlank)
+            ?: throw HermesChatProtocolException("File attach response was incomplete")
+    }
+
+    override suspend fun attachImage(
+        runtimeSessionId: RuntimeSessionId,
+        filename: String,
+        base64Content: String,
+    ) {
+        val params = buildJsonObject {
+            put("session_id", runtimeSessionId.value)
+            put("filename", filename)
+            put("content_base64", base64Content)
+        }
+        request("image.attach_bytes", params)
     }
 
     override suspend fun completeSlash(text: String): SlashCompletionResult {
