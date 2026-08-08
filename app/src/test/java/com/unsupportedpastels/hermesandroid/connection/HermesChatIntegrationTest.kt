@@ -14,6 +14,8 @@ import com.unsupportedpastels.hermesandroid.gateway.InflightPrompt
 import com.unsupportedpastels.hermesandroid.gateway.PromptSubmission
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
+import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
+import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -190,6 +192,95 @@ class HermesChatIntegrationTest {
         assertFalse(chat.isSending)
         assertFalse(chat.messages.last().isStreaming)
         assertEquals("temporary failure", chat.error)
+    }
+
+    @Test
+    fun slashCompletionPublishesItemsForSlashComposerText() = runTest(dispatcher) {
+        val session = CompletableSlashChatSession(
+            result = SlashCompletionResult(
+                items = listOf(SlashCompletionItem("goal", "/goal", "Set a standing goal")),
+                replaceFrom = 1,
+            ),
+        )
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        viewModel.updateSlashCompletion(durableId, "/go")
+        advanceUntilIdle()
+
+        assertEquals(listOf("/go"), session.completionRequests)
+        val state = viewModel.slashCompletions.value[durableId]
+        assertEquals("/go", state?.composerText)
+        assertEquals(1, state?.replaceFrom)
+        assertEquals(listOf("/goal"), state?.items?.map { it.display })
+    }
+
+    @Test
+    fun slashCompletionIgnoresNonSlashComposerText() = runTest(dispatcher) {
+        val session = CompletableSlashChatSession(
+            result = SlashCompletionResult(emptyList(), 0),
+        )
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        viewModel.updateSlashCompletion(durableId, "/home/user/file")
+        viewModel.updateSlashCompletion(durableId, "hello")
+        advanceUntilIdle()
+
+        assertTrue(session.completionRequests.isEmpty())
+        assertNull(viewModel.slashCompletions.value[durableId])
+    }
+
+    @Test
+    fun staleSlashCompletionResultIsDiscardedAfterTextChanges() = runTest(dispatcher) {
+        val session = CompletableSlashChatSession(
+            result = SlashCompletionResult(
+                items = listOf(SlashCompletionItem("goal", "/goal", null)),
+                replaceFrom = 1,
+            ),
+        )
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        viewModel.updateSlashCompletion(durableId, "/go")
+        runCurrent()
+        // Composer moves on before the response lands; the stale result must not publish.
+        viewModel.updateSlashCompletion(durableId, "/goa")
+        advanceUntilIdle()
+
+        val state = viewModel.slashCompletions.value[durableId]
+        assertTrue(state == null || state.composerText == "/goa")
+    }
+
+    @Test
+    fun switchingSessionsClearsSlashCompletion() = runTest(dispatcher) {
+        val session = CompletableSlashChatSession(
+            result = SlashCompletionResult(
+                items = listOf(SlashCompletionItem("goal", "/goal", null)),
+                replaceFrom = 1,
+            ),
+        )
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        viewModel.updateSlashCompletion(durableId, "/go")
+        advanceUntilIdle()
+        assertTrue(viewModel.slashCompletions.value.containsKey(durableId))
+
+        viewModel.clearSlashCompletion(durableId)
+        advanceUntilIdle()
+        assertNull(viewModel.slashCompletions.value[durableId])
     }
 
     private fun chatViewModel(session: HermesChatSession) = HermesConnectionViewModel(
@@ -1036,6 +1127,38 @@ private class TerminalEventChatSession(
         mutableEvents.emit(HermesChatEvent.MessageDelta(runtimeSessionId, "partial"))
         mutableEvents.emit(terminalEvent(runtimeSessionId))
         return PromptSubmission("streaming")
+    }
+
+    override suspend fun close() = Unit
+}
+
+private class CompletableSlashChatSession(
+    private val result: SlashCompletionResult,
+) : HermesChatSession {
+    private val channel = Channel<HermesChatEvent>(Channel.UNLIMITED)
+    override val events: Flow<HermesChatEvent> = channel.receiveAsFlow()
+    val completionRequests = mutableListOf<String>()
+
+    override suspend fun resume(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ) = ResumedChatSession(
+        runtimeSessionId = RuntimeSessionId("runtime-slash"),
+        durableSessionId = durableSessionId,
+        resumed = true,
+        messages = emptyList(),
+        running = true,
+        inflight = null,
+    )
+
+    override suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+    ) = PromptSubmission("streaming")
+
+    override suspend fun completeSlash(text: String): SlashCompletionResult {
+        completionRequests += text
+        return result
     }
 
     override suspend fun close() = Unit

@@ -9,16 +9,19 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.net.toUri
-import com.unsupportedpastels.hermesandroid.connection.HermesConnectionViewModel
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
+import com.unsupportedpastels.hermesandroid.connection.HermesConnectionViewModel
 import com.unsupportedpastels.hermesandroid.connection.HermesWindowFocus
-import com.unsupportedpastels.hermesandroid.connection.launchBrowserAndAwaitReturn
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsViewModel
+import com.unsupportedpastels.hermesandroid.connection.launchBrowserAndAwaitReturn
+import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.ui.HermesApp
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
     private val serverSettingsViewModel by viewModels<ServerSettingsViewModel> {
@@ -40,6 +43,7 @@ class MainActivity : ComponentActivity() {
                 val snapshot by connectionViewModel.snapshots.collectAsStateWithLifecycle()
                 HermesAppHost(
                     viewModel = serverSettingsViewModel,
+                    connectionViewModel = connectionViewModel,
                     snapshot = snapshot,
                     onSignIn = {
                         connectionViewModel.signIn { authorizationUrl ->
@@ -66,12 +70,16 @@ class MainActivity : ComponentActivity() {
 @Composable
 internal fun HermesAppHost(
     viewModel: ServerSettingsViewModel,
+    connectionViewModel: HermesConnectionViewModel? = null,
     snapshot: HermesGatewaySnapshot,
     onSignIn: () -> Unit = {},
     onOpenSession: (DurableSessionId) -> Unit = {},
     onSendMessage: (DurableSessionId, String) -> Unit = { _, _ -> },
 ) {
     val serverSettingsState by viewModel.states.collectAsStateWithLifecycle()
+    val slashCompletionsFlow = connectionViewModel?.slashCompletions
+        ?: remember { MutableStateFlow(emptyMap<DurableSessionId, SlashCompletionState>()) }
+    val slashCompletions by slashCompletionsFlow.collectAsStateWithLifecycle()
 
     HermesApp(
         snapshot = snapshot,
@@ -80,5 +88,9 @@ internal fun HermesAppHost(
         onSignIn = onSignIn,
         onOpenSession = onOpenSession,
         onSendMessage = onSendMessage,
+        slashCompletions = slashCompletions,
+        onSlashCompletionRequested = { sessionId, text ->
+            connectionViewModel?.updateSlashCompletion(sessionId, text)
+        },
     )
 }

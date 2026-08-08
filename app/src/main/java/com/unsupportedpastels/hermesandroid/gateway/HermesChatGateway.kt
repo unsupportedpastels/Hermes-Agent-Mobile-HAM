@@ -106,6 +106,23 @@ data class PromptSubmission(
     val status: String,
 )
 
+/**
+ * One row of a `complete.slash` result. [text] is inserted into the composer;
+ * [display] and [meta] are presentation only. Defined here (not in the UI layer)
+ * so the chat transport owns its own result type.
+ */
+data class SlashCompletionItem(
+    val text: String,
+    val display: String = "/$text",
+    val meta: String? = null,
+)
+
+/** Tolerantly parsed `complete.slash` JSON-RPC result. */
+data class SlashCompletionResult(
+    val items: List<SlashCompletionItem>,
+    val replaceFrom: Int,
+)
+
 sealed interface HermesChatEvent {
     val sessionId: RuntimeSessionId
 
@@ -148,6 +165,10 @@ interface HermesChatSession {
         runtimeSessionId: RuntimeSessionId,
         text: String,
     ): PromptSubmission
+
+    /** Live slash-command completion from the connected host; never a static local list. */
+    suspend fun completeSlash(text: String): SlashCompletionResult =
+        throw HermesChatProtocolException("Slash completion is not available")
 
     suspend fun close()
 }
@@ -239,6 +260,25 @@ class HermesChatConnection internal constructor(
         val status = result.stringValue("status")
             ?: throw HermesChatProtocolException("Prompt response was incomplete")
         return PromptSubmission(status)
+    }
+
+    override suspend fun completeSlash(text: String): SlashCompletionResult {
+        val params = buildJsonObject { put("text", text) }
+        val result = request("complete.slash", params)
+        val rawItems = result["items"] as? JsonArray
+        val items = rawItems.orEmpty().mapNotNull { element ->
+            val row = element as? JsonObject ?: return@mapNotNull null
+            val itemText = row.stringValue("text")
+                ?.takeIf(String::isNotBlank)
+                ?: return@mapNotNull null
+            val display = row.stringValue("display")
+                ?.takeIf(String::isNotBlank)
+                ?: "/$itemText"
+            val meta = row.stringValue("meta")?.takeIf(String::isNotBlank)
+            SlashCompletionItem(text = itemText, display = display, meta = meta)
+        }
+        val replaceFrom = result.longValue("replace_from")?.toInt() ?: 0
+        return SlashCompletionResult(items = items, replaceFrom = replaceFrom)
     }
 
     override suspend fun close() {

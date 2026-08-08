@@ -57,11 +57,13 @@ import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
+import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
+import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionListRoute
 import com.unsupportedpastels.hermesandroid.navigation.ServerSettingsRoute
@@ -91,6 +93,8 @@ fun HermesApp(
     onSignIn: () -> Unit = {},
     onOpenSession: (DurableSessionId) -> Unit = {},
     onSendMessage: (DurableSessionId, String) -> Unit = { _, _ -> },
+    slashCompletions: Map<DurableSessionId, SlashCompletionState> = emptyMap(),
+    onSlashCompletionRequested: (DurableSessionId, String) -> Unit = { _, _ -> },
 ) {
     val sessions = snapshot.durableSessions
     val serverOrigin = (serverSettingsState as? ServerSettingsState.Ready)?.serverOrigin
@@ -171,9 +175,27 @@ fun HermesApp(
                         session = session,
                         chat = chat,
                         draft = drafts[draftKey].orEmpty(),
-                        onDraftChanged = { drafts[draftKey] = it },
+                        onDraftChanged = { updated ->
+                            drafts[draftKey] = updated
+                            onSlashCompletionRequested(session.id, updated)
+                        },
                         canSend = snapshot.authenticationState == AuthenticationState.Authenticated,
-                        onSend = { text -> onSendMessage(session.id, text) },
+                        onSend = { text ->
+                            onSlashCompletionRequested(session.id, "")
+                            onSendMessage(session.id, text)
+                        },
+                        slashCompletion = slashCompletions[session.id]?.takeIf {
+                            it.composerText == drafts[draftKey].orEmpty()
+                        },
+                        onSlashCompletionSelected = { completion, item ->
+                            val updated = applySlashCompletion(
+                                drafts[draftKey].orEmpty(),
+                                item,
+                                completion.replaceFrom,
+                            )
+                            drafts[draftKey] = updated
+                            onSlashCompletionRequested(session.id, updated)
+                        },
                         showBack = !supportsListDetail,
                         onBack = navigateBack,
                     )
@@ -440,6 +462,8 @@ private fun SessionDetailScreen(
     onDraftChanged: (String) -> Unit,
     canSend: Boolean,
     onSend: (String) -> Unit,
+    slashCompletion: SlashCompletionState? = null,
+    onSlashCompletionSelected: (SlashCompletionState, SlashCompletionItem) -> Unit = { _, _ -> },
     showBack: Boolean,
     onBack: () -> Unit,
 ) {
@@ -528,6 +552,12 @@ private fun SessionDetailScreen(
             }
             if (chat.isSending) {
                 Text("Hermes is responding…", style = MaterialTheme.typography.bodyMedium)
+            }
+            if (slashCompletion != null && slashCompletion.items.isNotEmpty()) {
+                SlashCompletionMenu(
+                    completion = slashCompletion,
+                    onItemSelected = { item -> onSlashCompletionSelected(slashCompletion, item) },
+                )
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),

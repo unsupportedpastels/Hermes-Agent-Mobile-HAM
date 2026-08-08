@@ -10,8 +10,10 @@ import com.android.tools.screenshot.PreviewTest
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
+import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
+import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 
 @Target(AnnotationTarget.FUNCTION)
@@ -87,6 +89,26 @@ fun HermesServerDialogScreenshot() {
             showBack = true,
             onBack = {},
             onSave = { Result.success(Unit) },
+        )
+    }
+}
+
+@PreviewTest
+@Preview(name = "Slash completion picker", widthDp = 400, heightDp = 500, showBackground = true)
+@Composable
+fun SlashCompletionMenuScreenshot() {
+    HermesAndroidTheme(darkTheme = false) {
+        SlashCompletionMenu(
+            completion = SlashCompletionState(
+                composerText = "/go",
+                items = listOf(
+                    SlashCompletionItem("goal", "/goal", "Set a standing goal for this session"),
+                    SlashCompletionItem("gol", "/gol"),
+                    SlashCompletionItem("goodbye", "/goodbye", "End the conversation"),
+                ),
+                replaceFrom = 1,
+            ),
+            onItemSelected = {},
         )
     }
 }

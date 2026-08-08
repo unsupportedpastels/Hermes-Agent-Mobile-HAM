@@ -21,6 +21,9 @@ import com.unsupportedpastels.hermesandroid.gateway.KtorChatWebSocketFactory
 import com.unsupportedpastels.hermesandroid.gateway.KtorWsTicketClient
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
+import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
+import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionResult
+import com.unsupportedpastels.hermesandroid.ui.isSlashCommandContext
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.websocket.WebSockets
@@ -42,6 +45,14 @@ import kotlinx.serialization.json.jsonPrimitive
 
 private const val TOKEN_REFRESH_SKEW_SECONDS = 30L
 private const val MAX_CHAT_RECOVERIES_PER_OPERATION = 2
+private const val SLASH_COMPLETION_DEBOUNCE_MS = 60L
+
+/** Published slash-completion menu state for one composer. */
+data class SlashCompletionState(
+    val composerText: String,
+    val items: List<SlashCompletionItem>,
+    val replaceFrom: Int,
+)
 
 private data class ActiveTokenRecord(
     val origin: ServerOrigin,
@@ -84,6 +95,13 @@ class HermesConnectionViewModel(
     private var activeChatDurableId: DurableSessionId? = null
     private var activeRuntimeSessionId: RuntimeSessionId? = null
     private var chatRecoveryState: ChatRecoveryState? = null
+
+    private val mutableSlashCompletions =
+        MutableStateFlow<Map<DurableSessionId, SlashCompletionState>>(emptyMap())
+    val slashCompletions: StateFlow<Map<DurableSessionId, SlashCompletionState>> =
+        mutableSlashCompletions.asStateFlow()
+    private var slashCompletionJob: Job? = null
+    private var slashCompletionGeneration = 0L
 
     init {
         viewModelScope.launch {
@@ -385,6 +403,68 @@ class HermesConnectionViewModel(
         }
         chatJob = job
         return job
+    }
+
+    /**
+     * Debounced live slash-command completion for the composer of [durableSessionId].
+     * Non-slash text clears the menu without a request. Results publish only when the
+     * request is still the latest for that composer; failures clear the menu silently.
+     * Completion requires the chat's live runtime (opened on first send/resume).
+     */
+    fun updateSlashCompletion(durableSessionId: DurableSessionId, text: String) {
+        val requestGeneration = ++slashCompletionGeneration
+        slashCompletionJob?.cancel()
+        if (!isSlashCommandContext(text)) {
+            mutableSlashCompletions.value = mutableSlashCompletions.value - durableSessionId
+            return
+        }
+        slashCompletionJob = viewModelScope.launch {
+            delay(SLASH_COMPLETION_DEBOUNCE_MS)
+            if (requestGeneration != slashCompletionGeneration) return@launch
+            val session = activeChatSession
+            if (session == null || activeChatDurableId != durableSessionId) {
+                if (requestGeneration == slashCompletionGeneration) {
+                    mutableSlashCompletions.value =
+                        mutableSlashCompletions.value - durableSessionId
+                }
+                return@launch
+            }
+            val result = try {
+                session.completeSlash(text)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (requestGeneration == slashCompletionGeneration) {
+                    mutableSlashCompletions.value =
+                        mutableSlashCompletions.value - durableSessionId
+                }
+                return@launch
+            }
+            if (requestGeneration != slashCompletionGeneration) return@launch
+            mutableSlashCompletions.value = if (result.items.isEmpty()) {
+                mutableSlashCompletions.value - durableSessionId
+            } else {
+                mutableSlashCompletions.value + (
+                    durableSessionId to SlashCompletionState(
+                        composerText = text,
+                        items = result.items,
+                        replaceFrom = result.replaceFrom,
+                    )
+                    )
+            }
+        }
+    }
+
+    fun clearSlashCompletion(durableSessionId: DurableSessionId) {
+        slashCompletionGeneration += 1
+        slashCompletionJob?.cancel()
+        mutableSlashCompletions.value = mutableSlashCompletions.value - durableSessionId
+    }
+
+    private fun clearAllSlashCompletions() {
+        slashCompletionGeneration += 1
+        slashCompletionJob?.cancel()
+        mutableSlashCompletions.value = emptyMap()
     }
 
     private suspend fun ensureLiveSession(
@@ -825,6 +905,7 @@ class HermesConnectionViewModel(
     }
 
     private suspend fun disconnectChat() {
+        clearAllSlashCompletions()
         eventJob?.cancel()
         eventJob = null
         activeChatSession?.close()

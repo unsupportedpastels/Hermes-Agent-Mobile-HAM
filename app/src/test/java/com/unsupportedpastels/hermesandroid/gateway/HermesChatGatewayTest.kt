@@ -88,6 +88,52 @@ class HermesChatGatewayTest {
     }
 
     @Test
+    fun requestsSlashCompletionAndParsesItems() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "complete.slash") {
+                socket.offer(
+                    """
+                    {"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{
+                      "items":[
+                        {"text":"goal","display":"/goal","meta":"Set a standing goal"},
+                        {"text":"help"},
+                        {"text":""},
+                        {"future":"row"}
+                      ],
+                      "replace_from":1,
+                      "unknown_field":true
+                    }}
+                    """.trimIndent(),
+                )
+            }
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        val result = connection.completeSlash("/go")
+
+        val request = Json.parseToJsonElement(socket.sentFrames.single()).jsonObject
+        assertEquals("complete.slash", request["method"]!!.jsonPrimitive.content)
+        assertEquals("/go", request["params"]!!.jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals(1, result.replaceFrom)
+        assertEquals(2, result.items.size)
+        assertEquals("goal", result.items[0].text)
+        assertEquals("/goal", result.items[0].display)
+        assertEquals("Set a standing goal", result.items[0].meta)
+        assertEquals("help", result.items[1].text)
+        assertEquals("/help", result.items[1].display)
+
+        connection.close()
+    }
+
+    @Test
     fun reportsJsonRpcErrorsWithoutParsingNullResult() = runTest {
         val socket = ScriptedSocket()
         socket.onSend = { frame ->
