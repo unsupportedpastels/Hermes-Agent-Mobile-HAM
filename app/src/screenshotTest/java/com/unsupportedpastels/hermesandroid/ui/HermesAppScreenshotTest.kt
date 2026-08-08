@@ -1,0 +1,75 @@
+package com.unsupportedpastels.hermesandroid.ui
+
+import android.content.res.Configuration
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
+import androidx.navigationevent.compose.rememberNavigationEventDispatcherOwner
+import com.android.tools.screenshot.PreviewTest
+import com.unsupportedpastels.hermesandroid.app.DurableSessionId
+import com.unsupportedpastels.hermesandroid.app.SessionSummary
+import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
+import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
+import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
+
+@Target(AnnotationTarget.FUNCTION)
+@Retention(AnnotationRetention.BINARY)
+@Preview(name = "Compact short", widthDp = 400, heightDp = 400, showBackground = true)
+@Preview(name = "Compact standard", widthDp = 400, heightDp = 500, showBackground = true)
+@Preview(name = "Compact tall", widthDp = 400, heightDp = 1000, showBackground = true)
+@Preview(name = "Medium short", widthDp = 610, heightDp = 400, showBackground = true)
+@Preview(name = "Medium standard", widthDp = 610, heightDp = 500, showBackground = true)
+@Preview(name = "Medium tall", widthDp = 610, heightDp = 1000, showBackground = true)
+@Preview(name = "Expanded short", widthDp = 900, heightDp = 400, showBackground = true)
+@Preview(name = "Expanded standard", widthDp = 900, heightDp = 500, showBackground = true)
+@Preview(name = "Expanded tall", widthDp = 900, heightDp = 1000, showBackground = true)
+annotation class AdaptiveWindowPreviews
+
+private val screenshotSessions = listOf(
+    SessionSummary(DurableSessionId("stored-1"), "Android client planning"),
+    SessionSummary(DurableSessionId("stored-2"), "Foldable UI review"),
+    SessionSummary(DurableSessionId("stored-3"), "Hermes protocol notes"),
+)
+private val screenshotSnapshot = HermesGatewaySnapshot(
+    connectionState = ConnectionState.Connected,
+    durableSessions = screenshotSessions,
+)
+
+@PreviewTest
+@AdaptiveWindowPreviews
+@Composable
+fun HermesAppAdaptiveScreenshot() {
+    ScreenshotNavigationHost {
+        HermesAndroidTheme(darkTheme = false) {
+            HermesApp(snapshot = screenshotSnapshot)
+        }
+    }
+}
+
+@PreviewTest
+@Preview(
+    name = "Compact dark large text",
+    widthDp = 400,
+    heightDp = 500,
+    fontScale = 1.5f,
+    uiMode = Configuration.UI_MODE_NIGHT_YES,
+    showBackground = true,
+)
+@Composable
+fun HermesAppAccessibilityScreenshot() {
+    ScreenshotNavigationHost {
+        HermesAndroidTheme(darkTheme = true) {
+            HermesApp(snapshot = screenshotSnapshot)
+        }
+    }
+}
+
+@Composable
+private fun ScreenshotNavigationHost(content: @Composable () -> Unit) {
+    val owner = rememberNavigationEventDispatcherOwner(parent = null)
+    CompositionLocalProvider(
+        LocalNavigationEventDispatcherOwner provides owner,
+        content = content,
+    )
+}

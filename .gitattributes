@@ -1,0 +1,3 @@
+# Preserve generated/vendor artifacts verbatim while keeping project sources strict.
+.agents/** whitespace=-trailing-space
+gradlew.bat -text -diff
