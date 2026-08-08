@@ -5,16 +5,16 @@
 | Requirement | Selected baseline |
 |---|---|
 | JDK | 17 |
-| Android Gradle Plugin | 9.3.1 |
+| Android Gradle Plugin | 9.3.1 (required for current AndroidX artifacts compiled against API 37) |
 | Gradle wrapper | 9.5.0 with pinned SHA-256 (AGP 9.3.1 supported baseline) |
 | Kotlin / Compose compiler plugin | 2.4.10 |
 | AndroidX Core | 1.19.0 |
 | Lifecycle / ViewModel | 2.11.0 |
-| Compile / target SDK | 37 |
+| Compile / target SDK | 37 / 36 (current AndroidX requires API 37 to compile; stable API 36 runtime behavior remains the target) |
 | Minimum SDK | 29 (working baseline; review before publication) |
 | Compose BOM | 2026.06.01 |
 | Navigation 3 | 1.1.5 |
-| Material 3 Adaptive Navigation 3 | 1.3.0-rc01 (required by the August 2026 official adaptive skill) |
+| Material 3 Adaptive Navigation 3 | 1.3.0-rc01 (no stable `adaptive-navigation3` release exists; required by the August 2026 official adaptive skill) |
 | Coroutines | 1.11.0 |
 | Kotlin serialization JSON | 1.11.0 |
 | Ktor client / OkHttp engine / WebSockets | 3.5.2 |

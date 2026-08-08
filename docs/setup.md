@@ -81,7 +81,7 @@ $ANDROID_HOME/emulator/emulator \
   -gpu swiftshader
 ```
 
-The API-37 Google APIs image installed during bootstrap currently crashes its system compositor in headless software-rendering mode. API 36 is therefore the verified runtime-test image; the app still compiles and targets API 37.
+The API-37 Google APIs image installed during bootstrap currently crashes its system compositor in headless software-rendering mode. Current AndroidX dependencies require API 37 at compile time, but API 36 remains the stable target and verified runtime-test image.
 
 ## Verification
 

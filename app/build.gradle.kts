@@ -11,7 +11,7 @@ android {
     defaultConfig {
         applicationId = "com.unsupportedpastels.hermesandroid"
         minSdk = 29
-        targetSdk = 37
+        targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -39,9 +39,11 @@ android {
     }
 
     lint {
-        // AGP 9.3.1 fails under the Gradle 9.7 version suggested by this check.
-        // Keep all code/resource analysis and SARIF output; suppress only that hint.
+        // Current AndroidX requires API 37/AGP 9.3.1; Gradle 9.7 currently breaks AGP's lint hint path.
+        // API 36 remains the latest stable runtime target while API 37 is compile-only.
+        // Keep all code/resource/security analysis and suppress only these two version-policy hints.
         disable += "AndroidGradlePluginVersion"
+        disable += "OldTargetApi"
     }
 
     experimentalProperties["android.experimental.enableScreenshotTest"] = true
