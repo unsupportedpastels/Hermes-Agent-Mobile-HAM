@@ -10,6 +10,8 @@ import io.ktor.http.Url
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URI
+import java.net.UnknownHostException
+import java.nio.channels.UnresolvedAddressException
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
@@ -129,6 +131,64 @@ class NativeOAuthTest {
         assertEquals("opaque-access", tokens.accessToken)
         assertEquals("opaque-refresh", tokens.refreshToken)
         assertEquals("nous", tokens.provider)
+    }
+
+    @Test
+    fun tokenExchangeRetriesTransientDnsResolutionBeforeSendingRequest() = runTest {
+        var attempts = 0
+        val engine = MockEngine {
+            attempts += 1
+            if (attempts < 3) throw UnknownHostException("temporary dns failure")
+            respond(
+                content = """{
+                    "access_token":"opaque-access",
+                    "refresh_token":"opaque-refresh",
+                    "expires_at":2000000000,
+                    "provider":"nous",
+                    "user_id":"user"
+                }""".trimIndent(),
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val client = HttpHermesNativeAuthClient(HttpClient(engine))
+
+        val tokens = client.exchange(
+            ServerOrigin.parse("https://hermes.example"),
+            code = "one-time-code",
+            verifier = "pkce-verifier",
+        )
+
+        assertEquals(3, attempts)
+        assertEquals("opaque-access", tokens.accessToken)
+    }
+
+    @Test
+    fun tokenExchangeRetriesCioUnresolvedAddressFailure() = runTest {
+        var attempts = 0
+        val engine = MockEngine {
+            attempts += 1
+            if (attempts == 1) throw UnresolvedAddressException()
+            respond(
+                content = """{
+                    "access_token":"opaque-access",
+                    "refresh_token":"opaque-refresh",
+                    "expires_at":2000000000,
+                    "provider":"nous",
+                    "user_id":"user"
+                }""".trimIndent(),
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val client = HttpHermesNativeAuthClient(HttpClient(engine))
+
+        val tokens = client.exchange(
+            ServerOrigin.parse("https://hermes.example"),
+            code = "one-time-code",
+            verifier = "pkce-verifier",
+        )
+
+        assertEquals(2, attempts)
+        assertEquals("opaque-access", tokens.accessToken)
     }
 
     @Test

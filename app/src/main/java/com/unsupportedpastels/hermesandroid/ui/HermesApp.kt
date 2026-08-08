@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 
@@ -57,6 +58,8 @@ import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
+import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
+import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
@@ -86,6 +89,8 @@ fun HermesApp(
     serverSettingsState: ServerSettingsState = ServerSettingsState.Ready(null),
     onSaveServerOrigin: suspend (ServerOrigin) -> Result<Unit> = { Result.success(Unit) },
     onSignIn: () -> Unit = {},
+    onOpenSession: (DurableSessionId) -> Unit = {},
+    onSendMessage: (DurableSessionId, String) -> Unit = { _, _ -> },
 ) {
     val sessions = snapshot.durableSessions
     val serverOrigin = (serverSettingsState as? ServerSettingsState.Ready)?.serverOrigin
@@ -158,10 +163,17 @@ fun HermesApp(
                     MissingSessionScreen()
                 } else {
                     val draftKey = "${serverOrigin?.value.orEmpty()}\u0000${session.id.value}"
+                    val chat = snapshot.chatSessions[session.id] ?: ChatSessionSnapshot()
+                    LaunchedEffect(session.id) {
+                        onOpenSession(session.id)
+                    }
                     SessionDetailScreen(
                         session = session,
+                        chat = chat,
                         draft = drafts[draftKey].orEmpty(),
                         onDraftChanged = { drafts[draftKey] = it },
+                        canSend = snapshot.authenticationState == AuthenticationState.Authenticated,
+                        onSend = { text -> onSendMessage(session.id, text) },
                         showBack = !supportsListDetail,
                         onBack = navigateBack,
                     )
@@ -423,11 +435,23 @@ internal fun ServerSettingsScreen(
 @Composable
 private fun SessionDetailScreen(
     session: SessionSummary,
+    chat: ChatSessionSnapshot,
     draft: String,
     onDraftChanged: (String) -> Unit,
+    canSend: Boolean,
+    onSend: (String) -> Unit,
     showBack: Boolean,
     onBack: () -> Unit,
 ) {
+    val transcriptListState = rememberLazyListState(
+        initialFirstVisibleItemIndex = chat.messages.lastIndex.coerceAtLeast(0),
+    )
+    LaunchedEffect(session.id, chat.messages.size, chat.messages.lastOrNull()?.text?.length) {
+        if (chat.messages.isNotEmpty()) {
+            transcriptListState.scrollToItem(chat.messages.lastIndex)
+        }
+    }
+
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
@@ -451,22 +475,60 @@ private fun SessionDetailScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center,
-            ) {
+            when {
+                chat.isLoading && chat.messages.isEmpty() -> {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("Loading transcript…")
+                    }
+                }
+                chat.messages.isEmpty() -> {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("No messages yet")
+                    }
+                }
+                else -> {
+                    LazyColumn(
+                        state = transcriptListState,
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        items(chat.messages) { message ->
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    when (message.role) {
+                                        ChatMessageRole.User -> "You"
+                                        ChatMessageRole.Assistant -> "Hermes"
+                                        ChatMessageRole.System -> "System"
+                                        ChatMessageRole.Tool -> "Tool"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                                val renderedText = message.text.ifEmpty {
+                                    if (message.isStreaming) "…" else ""
+                                }
+                                MarkdownMessage(renderedText)
+                            }
+                        }
+                    }
+                }
+            }
+            chat.error?.let { error ->
                 Text(
-                    "Transcript loading is not connected in this milestone. " +
-                        "Only the authenticated durable-session list is available.",
-                    style = MaterialTheme.typography.bodyLarge,
+                    error,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
                 )
             }
-            Text(
-                "Local draft only. Sending is disabled until explicit live-session takeover is implemented.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            if (chat.isSending) {
+                Text("Hermes is responding…", style = MaterialTheme.typography.bodyMedium)
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -475,12 +537,20 @@ private fun SessionDetailScreen(
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraftChanged,
-                    label = { Text("Local draft") },
+                    label = { Text("Message") },
+                    enabled = !chat.isSending,
                     modifier = Modifier.weight(1f),
                     minLines = 1,
                     maxLines = 5,
                 )
-                Button(onClick = {}, enabled = false) {
+                Button(
+                    onClick = {
+                        val message = draft.trim()
+                        onSend(message)
+                        onDraftChanged("")
+                    },
+                    enabled = canSend && !chat.isSending && draft.isNotBlank(),
+                ) {
                     Text("Send")
                 }
             }

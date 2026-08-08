@@ -39,6 +39,26 @@ data class ActiveRuntimeSession(
     val access: RuntimeAccess = RuntimeAccess.Observer,
 )
 
+enum class ChatMessageRole {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+data class ChatMessage(
+    val role: ChatMessageRole,
+    val text: String,
+    val isStreaming: Boolean = false,
+)
+
+data class ChatSessionSnapshot(
+    val messages: List<ChatMessage> = emptyList(),
+    val isLoading: Boolean = false,
+    val isSending: Boolean = false,
+    val error: String? = null,
+)
+
 data class HermesGatewaySnapshot(
     val connectionState: ConnectionState = ConnectionState.Disconnected,
     val authenticationState: AuthenticationState = AuthenticationState.Unknown,
@@ -48,6 +68,7 @@ data class HermesGatewaySnapshot(
     val connectionError: String? = null,
     val durableSessions: List<SessionSummary> = emptyList(),
     val activeRuntimes: List<ActiveRuntimeSession> = emptyList(),
+    val chatSessions: Map<DurableSessionId, ChatSessionSnapshot> = emptyMap(),
 )
 
 interface HermesGateway {

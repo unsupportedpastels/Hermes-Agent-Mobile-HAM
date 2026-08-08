@@ -50,7 +50,7 @@ Primary physical target: standard/non-Ultra Samsung Galaxy Z Fold 8.
 ## Local security
 
 - No plaintext credentials in files, preferences, logs, backups, or crash reports.
-- This milestone keeps native access/refresh tokens in memory only; process recreation intentionally requires a new sign-in until encrypted origin-scoped storage and refresh rotation are implemented.
+- Native access/refresh tokens persist only in Android Keystore-backed encrypted storage scoped to the normalized HTTPS origin; refresh rotation replaces the encrypted record atomically.
 - Never persist authorization codes, PKCE verifiers, WebSocket tickets, or credential-bearing URLs.
 - Disable backup for secret-bearing state unless a reviewed encrypted backup design is introduced.
 - Export only the launcher activity.

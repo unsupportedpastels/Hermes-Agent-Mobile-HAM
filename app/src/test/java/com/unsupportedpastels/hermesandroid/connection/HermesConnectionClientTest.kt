@@ -8,6 +8,7 @@ import io.ktor.client.request.get
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -16,6 +17,30 @@ import org.junit.Test
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 
 class HermesConnectionClientTest {
+    @Test
+    fun networkCancellationIsPreservedAcrossConnectionOperations() = runTest {
+        fun cancellingClient() = HttpHermesConnectionClient(
+            HttpClient(MockEngine { throw CancellationException("cancelled") }),
+        )
+        val origin = ServerOrigin.parse("https://hermes.example")
+
+        val probeFailure = runCatching { cancellingClient().probe(origin) }.exceptionOrNull()
+        val authFailure = runCatching {
+            cancellingClient().authenticate(origin, "opaque-access")
+        }.exceptionOrNull()
+        val transcriptFailure = runCatching {
+            cancellingClient().loadTranscript(
+                origin,
+                "opaque-access",
+                DurableSessionId("durable-cancel"),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(probeFailure is CancellationException)
+        assertTrue(authFailure is CancellationException)
+        assertTrue(transcriptFailure is CancellationException)
+    }
+
     @Test
     fun productionHttpConfigurationRejectsRedirects() = runTest {
         var requestCount = 0
@@ -192,6 +217,7 @@ class HermesConnectionClientTest {
             assertEquals("Bearer opaque-access", request.headers[HttpHeaders.Authorization])
             if (request.url.encodedPath == "/api/profiles/sessions") {
                 assertEquals("20", request.url.parameters["limit"])
+                assertEquals("default", request.url.parameters["profile"])
             }
             when (request.url.encodedPath) {
                 "/api/auth/me" -> respond(
@@ -227,6 +253,40 @@ class HermesConnectionClientTest {
                 DurableSessionId("stored-2") to "Untitled session",
             ),
             authenticated.sessions.map { it.id to it.title },
+        )
+    }
+
+    @Test
+    fun authenticatedConnectionUsesRestSessionIdInsteadOfTransportSessionKey() = runTest {
+        val engine = MockEngine { request ->
+            when (request.url.encodedPath) {
+                "/api/auth/me" -> respond(
+                    content = """{"user_id":"user"}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+                "/api/profiles/sessions" -> respond(
+                    content = """{
+                        "sessions":[{
+                            "id":"database-session-id",
+                            "session_key":"transport-session-key",
+                            "title":"Session"
+                        }]
+                    }""".trimIndent(),
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+                else -> error("Unexpected request: ${request.url}")
+            }
+        }
+        val client = HttpHermesConnectionClient(HttpClient(engine))
+
+        val authenticated = client.authenticate(
+            ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+        )
+
+        assertEquals(
+            DurableSessionId("database-session-id"),
+            authenticated.sessions.single().id,
         )
     }
 
@@ -337,5 +397,27 @@ class HermesConnectionClientTest {
         }.exceptionOrNull()
 
         assertTrue(failure is HermesConnectionException)
+    }
+
+    @Test
+    fun transcriptAllowsBoundedPayloadAboveGenericResponseLimit() = runTest {
+        val largeMessage = "x".repeat(70_000)
+        val engine = MockEngine { request ->
+            assertEquals("/api/sessions/stored-1/messages", request.url.encodedPath)
+            respond(
+                content = """{"messages":[{"role":"assistant","content":"$largeMessage"}]}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val client = HttpHermesConnectionClient(HttpClient(engine))
+
+        val messages = client.loadTranscript(
+            serverOrigin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            durableSessionId = DurableSessionId("stored-1"),
+        )
+
+        assertEquals(1, messages.size)
+        assertEquals(largeMessage.length, messages.single().text.length)
     }
 }

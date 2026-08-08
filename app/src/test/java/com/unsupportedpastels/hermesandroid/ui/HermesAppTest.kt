@@ -15,6 +15,9 @@ import com.unsupportedpastels.hermesandroid.connection.HermesAuthProvider
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
+import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
+import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
+import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
@@ -41,22 +44,131 @@ class HermesAppTest {
     )
 
     @Test
-    fun selectingSessionShowsDetailAndEditableComposer() {
+    fun longTranscriptAutoScrollsToNewestMessage() {
+        val history = (1..30).map { index ->
+            ChatMessage(ChatMessageRole.User, "old message $index")
+        } + ChatMessage(ChatMessageRole.Assistant, "newest streamed answer")
+        val snapshot = connectedSnapshot.copy(
+            chatSessions = mapOf(
+                sessions.first().id to ChatSessionSnapshot(messages = history),
+            ),
+        )
+
         composeRule.setContent {
             HermesAndroidTheme {
-                HermesApp(snapshot = connectedSnapshot)
+                HermesApp(snapshot = snapshot)
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNodeWithText("newest streamed answer").assertIsDisplayed()
+    }
+
+    @Test
+    fun assistantMarkdownRendersWithoutLiteralFormattingMarkers() {
+        val snapshot = connectedSnapshot.copy(
+            chatSessions = mapOf(
+                sessions.first().id to ChatSessionSnapshot(
+                    messages = listOf(
+                        ChatMessage(
+                            ChatMessageRole.Assistant,
+                            """
+                            - **Container:** removed; no `service` remains.
+                            ```text
+                            example/image:latest
+                            ```
+                            """.trimIndent(),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(snapshot = snapshot)
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNodeWithText("Container: removed; no service remains.").assertIsDisplayed()
+        composeRule.onNodeWithText("example/image:latest").assertIsDisplayed()
+    }
+
+    @Test
+    fun userMarkdownUsesTheSameRichTextRendererAsAssistantMessages() {
+        val snapshot = connectedSnapshot.copy(
+            chatSessions = mapOf(
+                sessions.first().id to ChatSessionSnapshot(
+                    messages = listOf(
+                        ChatMessage(
+                            ChatMessageRole.User,
+                            "- **Status:** open `Settings`.",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(snapshot = snapshot)
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNodeWithText("Status: open Settings.").assertIsDisplayed()
+    }
+
+    @Test
+    fun selectingSessionLoadsTranscriptAndSendsComposerText() {
+        var opened: DurableSessionId? = null
+        var sent: Pair<DurableSessionId, String>? = null
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            chatSessions = mapOf(
+                sessions.first().id to ChatSessionSnapshot(
+                    messages = listOf(
+                        ChatMessage(ChatMessageRole.User, "Earlier question"),
+                        ChatMessage(ChatMessageRole.Assistant, "Earlier answer"),
+                    ),
+                ),
+            ),
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    onOpenSession = { opened = it },
+                    onSendMessage = { sessionId, text -> sent = sessionId to text },
+                )
             }
         }
 
         composeRule.onNodeWithText("Sessions").assertIsDisplayed()
         composeRule.onNodeWithText("First session").performClick()
         composeRule.onNodeWithText("Back").assertIsDisplayed()
-        composeRule.onNodeWithText(
-            "Transcript loading is not connected in this milestone. " +
-                "Only the authenticated durable-session list is available.",
-        ).assertIsDisplayed()
-        composeRule.onNode(hasSetTextAction()).performTextInput("Fold-safe draft")
-        composeRule.onNodeWithText("Fold-safe draft").assertIsDisplayed()
+        composeRule.onNodeWithText("Earlier question").assertIsDisplayed()
+        composeRule.onNodeWithText("Earlier answer").assertIsDisplayed()
+        composeRule.waitForIdle()
+        assertEquals(sessions.first().id, opened)
+        composeRule.onNode(hasSetTextAction()).performTextInput("New question")
+        composeRule.onNodeWithText("Send").performClick()
+        assertEquals(sessions.first().id to "New question", sent)
+    }
+
+    @Test
+    fun authenticationFreeSessionDoesNotAdvertiseUnsupportedNativeSend() {
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.NotRequired,
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(snapshot = snapshot)
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNode(hasSetTextAction()).performTextInput("Question")
+        composeRule.onNodeWithText("Send").assertIsNotEnabled()
     }
 
     @Test

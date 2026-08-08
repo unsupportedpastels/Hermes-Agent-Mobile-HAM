@@ -3,6 +3,7 @@ package com.unsupportedpastels.hermesandroid.connection
 import io.ktor.client.HttpClient
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
 import io.ktor.http.ContentType
 import io.ktor.http.URLBuilder
 import io.ktor.http.Url
@@ -12,8 +13,10 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URI
 import java.io.IOException
+import java.nio.channels.UnresolvedAddressException
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -25,6 +28,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -180,8 +184,20 @@ class HttpHermesNativeAuthClient(
         verifier: String,
     ): NativeTokenSet = try {
         val payload = json.encodeToString(NativeTokenRequest(code, verifier))
-        val response = client.post("${serverOrigin.value}/auth/native/token") {
-            setBody(TextContent(payload, ContentType.Application.Json))
+        var attempt = 0
+        var response: HttpResponse? = null
+        while (response == null) {
+            attempt += 1
+            try {
+                response = client.post("${serverOrigin.value}/auth/native/token") {
+                    setBody(TextContent(payload, ContentType.Application.Json))
+                }
+            } catch (error: Exception) {
+                val transientDnsFailure = generateSequence<Throwable>(error) { it.cause }
+                    .any { it is UnknownHostException || it is UnresolvedAddressException }
+                if (!transientDnsFailure || attempt >= 3) throw error
+                delay(500L * attempt)
+            }
         }
         val responseBody = response.readBodyTextBounded()
         if (!response.status.isSuccess()) {

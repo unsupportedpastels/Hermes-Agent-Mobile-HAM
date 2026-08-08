@@ -12,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.net.toUri
 import com.unsupportedpastels.hermesandroid.connection.HermesConnectionViewModel
+import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.connection.HermesWindowFocus
 import com.unsupportedpastels.hermesandroid.connection.launchBrowserAndAwaitReturn
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsViewModel
@@ -25,7 +26,8 @@ class MainActivity : ComponentActivity() {
     }
     private val connectionViewModel by viewModels<HermesConnectionViewModel> {
         HermesConnectionViewModel.ProductionFactory(
-            serverSettingsViewModel.states,
+            context = applicationContext,
+            settingsStates = serverSettingsViewModel.states,
         )
     }
 
@@ -48,6 +50,8 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     },
+                    onOpenSession = connectionViewModel::openSession,
+                    onSendMessage = connectionViewModel::sendMessage,
                 )
             }
         }
@@ -64,6 +68,8 @@ internal fun HermesAppHost(
     viewModel: ServerSettingsViewModel,
     snapshot: HermesGatewaySnapshot,
     onSignIn: () -> Unit = {},
+    onOpenSession: (DurableSessionId) -> Unit = {},
+    onSendMessage: (DurableSessionId, String) -> Unit = { _, _ -> },
 ) {
     val serverSettingsState by viewModel.states.collectAsStateWithLifecycle()
 
@@ -72,5 +78,7 @@ internal fun HermesAppHost(
         serverSettingsState = serverSettingsState,
         onSaveServerOrigin = { origin -> viewModel.save(origin).await() },
         onSignIn = onSignIn,
+        onOpenSession = onOpenSession,
+        onSendMessage = onSendMessage,
     )
 }
