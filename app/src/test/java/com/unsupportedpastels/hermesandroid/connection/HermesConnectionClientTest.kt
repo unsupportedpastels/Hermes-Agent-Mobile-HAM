@@ -346,6 +346,58 @@ class HermesConnectionClientTest {
     }
 
     @Test
+    fun authenticatedConnectionClassifiesRejectedTokenAtIdentityEndpoint() = runTest {
+        val client = HttpHermesConnectionClient(
+            HttpClient(
+                MockEngine {
+                    respond(
+                        content = """{"error":"invalid session"}""",
+                        status = HttpStatusCode.Unauthorized,
+                        headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                },
+            ),
+        )
+
+        val failure = runCatching {
+            client.authenticate(
+                ServerOrigin.parse("https://hermes.example"),
+                accessToken = "opaque-access",
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is HermesAuthenticationRejectedException)
+    }
+
+    @Test
+    fun authenticatedConnectionClassifiesRejectedTokenDuringSessionListing() = runTest {
+        val engine = MockEngine { request ->
+            when (request.url.encodedPath) {
+                "/api/auth/me" -> respond(
+                    content = """{"user_id":"user"}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+                "/api/profiles/sessions" -> respond(
+                    content = """{"error":"invalid session"}""",
+                    status = HttpStatusCode.Unauthorized,
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+                else -> error("Unexpected request: ${request.url}")
+            }
+        }
+        val client = HttpHermesConnectionClient(HttpClient(engine))
+
+        val failure = runCatching {
+            client.authenticate(
+                ServerOrigin.parse("https://hermes.example"),
+                accessToken = "opaque-access",
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is HermesAuthenticationRejectedException)
+    }
+
+    @Test
     fun authenticatedConnectionRejectsBlankUserId() = runTest {
         val engine = MockEngine { request ->
             when (request.url.encodedPath) {
@@ -404,6 +456,8 @@ class HermesConnectionClientTest {
         val largeMessage = "x".repeat(70_000)
         val engine = MockEngine { request ->
             assertEquals("/api/sessions/stored-1/messages", request.url.encodedPath)
+            assertEquals("default", request.url.parameters["profile"])
+            assertEquals("100", request.url.parameters["limit"])
             respond(
                 content = """{"messages":[{"role":"assistant","content":"$largeMessage"}]}""",
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),

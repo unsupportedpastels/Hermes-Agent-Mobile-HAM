@@ -180,6 +180,12 @@ class HermesConnectionViewModel(
             activeTokens = null
             disconnectChat()
             publishSignInRequired()
+        } catch (_: HermesAuthenticationRejectedException) {
+            if (generation != currentGeneration || activeOrigin != serverOrigin) return
+            tokenStore?.clear(serverOrigin)
+            activeTokens = null
+            disconnectChat()
+            publishSignInRequired()
         } catch (_: Exception) {
             if (generation != currentGeneration || activeOrigin != serverOrigin) return
             mutableSnapshots.value = HermesGatewaySnapshot(

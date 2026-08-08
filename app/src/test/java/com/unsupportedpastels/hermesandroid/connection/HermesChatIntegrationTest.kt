@@ -4,6 +4,7 @@ import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
+import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatConnector
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatEvent
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatProtocolException
@@ -38,6 +39,7 @@ import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -81,6 +83,23 @@ class HermesChatIntegrationTest {
         assertEquals(listOf("Earlier question", "Earlier answer"), chat.messages.map { it.text })
         assertFalse(chat.isLoading)
         assertEquals("opaque-access", client.transcriptAccessToken)
+    }
+
+    @Test
+    fun rejectedPersistedAuthenticationClearsTokensAndRequiresSignIn() = runTest(dispatcher) {
+        val tokenStore = MemoryTokenStore(tokens)
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = RejectedAuthenticationClient(),
+            tokenStore = tokenStore,
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+
+        advanceUntilIdle()
+
+        assertEquals(ConnectionState.Connected, viewModel.snapshots.value.connectionState)
+        assertEquals(AuthenticationState.SignInRequired, viewModel.snapshots.value.authenticationState)
+        assertNull(tokenStore.load(origin))
     }
 
     @Test
@@ -751,6 +770,22 @@ class HermesChatIntegrationTest {
 
         assertFalse(viewModel.snapshots.value.chatSessions.getValue(durableId).isLoading)
     }
+}
+
+private class RejectedAuthenticationClient : HermesConnectionClient {
+    override suspend fun probe(serverOrigin: ServerOrigin) = HermesConnectionInfo(
+        version = "0.20.0",
+        authRequired = true,
+        nativeOAuthSupported = true,
+        providers = listOf(HermesAuthProvider(name = "nous")),
+    )
+
+    override suspend fun authenticate(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+    ): AuthenticatedHermesConnection = throw HermesAuthenticationRejectedException(
+        "Hermes authentication returned HTTP 401",
+    )
 }
 
 private class MemoryTokenStore(initial: NativeTokenSet?) : NativeTokenStore {

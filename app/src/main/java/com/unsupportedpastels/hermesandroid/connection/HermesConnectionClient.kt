@@ -77,10 +77,14 @@ data class AuthenticatedHermesConnection(
     val sessions: List<SessionSummary>,
 )
 
-class HermesConnectionException(
+open class HermesConnectionException(
     message: String,
     cause: Throwable? = null,
 ) : Exception(message, cause)
+
+class HermesAuthenticationRejectedException(
+    message: String,
+) : HermesConnectionException(message)
 
 private const val MAX_RESPONSE_BODY_BYTES = 64 * 1024
 private const val MAX_TRANSCRIPT_BODY_BYTES = 1024 * 1024
@@ -194,9 +198,11 @@ class HttpHermesConnectionClient(
         }
         if (!meResponse.status.isSuccess()) {
             meResponse.readBodyTextBounded()
-            throw HermesConnectionException(
-                "Hermes authentication returned HTTP ${meResponse.status.value}",
-            )
+            val message = "Hermes authentication returned HTTP ${meResponse.status.value}"
+            if (meResponse.status.value == 401 || meResponse.status.value == 403) {
+                throw HermesAuthenticationRejectedException(message)
+            }
+            throw HermesConnectionException(message)
         }
         val user = json.decodeFromString<HermesAuthenticatedUser>(
             meResponse.readBodyTextBounded(),
@@ -227,6 +233,7 @@ class HttpHermesConnectionClient(
         val response = client.get("${serverOrigin.value}/api/sessions/$encodedId/messages") {
             accessToken?.let { bearerAuth(it) }
             parameter("limit", 100)
+            parameter("profile", "default")
         }
         if (!response.status.isSuccess()) {
             response.readBodyTextBounded()
@@ -271,9 +278,14 @@ class HttpHermesConnectionClient(
         }
         if (!sessionsResponse.status.isSuccess()) {
             sessionsResponse.readBodyTextBounded()
-            throw HermesConnectionException(
-                "Hermes session listing returned HTTP ${sessionsResponse.status.value}",
-            )
+            val message = "Hermes session listing returned HTTP ${sessionsResponse.status.value}"
+            if (
+                accessToken != null &&
+                (sessionsResponse.status.value == 401 || sessionsResponse.status.value == 403)
+            ) {
+                throw HermesAuthenticationRejectedException(message)
+            }
+            throw HermesConnectionException(message)
         }
         val sessions = json.decodeFromString<HermesSessionsResponse>(
             sessionsResponse.readBodyTextBounded(),
