@@ -98,7 +98,6 @@ class HermesTurnNotificationService : Service() {
             ACTION_CLARIFICATION -> postInput(intent, "Hermes needs your input")
             ACTION_UNSUPPORTED -> postInput(intent, "Hermes needs secure input")
             ACTION_COMPLETE -> postCompletion(intent)
-            ACTION_OPEN_SESSION -> openSession(intent)
         }
         return START_NOT_STICKY
     }
@@ -183,30 +182,12 @@ class HermesTurnNotificationService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
         }
-        val intent = Intent(this, HermesTurnNotificationService::class.java).apply {
-            action = ACTION_OPEN_SESSION
-            putExtra(EXTRA_SESSION_ID, sessionId)
-        }
-        return PendingIntent.getService(
+        return PendingIntent.getActivity(
             this,
             sessionId.hashCode(),
-            intent,
+            notificationTapIntent(this, sessionId),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-    }
-
-    private fun openSession(intent: Intent) {
-        val value = intent.getStringExtra(EXTRA_SESSION_ID)
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() && it.length <= 256 }
-            ?: return
-        val sessionId = runCatching { DurableSessionId(value) }.getOrNull() ?: return
-        NotificationNavigationInbox.publish(sessionId)
-        startActivity(Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                Intent.FLAG_ACTIVITY_SINGLE_TOP
-        })
     }
 
     private fun createChannels() {
@@ -236,6 +217,5 @@ class HermesTurnNotificationService : Service() {
         internal const val ACTION_CLARIFICATION = "com.unsupportedpastels.hermesandroid.notifications.CLARIFICATION"
         internal const val ACTION_UNSUPPORTED = "com.unsupportedpastels.hermesandroid.notifications.UNSUPPORTED"
         internal const val ACTION_COMPLETE = "com.unsupportedpastels.hermesandroid.notifications.COMPLETE"
-        internal const val ACTION_OPEN_SESSION = "com.unsupportedpastels.hermesandroid.notifications.OPEN_SESSION"
     }
 }

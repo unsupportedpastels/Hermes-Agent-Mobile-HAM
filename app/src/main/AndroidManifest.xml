@@ -26,6 +26,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".notifications.NotificationTapActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:theme="@style/Theme.HermesAndroid.NotificationTap" />
         <service
             android:name=".notifications.HermesTurnNotificationService"
             android:exported="false"

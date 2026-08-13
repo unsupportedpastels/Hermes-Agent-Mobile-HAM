@@ -2,4 +2,5 @@
 <resources>
 
     <style name="Theme.HermesAndroid" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.HermesAndroid.NotificationTap" parent="android:style/Theme.NoDisplay" />
 </resources>
