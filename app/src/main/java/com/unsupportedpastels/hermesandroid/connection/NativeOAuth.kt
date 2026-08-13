@@ -246,6 +246,7 @@ class HermesNativeLogin(
     private val randomBytes: (Int) -> ByteArray = { size ->
         ByteArray(size).also(SecureRandom()::nextBytes)
     },
+    private val awaitExchangeReady: suspend () -> Unit = {},
 ) : NativeLogin {
     private companion object {
         const val CALLBACK_ACCEPT_POLL_MILLIS = 250
@@ -260,12 +261,12 @@ class HermesNativeLogin(
             <body><h2>Hermes sign-in failed</h2>
             <p>Return to the app and try again.</p></body>
         """
-        const val SUCCESS_BODY = """
-            <!doctype html><meta charset="utf-8"><title>Signed in</title>
+        const val RETURN_TO_APP_BODY = """
+            <!doctype html><meta charset="utf-8"><title>Continue in Hermes</title>
             <meta name="referrer" content="no-referrer">
             <script>history.replaceState(null,"","/complete")</script>
-            <body><h2>Signed in to Hermes</h2>
-            <p>You can close this window and return to the app.</p></body>
+            <body><h2>Return to Hermes</h2>
+            <p>Sign-in will finish securely in the app.</p></body>
         """
     }
 
@@ -299,9 +300,9 @@ class HermesNativeLogin(
 
                 coroutineScope {
                     val browserJob = launch { openBrowser(authorizeUrl) }
-                    val tokens = awaitCallback(serverSocket, state) { code ->
-                        exchanger.exchange(serverOrigin, code, verifier)
-                    }
+                    val code = awaitCallback(serverSocket, state)
+                    awaitExchangeReady()
+                    val tokens = exchanger.exchange(serverOrigin, code, verifier)
                     browserJob.join()
                     tokens
                 }
@@ -312,8 +313,7 @@ class HermesNativeLogin(
     private suspend fun awaitCallback(
         serverSocket: ServerSocket,
         expectedState: String,
-        exchangeCode: suspend (String) -> NativeTokenSet,
-    ): NativeTokenSet {
+    ): String {
         while (true) {
             currentCoroutineContext().ensureActive()
             val socket = try {
@@ -350,19 +350,8 @@ class HermesNativeLogin(
                         }
                         throw HermesConnectionException("Hermes sign-in was rejected")
                     }
-                    val tokens = try {
-                        exchangeCode(requireNotNull(callback.code))
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (error: Exception) {
-                        runCatching {
-                            writeHttpResponse(it, "400 Bad Request", SIGN_IN_FAILED_BODY)
-                        }
-                        throw (error as? HermesConnectionException)
-                            ?: HermesConnectionException("Hermes token exchange failed", error)
-                    }
-                    runCatching { writeHttpResponse(it, "200 OK", SUCCESS_BODY) }
-                    return tokens
+                    runCatching { writeHttpResponse(it, "200 OK", RETURN_TO_APP_BODY) }
+                    return requireNotNull(callback.code)
                 }
             } catch (_: IOException) {
                 // A client that disconnects or times out cannot consume the valid callback.

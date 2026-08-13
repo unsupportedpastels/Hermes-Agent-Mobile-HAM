@@ -5,17 +5,28 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -23,6 +34,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -61,9 +73,135 @@ internal data class MarkdownCodeBlock(
     val language: String? = null,
 ) : MarkdownBlock
 
+internal data class MarkdownImageBlock(
+    val url: String,
+) : MarkdownBlock
+
+internal enum class MarkdownTableAlignment {
+    Start,
+    Center,
+    End,
+}
+
+internal data class MarkdownTableCell(
+    val inlines: List<MarkdownInline>,
+) {
+    val plainText: String = inlines.joinToString(separator = "") { it.text }
+}
+
+internal data class MarkdownTableBlock(
+    val header: List<MarkdownTableCell>,
+    val alignments: List<MarkdownTableAlignment>,
+    val rows: List<List<MarkdownTableCell>>,
+) : MarkdownBlock
+
 private val unorderedListPattern = Regex("^(\\s*)[-+*]\\s+(.+)$")
 private val orderedListPattern = Regex("^(\\s*)(\\d+[.)])\\s+(.+)$")
 private val headingPattern = Regex("^(#{1,6})\\s+(.+)$")
+private val mediaDirectivePattern = Regex("^MEDIA:(\\S+)$")
+private val imageAttachmentMarkerPattern = Regex(
+    pattern = """^\[Image attached at: [^\]\r\n]+]\r?\n(?=data:image/)""",
+    option = RegexOption.MULTILINE,
+)
+private const val MESSAGE_RENDER_CHUNK_CHARS = 4_000
+private const val MIN_EMBEDDED_PAYLOAD_CHARS = 512
+
+private fun splitMarkdownTableRow(line: String): List<String>? {
+    val trimmed = line.trim()
+    if ('|' !in trimmed) return null
+    val cells = mutableListOf<String>()
+    val cell = StringBuilder()
+    var index = if (trimmed.startsWith('|')) 1 else 0
+    var inCode = false
+    var foundSeparator = false
+    while (index < trimmed.length) {
+        val character = trimmed[index]
+        when {
+            character == '\\' && index + 1 < trimmed.length && trimmed[index + 1] == '|' -> {
+                cell.append('|')
+                index += 2
+                continue
+            }
+            character == '`' -> {
+                inCode = !inCode
+                cell.append(character)
+            }
+            character == '|' && !inCode -> {
+                cells += cell.toString().trim()
+                cell.clear()
+                foundSeparator = true
+            }
+            else -> cell.append(character)
+        }
+        index += 1
+    }
+    if (cell.isNotEmpty() || !trimmed.endsWith('|')) cells += cell.toString().trim()
+    return cells.takeIf { foundSeparator && it.size >= 2 }
+}
+
+private fun parseTableDelimiter(cells: List<String>): List<MarkdownTableAlignment>? {
+    if (cells.size < 2) return null
+    return cells.map { cell ->
+        val value = cell.trim()
+        if (!Regex("^:?-{3,}:?$").matches(value)) return null
+        when {
+            value.startsWith(':') && value.endsWith(':') -> MarkdownTableAlignment.Center
+            value.endsWith(':') -> MarkdownTableAlignment.End
+            else -> MarkdownTableAlignment.Start
+        }
+    }
+}
+
+private fun tableCells(values: List<String>, columnCount: Int): List<MarkdownTableCell> =
+    List(columnCount) { column ->
+        MarkdownTableCell(parseMarkdownInlines(values.getOrElse(column) { "" }))
+    }
+
+internal fun compactEmbeddedPayloads(source: String): String {
+    val text = imageAttachmentMarkerPattern.replace(source, "")
+    val output = StringBuilder(text.length.coerceAtMost(MESSAGE_RENDER_CHUNK_CHARS))
+    var cursor = 0
+    while (cursor < text.length) {
+        val dataStart = text.indexOf("data:", startIndex = cursor)
+        if (dataStart < 0) {
+            output.append(text, cursor, text.length)
+            break
+        }
+        val comma = text.indexOf(',', startIndex = dataStart + 5)
+        val headerIsBounded = comma in (dataStart + 6)..(dataStart + 256)
+        val metadata = if (headerIsBounded) text.substring(dataStart + 5, comma) else ""
+        if (!metadata.endsWith(";base64", ignoreCase = true)) {
+            output.append(text, cursor, dataStart + 5)
+            cursor = dataStart + 5
+            continue
+        }
+
+        var payloadEnd = comma + 1
+        while (payloadEnd < text.length && text[payloadEnd].isBase64PayloadCharacter()) {
+            payloadEnd += 1
+        }
+        if (payloadEnd - (comma + 1) < MIN_EMBEDDED_PAYLOAD_CHARS) {
+            output.append(text, cursor, comma + 1)
+            cursor = comma + 1
+            continue
+        }
+
+        val mimeType = metadata.substringBefore(';').lowercase()
+        val kind = when {
+            mimeType.startsWith("image/") -> "image"
+            mimeType.startsWith("audio/") -> "audio"
+            mimeType.startsWith("video/") -> "video"
+            else -> "file"
+        }
+        output.append(text, cursor, dataStart)
+        output.append("Attached $kind · embedded data hidden")
+        cursor = payloadEnd
+    }
+    return output.toString()
+}
+
+private fun Char.isBase64PayloadCharacter(): Boolean =
+    isLetterOrDigit() || this == '+' || this == '/' || this == '=' || this == '-' || this == '_'
 
 internal fun parseMessageMarkdown(source: String): List<MarkdownBlock> {
     if (source.isEmpty()) return emptyList()
@@ -84,6 +222,16 @@ internal fun parseMessageMarkdown(source: String): List<MarkdownBlock> {
     while (index < lines.size) {
         val line = lines[index]
         val trimmedStart = line.trimStart()
+        val media = mediaDirectivePattern.matchEntire(trimmedStart)
+        if (media != null) {
+            val source = media.groupValues[1]
+            if (validateRemoteMediaUrl(source) || validateGatewayMediaPath(source)) {
+                flushParagraph()
+                blocks += MarkdownImageBlock(source)
+                index += 1
+                continue
+            }
+        }
         if (trimmedStart.startsWith("```")) {
             flushParagraph()
             val language = trimmedStart.removePrefix("```").trim()
@@ -105,6 +253,28 @@ internal fun parseMessageMarkdown(source: String): List<MarkdownBlock> {
         if (line.isBlank()) {
             flushParagraph()
             index += 1
+            continue
+        }
+
+        val tableHeader = splitMarkdownTableRow(line)
+        val tableDelimiter = lines.getOrNull(index + 1)
+            ?.let(::splitMarkdownTableRow)
+            ?.let(::parseTableDelimiter)
+        if (tableHeader != null && tableDelimiter != null && tableHeader.size == tableDelimiter.size) {
+            flushParagraph()
+            val columnCount = tableHeader.size
+            val rows = mutableListOf<List<MarkdownTableCell>>()
+            index += 2
+            while (index < lines.size && lines[index].isNotBlank()) {
+                val row = splitMarkdownTableRow(lines[index]) ?: break
+                rows += tableCells(row, columnCount)
+                index += 1
+            }
+            blocks += MarkdownTableBlock(
+                header = tableCells(tableHeader, columnCount),
+                alignments = tableDelimiter,
+                rows = rows,
+            )
             continue
         }
 
@@ -172,6 +342,7 @@ private data class InlineState(
 
 private fun parseMarkdownInlines(text: String, inherited: InlineState = InlineState()): List<MarkdownInline> {
     val output = mutableListOf<MarkdownInline>()
+    val plainBuffer = StringBuilder()
 
     fun append(inline: MarkdownInline) {
         if (inline.text.isEmpty()) return
@@ -184,15 +355,21 @@ private fun parseMarkdownInlines(text: String, inherited: InlineState = InlineSt
     }
 
     fun appendPlain(value: String) {
+        plainBuffer.append(value)
+    }
+
+    fun flushPlain() {
+        if (plainBuffer.isEmpty()) return
         append(
             MarkdownInline(
-                text = value,
+                text = plainBuffer.toString(),
                 bold = inherited.bold,
                 italic = inherited.italic,
                 strikethrough = inherited.strikethrough,
                 link = inherited.link,
             ),
         )
+        plainBuffer.clear()
     }
 
     var index = 0
@@ -200,6 +377,7 @@ private fun parseMarkdownInlines(text: String, inherited: InlineState = InlineSt
         if (text[index] == '`') {
             val close = text.indexOf('`', index + 1)
             if (close > index + 1) {
+                flushPlain()
                 append(
                     MarkdownInline(
                         text = text.substring(index + 1, close),
@@ -222,6 +400,7 @@ private fun parseMarkdownInlines(text: String, inherited: InlineState = InlineSt
                 val label = text.substring(index + 1, labelEnd)
                 val url = text.substring(labelEnd + 2, urlEnd).trim()
                 if (url.isNotEmpty()) {
+                    flushPlain()
                     parseMarkdownInlines(label, inherited.copy(link = url)).forEach(::append)
                     index = urlEnd + 1
                     continue
@@ -242,6 +421,7 @@ private fun parseMarkdownInlines(text: String, inherited: InlineState = InlineSt
         if (marker != null) {
             val close = text.indexOf(marker, index + marker.length)
             if (close > index + marker.length) {
+                flushPlain()
                 val nestedState = when (marker) {
                     "***", "___" -> inherited.copy(bold = true, italic = true)
                     "**", "__" -> inherited.copy(bold = true)
@@ -260,6 +440,7 @@ private fun parseMarkdownInlines(text: String, inherited: InlineState = InlineSt
         appendPlain(text[index].toString())
         index += 1
     }
+    flushPlain()
     return output
 }
 
@@ -267,19 +448,139 @@ private fun parseMarkdownInlines(text: String, inherited: InlineState = InlineSt
 internal fun MarkdownMessage(
     text: String,
     modifier: Modifier = Modifier,
+    loadManagedImage: (suspend (String) -> ByteArray)? = null,
 ) {
-    val blocks = remember(text) { parseMessageMarkdown(text) }
-    SelectionContainer(modifier = modifier) {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            blocks.forEach { block ->
-                when (block) {
-                    is MarkdownTextBlock -> MarkdownText(block)
-                    is MarkdownCodeBlock -> MarkdownCode(block)
+    val displayText = remember(text) { compactEmbeddedPayloads(text) }
+    var requestedCharacters by rememberSaveable(displayText) {
+        mutableIntStateOf(minOf(displayText.length, MESSAGE_RENDER_CHUNK_CHARS))
+    }
+    val visibleEnd = remember(displayText, requestedCharacters) {
+        utf16SafeEnd(displayText, requestedCharacters)
+    }
+    val visibleText = remember(displayText, visibleEnd) { displayText.substring(0, visibleEnd) }
+    val blocks = remember(visibleText) { parseMessageMarkdown(visibleText) }
+
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        SelectionContainer {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                blocks.forEach { block ->
+                    when (block) {
+                        is MarkdownTextBlock -> MarkdownText(block)
+                        is MarkdownCodeBlock -> MarkdownCode(block)
+                        is MarkdownImageBlock -> RemoteMediaImage(
+                            source = block.url,
+                            loadManagedImage = loadManagedImage,
+                        )
+                        is MarkdownTableBlock -> MarkdownTable(block)
+                    }
                 }
             }
+        }
+        if (visibleEnd < displayText.length) {
+            TextButton(
+                onClick = {
+                    requestedCharacters = minOf(
+                        displayText.length,
+                        requestedCharacters + MESSAGE_RENDER_CHUNK_CHARS,
+                    )
+                },
+            ) {
+                Text("Show more")
+            }
+        }
+    }
+}
+
+private fun utf16SafeEnd(text: String, requestedCharacters: Int): Int {
+    var end = requestedCharacters.coerceIn(0, text.length)
+    if (
+        end in 1 until text.length &&
+        text[end - 1].isHighSurrogate() &&
+        text[end].isLowSurrogate()
+    ) {
+        end -= 1
+    }
+    return end
+}
+
+@Composable
+private fun MarkdownTable(block: MarkdownTableBlock) {
+    val scrollState = rememberScrollState()
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(scrollState)
+            .semantics {
+                contentDescription =
+                    "Markdown table, ${block.header.size} columns, ${block.rows.size} rows"
+            },
+    ) {
+        Column(
+            modifier = Modifier.background(
+                MaterialTheme.colorScheme.outlineVariant,
+                RoundedCornerShape(8.dp),
+            ),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            MarkdownTableRow(
+                cells = block.header,
+                alignments = block.alignments,
+                header = true,
+            )
+            block.rows.forEach { row ->
+                MarkdownTableRow(
+                    cells = row,
+                    alignments = block.alignments,
+                    header = false,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownTableRow(
+    cells: List<MarkdownTableCell>,
+    alignments: List<MarkdownTableAlignment>,
+    header: Boolean,
+) {
+    Row(
+        modifier = Modifier.height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        cells.forEachIndexed { column, cell ->
+            Text(
+                text = annotatedMarkdown(cell.inlines),
+                modifier = Modifier
+                    .width(176.dp)
+                    .fillMaxHeight()
+                    .background(
+                        if (header) {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.surface
+                        },
+                    )
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                color = if (header) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                fontWeight = if (header) FontWeight.SemiBold else null,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = when (alignments.getOrElse(column) { MarkdownTableAlignment.Start }) {
+                    MarkdownTableAlignment.Start -> TextAlign.Start
+                    MarkdownTableAlignment.Center -> TextAlign.Center
+                    MarkdownTableAlignment.End -> TextAlign.End
+                },
+            )
         }
     }
 }

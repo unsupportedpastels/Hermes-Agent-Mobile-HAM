@@ -8,6 +8,27 @@ import org.junit.Test
 
 class SlashCommandsTest {
     @Test
+    fun modelPickerCommandRequiresExactCommandToken() {
+        assertTrue(isModelPickerCommand("/model"))
+        assertTrue(isModelPickerCommand("  /model\n"))
+        assertFalse(isModelPickerCommand("/models"))
+        assertFalse(isModelPickerCommand("/model gpt-5"))
+        assertFalse(isModelPickerCommand("please /model"))
+    }
+
+    @Test
+    fun reasoningCommandRequiresOneCanonicalEffort() {
+        assertEquals("medium", reasoningEffortCommand("/reasoning medium"))
+        assertEquals("xhigh", reasoningEffortCommand("  /reasoning XHIGH\n"))
+        assertEquals("none", reasoningEffortCommand("/reasoning none"))
+        assertEquals("ultra", reasoningEffortCommand("/reasoning ultra"))
+        assertEquals(null, reasoningEffortCommand("/reasoning"))
+        assertEquals(null, reasoningEffortCommand("/reasoning medium extra"))
+        assertEquals(null, reasoningEffortCommand("/reasoning fastest"))
+        assertEquals(null, reasoningEffortCommand("please /reasoning medium"))
+    }
+
+    @Test
     fun recognizesSlashCommandAtComposerStart() {
         assertTrue(isSlashCommandContext("/"))
         assertTrue(isSlashCommandContext("/h"))

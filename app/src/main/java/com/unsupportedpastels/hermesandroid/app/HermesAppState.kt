@@ -13,6 +13,17 @@ value class DurableSessionId(val value: String) {
 data class SessionSummary(
     val id: DurableSessionId,
     val title: String,
+    val projectId: ProjectId? = null,
+    val workspacePath: String? = null,
+    val isLocalDraft: Boolean = false,
+    val preview: String? = null,
+    val lastActiveEpochSeconds: Double? = null,
+    val messageCount: Int? = null,
+    val model: String? = null,
+    val provider: String? = null,
+    val profile: String? = null,
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
 )
 
 data class HermesAppState(

@@ -8,6 +8,9 @@ import com.google.crypto.tink.aead.AeadKeyTemplates
 import com.google.crypto.tink.integration.android.AndroidKeysetManager
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -22,19 +25,24 @@ interface NativeTokenStore {
 class EncryptedNativeTokenStore(
     context: Context,
     private val preferencesName: String = DEFAULT_PREFERENCES_NAME,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    aeadFactory: () -> Aead = {
+        createAead(context.applicationContext, preferencesName)
+    },
 ) : NativeTokenStore {
     private val preferences = context.applicationContext
         .getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
-    private val aead = createAead(context.applicationContext, preferencesName)
+    private val aead by lazy(LazyThreadSafetyMode.SYNCHRONIZED, aeadFactory)
 
-    override suspend fun load(serverOrigin: ServerOrigin): NativeTokenSet? {
-        val encoded = preferences.getString(preferenceKey(serverOrigin), null) ?: return null
+    override suspend fun load(serverOrigin: ServerOrigin): NativeTokenSet? = withContext(ioDispatcher) {
+        val encoded = preferences.getString(preferenceKey(serverOrigin), null)
+            ?: return@withContext null
         val ciphertext = runCatching { Base64.decode(encoded, Base64.DEFAULT) }.getOrNull()
-            ?: return null
-        if (ciphertext.size > MAX_CIPHERTEXT_BYTES) return null
+            ?: return@withContext null
+        if (ciphertext.size > MAX_CIPHERTEXT_BYTES) return@withContext null
 
-        return runCatching {
+        runCatching {
             val plaintext = aead.decrypt(ciphertext, associatedData(serverOrigin))
             if (plaintext.size > MAX_SERIALIZED_TOKEN_BYTES) return@runCatching null
             val tokens = json.decodeFromString<NativeTokenSet>(
@@ -46,7 +54,7 @@ class EncryptedNativeTokenStore(
     }
 
     @Suppress("UseKtx") // Preserve commit() result so credential persistence fails closed.
-    override suspend fun save(serverOrigin: ServerOrigin, tokens: NativeTokenSet) {
+    override suspend fun save(serverOrigin: ServerOrigin, tokens: NativeTokenSet) = withContext(ioDispatcher) {
         validate(tokens)
         val plaintext = json.encodeToString(tokens).toByteArray(StandardCharsets.UTF_8)
         require(plaintext.size <= MAX_SERIALIZED_TOKEN_BYTES) {
@@ -67,7 +75,7 @@ class EncryptedNativeTokenStore(
     }
 
     @Suppress("UseKtx") // Preserve commit() result so credential removal fails closed.
-    override suspend fun clear(serverOrigin: ServerOrigin) {
+    override suspend fun clear(serverOrigin: ServerOrigin) = withContext(ioDispatcher) {
         check(
             preferences.edit()
                 .remove(preferenceKey(serverOrigin))

@@ -1,8 +1,17 @@
 package com.unsupportedpastels.hermesandroid.ui
 
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
+import com.unsupportedpastels.hermesandroid.gateway.canonicalReasoningEffort
 
 private val SlashCommandPattern = Regex("^/[^\\s/]*(?:\\s|$)")
+
+fun isModelPickerCommand(text: String): Boolean = text.trim() == "/model"
+
+fun reasoningEffortCommand(text: String): String? {
+    val tokens = text.trim().split(Regex("\\s+"))
+    if (tokens.size != 2 || tokens[0] != "/reasoning") return null
+    return canonicalReasoningEffort(tokens[1])
+}
 
 /**
  * True when [text] is a slash-command completion context, mirroring the desktop

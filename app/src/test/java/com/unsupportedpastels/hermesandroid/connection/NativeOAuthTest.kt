@@ -15,9 +15,12 @@ import java.nio.channels.UnresolvedAddressException
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -281,6 +284,59 @@ class NativeOAuthTest {
     }
 
     @Test
+    fun nativeLoginWaitsForBrowserReturnBeforeRedeemingCode() = runBlocking {
+        val authorizeUrl = CompletableDeferred<String>()
+        val browserReturned = CompletableDeferred<Unit>()
+        val exchangeStarted = CompletableDeferred<Unit>()
+        val login = HermesNativeLogin(
+            exchanger = object : NativeTokenExchanger {
+                override suspend fun exchange(
+                    serverOrigin: ServerOrigin,
+                    code: String,
+                    verifier: String,
+                ): NativeTokenSet {
+                    exchangeStarted.complete(Unit)
+                    return NativeTokenSet(
+                        accessToken = "opaque-access",
+                        refreshToken = "opaque-refresh",
+                        expiresAt = 2_000_000_000,
+                        provider = "nous",
+                        userId = "user",
+                    )
+                }
+            },
+            randomBytes = { size -> ByteArray(size) { index -> (index + 1).toByte() } },
+            awaitExchangeReady = { browserReturned.await() },
+        )
+        val signIn = async {
+            login.signIn(
+                serverOrigin = ServerOrigin.parse("https://hermes.example"),
+                provider = "nous",
+                openBrowser = { url ->
+                    authorizeUrl.complete(url)
+                    browserReturned.await()
+                },
+            )
+        }
+        val authorize = Url(authorizeUrl.await())
+        val redirect = URI(requireNotNull(authorize.parameters["redirect_uri"]))
+        val state = requireNotNull(authorize.parameters["state"])
+        val callback = async(Dispatchers.IO) {
+            sendCallbackRequest(
+                redirect,
+                "GET ${redirect.path}?code=gateway-code&state=$state HTTP/1.1\r\n",
+            )
+        }
+
+        assertNull(withTimeoutOrNull(250) { exchangeStarted.await() })
+        browserReturned.complete(Unit)
+
+        assertTrue(callback.await().startsWith("HTTP/1.1 200"))
+        assertEquals("opaque-access", signIn.await().accessToken)
+        assertTrue(exchangeStarted.isCompleted)
+    }
+
+    @Test
     fun nativeLoginShowsFailurePageForOAuthErrorCallback() = runBlocking {
         val login = HermesNativeLogin(
             exchanger = FakeNativeTokenExchanger(),
@@ -311,7 +367,7 @@ class NativeOAuthTest {
     }
 
     @Test
-    fun nativeLoginShowsFailurePageWhenTokenExchangeFails() = runBlocking {
+    fun nativeLoginAcknowledgesCallbackBeforeTokenExchangeFailure() = runBlocking {
         val login = HermesNativeLogin(
             exchanger = object : NativeTokenExchanger {
                 override suspend fun exchange(
@@ -341,7 +397,9 @@ class NativeOAuthTest {
         }
 
         assertTrue(result.isFailure)
-        assertTrue(browserResponse.startsWith("HTTP/1.1 400"))
+        assertTrue(browserResponse.startsWith("HTTP/1.1 200"))
+        assertTrue(browserResponse.contains("Return to Hermes"))
+        assertTrue(browserResponse.contains("Sign-in will finish securely in the app."))
         assertFalse(browserResponse.contains("Signed in to Hermes"))
         assertTrue(browserResponse.contains("history.replaceState(null,\"\",\"/complete\")"))
     }
@@ -381,7 +439,8 @@ class NativeOAuthTest {
                     "GET ${redirect.path}?code=gateway-code&state=$state HTTP/1.1\r\n",
                 )
                 assertTrue(validResponse.startsWith("HTTP/1.1 200"))
-                assertTrue(validResponse.contains("Signed in to Hermes"))
+                assertTrue(validResponse.contains("Return to Hermes"))
+                assertTrue(validResponse.contains("Sign-in will finish securely in the app."))
                 assertTrue(validResponse.contains("Cache-Control: no-store"))
                 assertTrue(validResponse.contains("Referrer-Policy: no-referrer"))
                 assertTrue(validResponse.contains("history.replaceState(null,\"\",\"/complete\")"))

@@ -1,5 +1,6 @@
 package com.unsupportedpastels.hermesandroid.ui
 
+import kotlin.system.measureTimeMillis
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -7,6 +8,126 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MessageMarkdownTest {
+    @Test
+    fun parsesHttpsMediaDirectiveAsImageBlockInsteadOfRawText() {
+        val url = "https://cdn.example/generated.png"
+
+        val blocks = parseMessageMarkdown("Here it is:\n\nMEDIA:$url\n\nDone")
+
+        val image = blocks.filterIsInstance<MarkdownImageBlock>().single()
+        assertEquals(url, image.url)
+        assertFalse(
+            blocks.filterIsInstance<MarkdownTextBlock>()
+                .any { it.plainText.contains("MEDIA:") },
+        )
+    }
+
+    @Test
+    fun parsesGatewayLocalMediaDirectiveAsImageBlockInsteadOfRawPath() {
+        val path = "/home/mark/project/design/generated-mockup.jpg"
+
+        val blocks = parseMessageMarkdown("Result:\n\nMEDIA:$path\n\nDone")
+
+        val image = blocks.filterIsInstance<MarkdownImageBlock>().single()
+        assertEquals(path, image.url)
+        assertFalse(
+            blocks.filterIsInstance<MarkdownTextBlock>()
+                .any { it.plainText.contains("MEDIA:") },
+        )
+    }
+
+    @Test
+    fun compactsEmbeddedImagePayloadAndHidesServerAttachmentPath() {
+        val source = buildString {
+            appendLine("before")
+            appendLine("[Image attached at: /private/server/upload.jpg]")
+            append("data:image/jpeg;base64,")
+            append("A".repeat(2_000))
+            appendLine()
+            append("after")
+        }
+
+        val compacted = compactEmbeddedPayloads(source)
+
+        assertEquals(
+            "before\nAttached image · embedded data hidden\nafter",
+            compacted,
+        )
+        assertFalse(compacted.contains("/private/server"))
+        assertFalse(compacted.contains("base64"))
+        assertFalse(compacted.contains("A".repeat(100)))
+    }
+
+    @Test
+    fun parsesGfmTableIntoStructuredCellsInsteadOfLiteralPipes() {
+        val block = parseMessageMarkdown(
+            """
+            | Category | Preferred source |
+            |---|---|
+            | Body Battery, stress, Garmin recovery | CIRQA |
+            | Golf UX and round activity | Apple Watch + 18Birdies |
+            | Apple activity and workout details | HealthKit |
+            | Sleep timing/stages | Compare Apple Watch and CIRQA |
+            | Unified coaching/history | Foundry |
+            """.trimIndent(),
+        ).single() as MarkdownTableBlock
+
+        assertEquals(listOf("Category", "Preferred source"), block.header.map { it.plainText })
+        assertEquals(5, block.rows.size)
+        assertEquals(
+            listOf("Golf UX and round activity", "Apple Watch + 18Birdies"),
+            block.rows[1].map { it.plainText },
+        )
+    }
+
+    @Test
+    fun tableCellsPreserveInlinePipesFormattingAndAlignment() {
+        val block = parseMessageMarkdown(
+            """
+            | Name | Expression | Status |
+            |:---|:---:|---:|
+            | A \| B | `left|right` | **Done** |
+            """.trimIndent(),
+        ).single() as MarkdownTableBlock
+
+        assertEquals(
+            listOf(
+                MarkdownTableAlignment.Start,
+                MarkdownTableAlignment.Center,
+                MarkdownTableAlignment.End,
+            ),
+            block.alignments,
+        )
+        assertEquals("A | B", block.rows.single()[0].plainText)
+        assertTrue(block.rows.single()[1].inlines.single().code)
+        assertEquals("left|right", block.rows.single()[1].plainText)
+        assertTrue(block.rows.single()[2].inlines.single().bold)
+    }
+
+    @Test
+    fun malformedTableDelimiterRemainsOrdinaryText() {
+        val block = parseMessageMarkdown("| Header | Value |\n|--|---|\n| A | B |")
+            .single() as MarkdownTextBlock
+
+        assertTrue(block.plainText.contains("|--|---|"))
+    }
+
+    @Test
+    fun parsesFiftyThousandCharacterPlainMessageWithinInteractiveBudget() {
+        val source = "plain response ".repeat(4_000).take(50_000)
+        lateinit var block: MarkdownTextBlock
+
+        val elapsedMillis = measureTimeMillis {
+            block = parseMessageMarkdown(source).single() as MarkdownTextBlock
+        }
+
+        assertEquals(source, block.plainText)
+        assertTrue(
+            "Parsing took ${elapsedMillis}ms; large transcript messages must not block UI rendering",
+            elapsedMillis < 100,
+        )
+    }
+
     @Test
     fun parsesListsInlineFormattingAndFencedCodeWithoutLiteralMarkers() {
         val blocks = parseMessageMarkdown(

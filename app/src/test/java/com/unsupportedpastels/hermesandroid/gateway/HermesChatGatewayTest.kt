@@ -1,6 +1,7 @@
 package com.unsupportedpastels.hermesandroid.gateway
 
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
+import com.unsupportedpastels.hermesandroid.app.ProjectSummary
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -30,6 +31,116 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class HermesChatGatewayTest {
     @Test
+    fun appliesCanonicalSessionScopedReasoningEffort() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            val id = request["id"]!!.jsonPrimitive.content
+            socket.offer(
+                """{"jsonrpc":"2.0","id":$id,"result":{"key":"reasoning","value":"medium","scope":"session"}}""",
+            )
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        connection.setReasoning(RuntimeSessionId("runtime-1"), "medium")
+
+        val request = Json.parseToJsonElement(socket.sentFrames.single()).jsonObject
+        assertEquals("config.set", request["method"]!!.jsonPrimitive.content)
+        val params = request["params"]!!.jsonObject
+        assertEquals("runtime-1", params["session_id"]!!.jsonPrimitive.content)
+        assertEquals("reasoning", params["key"]!!.jsonPrimitive.content)
+        assertEquals("medium", params["value"]!!.jsonPrimitive.content)
+        connection.close()
+    }
+
+    @Test
+    fun loadsConfiguredModelOptionsAndAppliesCanonicalSessionScopedSelection() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            val id = request["id"]!!.jsonPrimitive.content
+            when (request["method"]!!.jsonPrimitive.content) {
+                "model.options" -> socket.offer(
+                    """{"jsonrpc":"2.0","id":$id,"result":{"provider":"nous","model":"Hermes-4-405B","providers":[{"slug":"nous","name":"Nous Research","is_current":true,"authenticated":true,"models":["Hermes-4-405B","gpt-5.6-luna"]},{"slug":"openrouter","name":"OpenRouter","authenticated":false,"models":["anthropic/claude-sonnet-4.6"]}]}}""",
+                )
+                "config.set" -> socket.offer(
+                    """{"jsonrpc":"2.0","id":$id,"result":{"key":"model","value":"gpt-5.6-luna","scope":"session","deferred":false,"confirm_required":false}}""",
+                )
+            }
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        val options = connection.loadModelOptions(RuntimeSessionId("runtime-1"))
+        val result = connection.setModel(
+            runtimeSessionId = RuntimeSessionId("runtime-1"),
+            provider = "nous",
+            model = "gpt-5.6-luna",
+        )
+
+        assertEquals(ModelSelection("nous", "Hermes-4-405B"), options.current)
+        assertEquals(listOf("Hermes-4-405B", "gpt-5.6-luna"), options.providers.single().models)
+        assertTrue(result.accepted)
+        assertFalse(result.deferred)
+        assertFalse(result.confirmationRequired)
+        assertEquals(2, socket.sentFrames.size)
+        val optionsParams = Json.parseToJsonElement(socket.sentFrames[0]).jsonObject["params"]!!.jsonObject
+        assertEquals("runtime-1", optionsParams["session_id"]!!.jsonPrimitive.content)
+        assertTrue(optionsParams["explicit_only"]!!.jsonPrimitive.boolean)
+        assertFalse(optionsParams["include_unconfigured"]!!.jsonPrimitive.boolean)
+        val setParams = Json.parseToJsonElement(socket.sentFrames[1]).jsonObject["params"]!!.jsonObject
+        assertEquals("runtime-1", setParams["session_id"]!!.jsonPrimitive.content)
+        assertEquals("model", setParams["key"]!!.jsonPrimitive.content)
+        assertEquals("gpt-5.6-luna --provider nous --session", setParams["value"]!!.jsonPrimitive.content)
+        assertFalse(setParams["confirm_expensive_model"]!!.jsonPrimitive.boolean)
+        connection.close()
+    }
+
+    @Test
+    fun modelOptionsExcludeUnauthenticatedProvidersAndSwitchReportsConfirmationWithoutAcceptance() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            val id = request["id"]!!.jsonPrimitive.content
+            when (request["method"]!!.jsonPrimitive.content) {
+                "model.options" -> socket.offer(
+                    """{"jsonrpc":"2.0","id":$id,"result":{"provider":"nous","model":"current","providers":[{"slug":"nous","name":"Nous","authenticated":true,"models":["current","expensive"]},{"slug":"other","name":"Other","authenticated":false,"models":["unusable"]}]}}""",
+                )
+                "config.set" -> socket.offer(
+                    """{"jsonrpc":"2.0","id":$id,"result":{"key":"model","value":"expensive","scope":"session","confirm_required":true,"confirm_message":"This model is expensive"}}""",
+                )
+            }
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        val options = connection.loadModelOptions(RuntimeSessionId("runtime-1"))
+        val result = connection.setModel(RuntimeSessionId("runtime-1"), "nous", "expensive")
+
+        assertEquals(listOf("nous"), options.providers.map(ModelProviderOption::slug))
+        assertFalse(result.accepted)
+        assertTrue(result.confirmationRequired)
+        assertEquals("This model is expensive", result.confirmationMessage)
+        connection.close()
+    }
+
+    @Test
     fun connectsWithTicketAndResumesUsingSeparateIdentities() = runTest {
         val ticketClient = RecordingTicketClient("ticket-1")
         val socket = ScriptedSocket()
@@ -42,6 +153,7 @@ class HermesChatGatewayTest {
                     {"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{
                       "session_id":"runtime-1","session_key":"durable-1","resumed":true,
                       "messages":[{"role":"assistant","text":"hello","future":true}],"running":true,
+                      "info":{"model":"gpt-5.6-sol","provider":"openai-codex","reasoning_effort":"medium"},
                       "inflight":{"user":"prompt","assistant":"partial","streaming":true},
                       "future_field":{"ignored":true}
                     }}
@@ -80,9 +192,110 @@ class HermesChatGatewayTest {
         assertTrue(resumed.resumed)
         assertTrue(resumed.running)
         assertEquals("hello", resumed.messages.single()["text"]!!.jsonPrimitive.content)
+        assertEquals("gpt-5.6-sol", resumed.model)
+        assertEquals("openai-codex", resumed.provider)
+        assertEquals("medium", resumed.reasoningEffort)
         assertEquals("prompt", resumed.inflight?.user)
         assertEquals("partial", resumed.inflight?.assistant)
         assertTrue(resumed.inflight?.streaming == true)
+
+        connection.close()
+    }
+
+    @Test
+    fun createsSessionSendsValidCwdAndPreservesRuntimeAndCanonicalStoredAlias() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            assertEquals("session.create", request["method"]!!.jsonPrimitive.content)
+            socket.offer(
+                """
+                {"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{
+                  "session_id":"runtime-created","stored_session_id":"stored-canonical",
+                  "future_field":{"ignored":true}
+                }}
+                """.trimIndent(),
+            )
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        val created = connection.createSession(
+            durableSessionId = DurableSessionId("draft-local"),
+            profile = "default",
+            workspacePath = "/workspace/project",
+        )
+
+        val request = Json.parseToJsonElement(socket.sentFrames.single()).jsonObject
+        val params = request["params"]!!.jsonObject
+        assertEquals("default", params["profile"]!!.jsonPrimitive.content)
+        assertFalse(params["close_on_disconnect"]!!.jsonPrimitive.boolean)
+        assertEquals("/workspace/project", params["cwd"]!!.jsonPrimitive.content)
+        assertFalse(socket.sentFrames.single().contains("draft-local"))
+        assertEquals("runtime-created", created.runtimeSessionId.value)
+        assertEquals("stored-canonical", created.durableSessionId?.value)
+        assertFalse(created.resumed)
+        assertTrue(created.messages.isEmpty())
+
+        connection.close()
+    }
+
+    @Test
+    fun createsSessionOmitsInvalidOrMissingCwdWhileKeepingRequiredParams() = runTest {
+        val invalidWorkspacePaths = listOf<String?>(
+            null,
+            "",
+            "   ",
+            "relative/project",
+            "/workspace\u0000project",
+            "/".repeat(ProjectSummary.MAX_PATH_LENGTH + 1),
+        )
+        val socket = ScriptedSocket()
+        val sentParams = mutableListOf<kotlinx.serialization.json.JsonObject>()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            assertEquals("session.create", request["method"]!!.jsonPrimitive.content)
+            sentParams += request["params"]!!.jsonObject
+            val index = sentParams.lastIndex
+            socket.offer(
+                """{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{"session_id":"runtime-$index","stored_session_id":"stored-$index","unknown":true}}""",
+            )
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        invalidWorkspacePaths.forEachIndexed { index, workspacePath ->
+            val created = connection.createSession(
+                durableSessionId = DurableSessionId("draft-$index"),
+                profile = "default",
+                workspacePath = workspacePath,
+            )
+            assertEquals("runtime-$index", created.runtimeSessionId.value)
+            assertEquals("stored-$index", created.durableSessionId?.value)
+        }
+
+        assertEquals(invalidWorkspacePaths.size, sentParams.size)
+        sentParams.forEach { params ->
+            assertEquals("default", params["profile"]!!.jsonPrimitive.content)
+            assertFalse(params["close_on_disconnect"]!!.jsonPrimitive.boolean)
+            assertFalse(params.containsKey("cwd"))
+            assertFalse(params.containsKey("session_id"))
+        }
+        assertTrue(
+            socket.sentFrames.none { frame ->
+                invalidWorkspacePaths.filterNotNull().filter(String::isNotEmpty).any(frame::contains)
+            },
+        )
 
         connection.close()
     }
@@ -211,6 +424,445 @@ class HermesChatGatewayTest {
             ),
             events,
         )
+        connection.close()
+    }
+
+    @Test
+    fun streamingDeltasPreserveInterTokenLeadingWhitespace() = runTest {
+        // DeepSeek-style tokenizers attach the inter-word space to the FRONT of
+        // the next token ("HE", " WORLD"). Trimming each delta strips that
+        // leading space and jams the streamed text together ("HEWORLD"); the
+        // final message.complete text survives because it is one string whose
+        // internal spaces are untouched. Delta text must never be trimmed.
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "prompt.submit") {
+                val id = request["id"]!!.jsonPrimitive.content
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"runtime-1","payload":{"text":"HE"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"runtime-1","payload":{"text":" WORLD"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"runtime-1","payload":{"text":" SPACES"}}}""",
+                )
+                socket.offer("""{"jsonrpc":"2.0","id":$id,"result":{"status":"streaming"}}""")
+            }
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        connection.submitPrompt(RuntimeSessionId("runtime-1"), "hello")
+        val events = connection.events.take(3).toList()
+
+        assertEquals(
+            listOf(
+                HermesChatEvent.MessageDelta(RuntimeSessionId("runtime-1"), "HE"),
+                HermesChatEvent.MessageDelta(RuntimeSessionId("runtime-1"), " WORLD"),
+                HermesChatEvent.MessageDelta(RuntimeSessionId("runtime-1"), " SPACES"),
+            ),
+            events,
+        )
+        connection.close()
+    }
+
+    @Test
+    fun parsesSessionInfoReasoningInterimGeneratingTitleClarifyAndBlockingKinds() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "prompt.submit") {
+                val id = request["id"]!!.jsonPrimitive.content
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"session.info","session_id":"runtime-1","payload":{"stored_session_id":"stored-1","model":"deepseek/deepseek-v4-flash-0731","provider":"nous","reasoning_effort":"medium","title":"T","running":true,"future":1}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"thinking.delta","session_id":"runtime-1","payload":{"text":"hmm"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"reasoning.delta","session_id":"runtime-1","payload":{"text":"partial thought"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"reasoning.available","session_id":"runtime-1","payload":{"text":"authoritative thought"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"message.interim","session_id":"runtime-1","payload":{"text":"Checking config…","already_streamed":true}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"tool.generating","session_id":"runtime-1","payload":{"name":"terminal"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"session.title","session_id":"runtime-1","payload":{"title":"New title"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"clarify.request","session_id":"runtime-1","payload":{"request_id":"clarify-1","question":"Which folder?","choices":[]}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"preview.read.request","session_id":"runtime-1","payload":{"request_id":"pv-1"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"window.read.request","session_id":"runtime-1","payload":{"request_id":"win-1"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":"runtime-1","payload":{"text":"done","status":"error","billing":{"provider":"nous","billing_url":"https://billing.example","is_nous":true,"message":"Add credits"},"failure_reason":"billing","recoverable":true,"reasoning":"last thought","warning":"warn"}}}""",
+                )
+                socket.offer("""{"jsonrpc":"2.0","id":$id,"result":{"status":"streaming"}}""")
+            }
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        connection.submitPrompt(RuntimeSessionId("runtime-1"), "hello")
+        val events = connection.events.take(10).toList()
+
+        val runtimeId = RuntimeSessionId("runtime-1")
+        assertEquals(
+            listOf(
+                HermesChatEvent.SessionInfo(
+                    sessionId = runtimeId,
+                    storedSessionId = DurableSessionId("stored-1"),
+                    model = "deepseek/deepseek-v4-flash-0731",
+                    provider = "nous",
+                    reasoningEffort = "medium",
+                    title = "T",
+                    running = true,
+                ),
+                HermesChatEvent.ReasoningDelta(runtimeId, "partial thought"),
+                HermesChatEvent.ReasoningDelta(runtimeId, "authoritative thought", replace = true),
+                HermesChatEvent.MessageInterim(runtimeId, "Checking config…", alreadyStreamed = true),
+                HermesChatEvent.ToolGenerating(runtimeId, "terminal"),
+                HermesChatEvent.SessionTitle(runtimeId, "New title"),
+                HermesChatEvent.ClarifyRequest(
+                    sessionId = runtimeId,
+                    requestId = "clarify-1",
+                    question = "Which folder?",
+                    choices = emptyList(),
+                    multiSelect = false,
+                ),
+                HermesChatEvent.UnsupportedBlockingRequest(
+                    sessionId = runtimeId,
+                    kind = UnsupportedBlockingKind.PreviewRead,
+                    requestId = "pv-1",
+                    prompt = null,
+                ),
+                HermesChatEvent.UnsupportedBlockingRequest(
+                    sessionId = runtimeId,
+                    kind = UnsupportedBlockingKind.WindowRead,
+                    requestId = "win-1",
+                    prompt = null,
+                ),
+                HermesChatEvent.MessageComplete(
+                    sessionId = runtimeId,
+                    text = "done",
+                    status = "error",
+                    error = null,
+                    reasoning = "last thought",
+                    warning = "warn",
+                    failureReason = "billing",
+                    recoverable = true,
+                    billing = HermesChatEvent.BillingInfo(
+                        provider = "nous",
+                        billingUrl = "https://billing.example",
+                        isNous = true,
+                        message = "Add credits",
+                    ),
+                ),
+            ),
+            events,
+        )
+        connection.close()
+    }
+
+    @Test
+    fun longMessageTextSurvivesTheEventBound() = runTest {
+        val longText = "x".repeat(5_000)
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "prompt.submit") {
+                val id = request["id"]!!.jsonPrimitive.content
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"runtime-1","payload":{"text":"$longText"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":"runtime-1","payload":{"text":"$longText"}}}""",
+                )
+                socket.offer("""{"jsonrpc":"2.0","id":$id,"result":{"status":"streaming"}}""")
+            }
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        connection.submitPrompt(RuntimeSessionId("runtime-1"), "hello")
+        val events = connection.events.take(2).toList()
+
+        assertEquals(
+            listOf(
+                HermesChatEvent.MessageDelta(RuntimeSessionId("runtime-1"), longText),
+                HermesChatEvent.MessageComplete(
+                    sessionId = RuntimeSessionId("runtime-1"),
+                    text = longText,
+                    status = null,
+                ),
+            ),
+            events,
+        )
+        connection.close()
+    }
+
+    @Test
+    fun parsesTypedToolLifecycleEventsWithoutRetainingRawArgumentsOrResults() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "prompt.submit") {
+                socket.offer(
+                    """
+                    {"jsonrpc":"2.0","method":"event","params":{"type":"tool.start","session_id":"runtime-tools","payload":{
+                      "tool_id":"tool-1","name":"terminal","context":"pwd",
+                      "args":{"command":"SECRET_RAW_ARG"},"args_text":"SECRET_RAW_ARGS_TEXT"
+                    }}}
+                    """.trimIndent(),
+                )
+                socket.offer(
+                    """
+                    {"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"runtime-tools","payload":{
+                      "tool_id":"tool-1","name":"terminal","summary":"command completed",
+                      "args":{"command":"SECRET_RAW_ARG"},"result":{"secret":"SECRET_RAW_RESULT"},
+                      "result_text":"SECRET_RAW_RESULT_TEXT","inline_diff":"SECRET_RAW_DIFF"
+                    }}}
+                    """.trimIndent(),
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{"status":"streaming"}}""",
+                )
+            }
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        val acknowledgement = connection.submitPrompt(RuntimeSessionId("runtime-tools"), "run")
+        val events = connection.events.take(2).toList()
+
+        assertEquals("streaming", acknowledgement.status)
+        assertEquals(
+            HermesChatEvent.ToolStart(
+                sessionId = RuntimeSessionId("runtime-tools"),
+                toolId = "tool-1",
+                name = "terminal",
+                context = "pwd",
+            ),
+            events[0],
+        )
+        assertEquals(
+            HermesChatEvent.ToolComplete(
+                sessionId = RuntimeSessionId("runtime-tools"),
+                toolId = "tool-1",
+                name = "terminal",
+                summary = "command completed",
+            ),
+            events[1],
+        )
+        assertTrue(events.all { event ->
+            val text = event.toString()
+            "SECRET_RAW_ARG" !in text &&
+                "SECRET_RAW_RESULT" !in text &&
+                "SECRET_RAW_DIFF" !in text
+        })
+        connection.close()
+    }
+
+    @Test
+    fun parsesClarificationApprovalExpiryAndUnsupportedBlockingEventsSafely() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "prompt.submit") {
+                val id = request["id"]!!.jsonPrimitive.content
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"status.update","session_id":"runtime-interactions","payload":{"kind":"working","text":"Doing work","unknown":"ignored"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"clarify.request","session_id":"runtime-interactions","payload":{"request_id":"clarify-1","question":"Choose a mode","choices":["fast","safe"],"multi_select":true}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"clarify.expire","session_id":"runtime-interactions","payload":{"request_id":"clarify-1"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"runtime-interactions","payload":{"command":"redacted command","description":"Allow the command?","choices":["once","deny"],"future":{"raw":"ignored"}}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"approval.expire","session_id":"runtime-interactions","payload":{"request_id":"approval-1"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"secret.request","session_id":"runtime-interactions","payload":{"request_id":"secret-1","prompt":"Enter a value","env_var":"DO_NOT_RETAIN"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"sudo.request","session_id":"runtime-interactions","payload":{"request_id":"sudo-1","prompt":"Authorization required"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"terminal.read.request","session_id":"runtime-interactions","payload":{"request_id":"terminal-1","prompt":"Read terminal"}}}""",
+                )
+                socket.offer(
+                    """{"jsonrpc":"2.0","id":$id,"result":{"status":"streaming"}}""",
+                )
+            }
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        connection.submitPrompt(RuntimeSessionId("runtime-interactions"), "run")
+        val events = connection.events.take(8).toList()
+
+        assertEquals(
+            listOf(
+                HermesChatEvent.StatusUpdate(RuntimeSessionId("runtime-interactions"), "working", "Doing work"),
+                HermesChatEvent.ClarifyRequest(
+                    RuntimeSessionId("runtime-interactions"),
+                    "clarify-1",
+                    "Choose a mode",
+                    listOf("fast", "safe"),
+                    true,
+                ),
+                HermesChatEvent.ClarifyExpire(RuntimeSessionId("runtime-interactions"), "clarify-1"),
+                HermesChatEvent.ApprovalRequest(
+                    RuntimeSessionId("runtime-interactions"),
+                    null,
+                    "redacted command",
+                    "Allow the command?",
+                    listOf("once", "deny"),
+                ),
+                HermesChatEvent.ApprovalExpire(RuntimeSessionId("runtime-interactions"), "approval-1"),
+                HermesChatEvent.UnsupportedBlockingRequest(
+                    RuntimeSessionId("runtime-interactions"),
+                    UnsupportedBlockingKind.Secret,
+                    "secret-1",
+                    "Enter a value",
+                ),
+                HermesChatEvent.UnsupportedBlockingRequest(
+                    RuntimeSessionId("runtime-interactions"),
+                    UnsupportedBlockingKind.Sudo,
+                    "sudo-1",
+                    "Authorization required",
+                ),
+                HermesChatEvent.UnsupportedBlockingRequest(
+                    RuntimeSessionId("runtime-interactions"),
+                    UnsupportedBlockingKind.TerminalRead,
+                    "terminal-1",
+                    "Read terminal",
+                ),
+            ),
+            events,
+        )
+        assertTrue(events.none { event -> "DO_NOT_RETAIN" in event.toString() })
+        connection.close()
+    }
+
+    @Test
+    fun sendsClarifyApprovalAndInterruptRpcFramesWithBoundedResponses() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            val method = request["method"]!!.jsonPrimitive.content
+            val result = when (method) {
+                "clarify.respond" -> """{"status":"ok"}"""
+                "approval.respond" -> """{"status":"ok"}"""
+                "session.interrupt" -> """{"status":"interrupted"}"""
+                else -> error("unexpected method: $method")
+            }
+            socket.offer(
+                """{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":$result}""",
+            )
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        socket.offer(
+            """{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"runtime-1","payload":{"choices":["once","deny"],"command":"redacted","description":"description"}}}""",
+        )
+        advanceUntilIdle()
+        val clarify = connection.respondToClarification("clarify-1", "choice-a")
+        val approval = connection.respondToApproval(RuntimeSessionId("runtime-1"), "once", all = true)
+        val interrupt = connection.interruptSession(RuntimeSessionId("runtime-1"))
+
+        val requests = socket.sentFrames.map { Json.parseToJsonElement(it).jsonObject }
+        assertEquals(
+            listOf("clarify.respond", "approval.respond", "session.interrupt"),
+            requests.map { it["method"]!!.jsonPrimitive.content },
+        )
+        assertEquals(
+            mapOf("request_id" to "clarify-1", "answer" to "choice-a"),
+            requests[0]["params"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content },
+        )
+        assertEquals(
+            mapOf("session_id" to "runtime-1", "choice" to "once", "all" to "true"),
+            requests[1]["params"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content },
+        )
+        assertEquals(
+            mapOf("session_id" to "runtime-1"),
+            requests[2]["params"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content },
+        )
+        assertEquals(HermesChatResponseStatus.Ok, clarify.status)
+        assertEquals(HermesChatResponseStatus.Ok, approval.status)
+        assertEquals(HermesChatResponseStatus.Interrupted, interrupt.status)
+        connection.close()
+    }
+
+    @Test
+    fun rejectsOversizedRuntimeIdentityBeforeInterruptRequestIsSent() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            socket.offer(
+                """{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{"status":"interrupted"}}""",
+            )
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        val failure = runCatching {
+            connection.interruptSession(RuntimeSessionId("x".repeat(HERMES_CHAT_MAX_EVENT_ID_CHARS + 1)))
+        }.exceptionOrNull()
+
+        assertTrue(failure is HermesChatProtocolException)
+        assertTrue(socket.sentFrames.isEmpty())
         connection.close()
     }
 

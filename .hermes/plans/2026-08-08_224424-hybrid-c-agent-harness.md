@@ -1,380 +1,378 @@
-# Hybrid C Agent Harness Implementation Plan
+# Hybrid C Agent Harness — Simplified Immediate Sprint Plan
 
-> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
+> **For Hermes:** Implement the immediate sprint as vertical RED → GREEN → REFACTOR slices. Do not begin the tracked backlog unless the user explicitly promotes an item into scope.
 
-**Goal:** Replace the current sessions-and-transcript shell with the locked Hybrid C project-first agent harness, using the Nous × Hermes visual system on the Fold cover screen and an adaptive opened 4:3 workspace.
+**Goal:** Turn the current sessions-and-transcript Android client into a usable project-first Hermes controller while preserving the unchanged `hermes serve` boundary and the client capabilities already implemented.
 
-**Architecture:** Keep the unchanged `hermes serve` host authoritative. Extend the existing ticketed JSON-RPC client to read official project and run-event contracts, normalize them into pure Kotlin snapshot models, and render them through Navigation 3 scenes. Compact windows use `Home → Project → Session → Active Run`; opened 4:3 uses a combined project/session master pane beside the run workspace, with Plan/Changes/Terminal exposed as a supporting sheet unless width genuinely permits another pane.
+**Architecture:** Keep the remote Hermes host authoritative. Add the smallest project data path needed for `Home → Project → Session Workspace`, lazily create project-bound runtimes on first Send, and extend the existing session detail with essential tool and blocking-interaction events. Reuse the current Navigation 3 list/detail structure rather than introducing a parallel desktop-style workspace architecture.
 
-**Tech Stack:** Kotlin, Jetpack Compose Material 3, Navigation 3, Material 3 adaptive navigation scenes, Ktor JSON-RPC/WebSockets, kotlinx.serialization, coroutines/StateFlow, Robolectric Compose tests, Compose Preview Screenshot Testing, API 36 foldable emulator.
+**Tech Stack:** Kotlin, Jetpack Compose Material 3, Navigation 3, Material 3 adaptive Navigation 3 scenes, Ktor JSON-RPC/WebSockets, kotlinx.serialization, coroutines/StateFlow, Robolectric Compose tests, Compose Preview Screenshot Testing, and an API 36 foldable emulator.
+
+---
+
+## Decision summary
+
+The original fourteen-task plan mixed the minimum usable project-first controller with speculative IDE-style surfaces and release-level polish. This revision keeps the core product direction but narrows the immediate sprint to five vertical slices.
+
+### Immediate sprint
+
+1. Project browsing and project-first navigation.
+2. Project-aware local drafts with runtime creation on first Send.
+3. Essential agent events and controller interactions.
+4. Nous × Hermes visual treatment and adaptive project/session workspace.
+5. Focused verification on the local foldable emulator.
+
+### Tracked, but not in this sprint
+
+- Elaborate reasoning/thinking views and filters.
+- Advanced Working Set grouping and expanded inline diffs.
+- Tool-output risk presentation.
+- Plan/Changes/Terminal inspector and any third persistent pane.
+- A permanent navigation rail before multiple useful top-level destinations exist.
+- Full repository/lane hierarchy and advanced project search.
+- Secret, sudo, and terminal-input response UI.
+- Exhaustive screenshot permutations, physical-device release verification, and routine independent review.
 
 ---
 
 ## Product contract
 
-- **Locked information architecture:** Hybrid C project-first split workspace.
-- **Locked visual direction:** Nous × Hermes — graphite/charcoal surfaces; desaturated teal for navigation, selection, links, and timeline structure; warm gold only for New task, Send, and active-operation progress; green only for completed states; no purple, gradients, glow, glass, or decorative AI styling.
-- **Compact:** one pane at a time. Home distinguishes Projects from Sessions. Project drill-in lists durable sessions. Active Run contains objective, filter chips, timeline, grouped Working Set, agent output, and command dock.
-- **Opened 4:3:** navigation rail plus combined project/session master and primary run workspace. Plan/Changes/Terminal is a supporting sheet at medium width and may become a persistent supporting scene only at an evidence-backed expanded breakpoint.
-- **Truthfulness:** never show future-step totals, percent complete, or token/context telemetry without an authoritative contract. Show `N complete · M active` and indeterminate progress. Thinking text, durations, summaries, test counts, and diffs render only when present.
-- **Server boundary:** client-only implementation against released official interfaces. Do not add or require custom Hermes routes or backend changes.
-
-## Current baseline and constraints
-
-- Branch: `main`; latest committed baseline is `c9d1d5e`.
-- The worktree currently contains uncommitted attachment work in `MainActivity.kt`, `HermesConnectionViewModel.kt`, `HermesChatGateway.kt`, `HermesApp.kt`, and matching tests plus new attachment files. Preserve it; do not stash, reset, overwrite, or fold it accidentally into an unrelated commit.
-- Current navigation routes are `SessionListRoute`, `SessionDetailRoute`, and `ServerSettingsRoute`.
-- Current adaptive strategy already uses `ListDetailSceneStrategy` with one compact and two medium/expanded horizontal partitions.
-- Current Android live-event parser accepts only `message.start`, `message.delta`, `message.complete`, and `error`, while the server also emits tool, reasoning, thinking, status, approval, and clarification events.
-- Current server project contracts are `projects.tree` and `projects.project_sessions`; project-aware `session.create` accepts `cwd`.
-- Existing screenshot source set covers compact, medium, expanded, dark/large-text, settings, and slash completion.
+- **Information architecture:** `Home → Project → Session Workspace`.
+- **Session workspace:** durable transcript and live-run state share one destination. “Active run” is runtime state, not a separate route.
+- **Compact windows:** one pane at a time.
+- **Suitable wider windows:** project/session master and session workspace render through the existing Navigation 3 `ListDetailSceneStrategy`.
+- **Visual direction:** graphite/charcoal surfaces; desaturated teal for navigation, selection, links, and timeline structure; warm gold for New task, Send, Stop/current-operation emphasis; green for completed states; no purple, gradients, glow, glass, or decorative AI styling.
+- **Truthfulness:** render only fields received from an authoritative contract. Do not invent percentages, future-step totals, token/context telemetry, plans, diffs, durations, or terminal state.
+- **Server boundary:** client-only work against released official interfaces. No custom server route, plugin, fork, dashboard extension, or gateway worker.
+- **Runtime safety:** project browsing is read-only. Resume or control a runtime only after explicit user action. Back changes presentation and never sends `session.close` or `session.interrupt`.
+- **Compatibility:** decode missing and unknown fields tolerantly and fall back to flat durable sessions when project RPCs are unsupported.
 
 ---
 
-### Task 0: Protect and baseline the attachment worktree
+## Current baseline
 
-**Objective:** Establish a verified starting point without losing or misattributing the existing attachment slice.
-
-**Files:** Read-only inspection of current modified/untracked files; no Hybrid C production edits yet.
-
-1. Run `git status --short` and `git diff --check`.
-2. Review `git diff --stat` and the attachment-related diff so later edits preserve all staged-file behavior.
-3. Run `./gradlew testDebugUnitTest lintDebug assembleDebug`.
-4. If the attachment slice is already green and complete, commit it separately as `feat: add remote composer attachments`; otherwise finish it under its own TDD scope before starting Task 1.
-5. Record the clean baseline commit. Do not proceed with Hybrid C on an unexplained dirty tree.
-
-**Expected:** baseline tests pass; attachment work is either separately committed or explicitly isolated with user-approved handling.
+- Branch: `main`.
+- Clean baseline commit: `3f59c6a`.
+- Remote attachments are committed separately in `ab5bebc`; the old dirty-worktree protection task is complete.
+- Current root/detail routes are `SessionListRoute`, `SessionDetailRoute`, and `ServerSettingsRoute`.
+- The app already uses Navigation 3 with `ListDetailSceneStrategy` and compact versus wider partition directives.
+- Existing features to preserve: Nous OAuth, origin-scoped authentication, durable transcript loading, streaming messages, reconnect handling, Markdown rendering, slash completion, and remote attachment staging.
+- Current Android live-event parsing handles only `message.start`, `message.delta`, `message.complete`, and `error`.
+- The currently installed Hermes source verifies the official project RPCs `projects.tree` and `projects.project_sessions`, project-aware `session.create(cwd)`, tool/status events, `clarify.request`/`clarify.respond`, `approval.request`/`approval.respond`, and `session.interrupt`. Revalidate these contracts at implementation time and capability-gate unsupported methods rather than branching on a Hermes version number.
 
 ---
 
-### Task 1: Freeze Hybrid C tokens and semantic roles
+## Implementation rules
 
-**Objective:** Replace the purple-biased theme with testable Nous × Hermes tokens before changing layout.
-
-**Files:**
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/theme/Theme.kt`
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/theme/HermesSemanticColors.kt`
-- Create: `app/src/test/java/com/unsupportedpastels/hermesandroid/theme/HermesSemanticColorsTest.kt`
-- Create: `docs/design/hybrid-c.md`
-
-1. Write failing tests asserting distinct semantic roles for navigation/selection teal, primary-action gold, completed green, active progress gold, neutral surfaces, and error.
-2. Run `./gradlew testDebugUnitTest --tests '*HermesSemanticColorsTest'`; expect RED because the token object does not exist.
-3. Implement immutable light/dark token sets and map them into Material `ColorScheme`. Keep domain semantics outside arbitrary project-provided colors.
-4. Document the approved component/color rules and prohibited styling in `docs/design/hybrid-c.md`.
-5. Run the focused test; expect GREEN.
-6. Commit: `feat: add Nous Hermes design tokens`.
-
-**Acceptance:** no purple/tertiary default remains; gold is not reused for selection or completed states; both light and dark themes meet readable contrast in screenshot review.
+1. Use vertical RED → GREEN → REFACTOR slices. Add meaningful tests before each behavior change.
+2. Prefer extending existing models, gateway code, ViewModel state, and UI before creating new abstractions.
+3. Extract a new file only when it owns a clear model, reducer, or reusable composable; do not create one file per conceptual label in advance.
+4. Keep project IDs, folder paths, durable session IDs, local draft IDs, and transient runtime IDs as distinct types or explicitly named values.
+5. Bound retained strings, collection sizes, event previews, and frame bodies without persisting raw tool arguments/results by default.
+6. Preserve origin/profile generation guards and do not clear credentials for transient transport or protocol failures.
+7. Keep controller operations scoped to the selected runtime and current origin/profile generation.
+8. Run focused tests during each slice. Run the complete Android gate once at sprint completion unless a cross-cutting change requires it earlier.
 
 ---
 
-### Task 2: Add first-class project and workspace models
+## Slice 1: Project browsing and project-first navigation
 
-**Objective:** Represent projects, folders, lanes, and project-owned durable sessions without conflating project IDs, folder paths, durable IDs, or runtime IDs.
+**Objective:** Browse authoritative Hermes projects and their durable sessions without resuming or activating a runtime.
 
-**Files:**
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/app/ProjectModels.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/app/HermesAppState.kt`
-- Create: `app/src/test/java/com/unsupportedpastels/hermesandroid/app/ProjectModelsTest.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/app/HermesAppStateTest.kt`
+**Expected files:**
 
-1. Write RED tests for nonblank `ProjectId`, primary-folder selection, project/session membership, selected-project reconciliation, and unscoped Recent Sessions.
-2. Model only released fields needed by Hybrid C: project ID/name/description/primary path, repositories/lanes, preview sessions, scoped session IDs, and load/error state.
-3. Add pure reconciliation that merges refreshed server truth without dropping the selected project/session when still valid.
-4. Run focused tests and make them GREEN.
-5. Commit: `feat: model projects and workspace sessions`.
+- Create or modify a small project model under `app/src/main/java/com/unsupportedpastels/hermesandroid/app/`.
+- Modify `gateway/HermesChatGateway.kt` and its tests.
+- Modify `gateway/HermesGateway.kt` only as needed to publish project state.
+- Modify `connection/HermesConnectionViewModel.kt` and focused tests.
+- Modify `navigation/Routes.kt` and route tests.
+- Modify `ui/HermesApp.kt` and focused Compose tests; extract Home/Project composables only if that file becomes harder to maintain.
 
-**Acceptance:** no basename-only project identity; sessions remain keyed by durable ID; paths are display metadata/workspace targets, not IDs.
+### Required behavior
 
----
+1. Introduce only the models used by the first UI:
+   - nonblank project ID;
+   - project label and optional primary path;
+   - session count and bounded preview sessions;
+   - scoped durable session IDs;
+   - project drill-in sessions;
+   - loading, unsupported, transient-error, and loaded-empty states.
+2. Do not model project color/icon, every repository/lane field, pinning, manual ordering, or discovery controls unless the immediate UI consumes them.
+3. Add read-only RPC calls:
+   - `projects.tree` with bounded `preview_limit` and `session_limit`;
+   - `projects.project_sessions` with `project_id` and a bounded `session_limit`.
+4. Decode unknown/missing fields non-fatally and distinguish method-not-found from transient connection errors.
+5. Load project metadata after authentication with origin/profile generation guards.
+6. Use a metadata-only ticketed connection that never calls `session.resume`, `session.create`, or another controller operation.
+7. Reconcile project rows with the existing REST durable-session list by durable ID.
+8. Add routes:
+   - `HomeRoute` as root;
+   - `ProjectRoute(ProjectId)`;
+   - existing `SessionDetailRoute(DurableSessionId)` as the session workspace;
+   - existing `ServerSettingsRoute`.
+9. Compact Back behavior: Session → Project → Home.
+10. Wider list/detail behavior: selection changes detail without an unnecessary Back affordance.
+11. When project RPCs are unsupported, retain a functional flat Recent Sessions view.
 
-### Task 3: Parse official project RPC responses
+### Focused acceptance checks
 
-**Objective:** Load project overview and project drill-in through existing ticketed JSON-RPC without resuming or activating sessions.
-
-**Files:**
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/gateway/HermesChatGateway.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/gateway/HermesChatGatewayTest.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/gateway/FakeHermesGateway.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/gateway/FakeHermesGatewayTest.kt`
-
-1. Add RED protocol tests for `projects.tree` parameters (`preview_limit`, bounded `session_limit`) and tolerant decoding of unknown/missing fields.
-2. Add RED tests for `projects.project_sessions(project_id)` and null/missing projects.
-3. Extend the connection interface with read-only `loadProjectTree()` and `loadProjectSessions(ProjectId)` methods; do not call `session.resume`.
-4. Bound project count, lane count, session count, strings, and frame/body sizes before retaining data.
-5. Distinguish unsupported-method protocol errors from transient connection failures so older hosts can fall back to flat Recent Sessions.
-6. Run `./gradlew testDebugUnitTest --tests '*HermesChatGatewayTest'`; expect GREEN.
-7. Commit: `feat: load Hermes projects over JSON RPC`.
-
-**Acceptance:** project browsing mints a fresh WS ticket but never takes control of another runtime.
-
----
-
-### Task 4: Load and reconcile project state in the ViewModel
-
-**Objective:** Publish project state to Compose with origin/profile generation guards and honest fallbacks.
-
-**Files:**
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/gateway/HermesGateway.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/connection/HermesConnectionViewModel.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/connection/HermesConnectionViewModelTest.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/connection/HermesChatIntegrationTest.kt`
-
-1. Write RED tests for initial project load after authentication, selected-project drill-in, origin changes, stale response suppression, transient failure retry state, and unsupported-host flat-session fallback.
-2. Add project overview and per-project session cache to `HermesGatewaySnapshot` or a narrowly scoped sibling `StateFlow`.
-3. Use a read-only one-shot gateway connection for project metadata; close it after the RPC. Do not resume sessions.
-4. Reconcile project-scoped sessions with the existing REST durable-session list by durable ID.
-5. Preserve credentials on transport/503/protocol-transient failures; only existing conclusive auth rejection may sign the user out.
-6. Run focused ViewModel/integration tests; expect GREEN.
-7. Commit: `feat: publish project workspace state`.
+- Project browsing performs no runtime resume/create call.
+- Duplicate basenames do not become project identity.
+- Stale project results cannot overwrite a new origin/profile state.
+- Unsupported project methods produce a flat-session fallback rather than a broken Home screen.
+- Compact and wide navigation behavior is covered by Compose tests.
 
 ---
 
-### Task 5: Introduce project-first Navigation 3 routes
+## Slice 2: Project-aware local drafts and lazy first Send
 
-**Objective:** Implement `Home → Project → Session → Active Run` while preserving current settings and back behavior.
+**Objective:** Start a task inside a selected project without creating a runtime or durable server row until the user sends the first instruction.
 
-**Files:**
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/navigation/Routes.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/navigation/RoutesTest.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/HermesApp.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/ui/HermesAppTest.kt`
+**Expected files:**
 
-1. Write RED serialization and navigation tests for `HomeRoute`, `ProjectRoute(ProjectId)`, `SessionDetailRoute`, and `WorkspaceInspectorRoute`.
-2. Replace `SessionListRoute` as root with `HomeRoute`; keep compatibility only if required to restore old saved state.
-3. Make project/session master entries the Navigation 3 list pane and active run the detail pane.
-4. Compact Back: Run → Project → Home. Opened list/detail: selection changes detail without showing an unnecessary Back control.
-5. Ensure Back while a run is active changes presentation only; it must not close the runtime, clear partial output, or stop recovery.
-6. Run focused route/UI tests; expect GREEN.
-7. Commit: `feat: add project-first navigation`.
+- Modify `gateway/HermesChatGateway.kt` and gateway tests.
+- Modify `connection/HermesConnectionViewModel.kt` and integration tests.
+- Modify `MainActivity.kt` or `HermesAppHost` wiring only where callbacks require project context.
+- Modify the Home/Project/Session workspace Compose tests.
 
----
+### Required behavior
 
-### Task 6: Build the compact Hybrid C home and project drill-in
+1. Extend local draft state with optional project ID and authoritative workspace path.
+2. Creating or opening a draft must not connect a chat socket or call `session.create`.
+3. On first Send:
+   - validate the selected project primary path;
+   - open a fresh ticketed connection;
+   - call `session.create` with `profile`, `close_on_disconnect=false`, and `cwd` only when an explicit valid project path exists;
+   - stage attachments;
+   - submit the prompt.
+4. Preserve the local draft identity until the server returns a canonical durable identity.
+5. Existing durable sessions resume using their stored workspace; do not replace it with the currently selected project.
+6. A project without a primary path must show `No workspace` and disable project-scoped Send. The user may start an unscoped task from Home; never silently use the gateway launch directory or invent a folder picker in this sprint.
+7. Failed attachment staging leaves the text and attachment chips editable and does not submit a partial prompt.
 
-**Objective:** Deliver the Fold cover-screen homepage with clear Projects, nested Sessions, Search, Open project, Resume, and New task actions.
+### Focused acceptance checks
 
-**Files:**
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/HomeScreen.kt`
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/ProjectSessionsScreen.kt`
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/ProjectSessionRows.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/HermesApp.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/ui/HermesAppTest.kt`
-
-1. Write RED Compose tests asserting separate `PROJECTS` and `SESSIONS` headings, project expand/collapse, session Resume, Search state, New task, Open project, loading/error/empty states, and accessibility labels.
-2. Implement a compact top bar with independent Search and Settings actions; no outer shared capsule and no decorative branding block.
-3. Render project rows from server data and unscoped recents separately; never infer projects from session source labels.
-4. Use Material list rows, 12–16dp surfaces only where grouping adds meaning, minimum 48dp touch targets, and semantic Nous × Hermes colors.
-5. Keep project search local and bounded. Do not trigger session resume while filtering or opening a project.
-6. Run focused Compose tests; expect GREEN.
-7. Commit: `feat: build project-first Hermes home`.
+- New task and navigation create no server runtime.
+- First Send includes the expected `cwd` exactly once.
+- Existing sessions never receive a new project `cwd`.
+- Attachments and slash completion still work for the lazily created runtime.
+- Canonical durable ID reconciliation remains correct after the first turn.
 
 ---
 
-### Task 7: Make New task project-aware
+## Slice 3: Essential agent events and controller interactions
 
-**Objective:** Start a local draft within the selected project and pass its authoritative primary folder only when the first prompt creates the runtime.
+**Objective:** Make a submitted run understandable and operable without building the full deferred timeline system.
 
-**Files:**
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/gateway/HermesChatGateway.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/connection/HermesConnectionViewModel.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/MainActivity.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/gateway/HermesChatGatewayTest.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/connection/HermesChatIntegrationTest.kt`
+**Expected files:**
 
-1. Add RED tests that a new project draft creates no server row/runtime until first Send.
-2. Add RED gateway tests that `session.create` includes `cwd` only for an explicit validated project `primary_path`; retain `profile=default` and `close_on_disconnect=false`.
-3. Extend local draft state with optional `ProjectId` and workspace path; never use a client-local Android URI.
-4. On first Send, create the runtime with the project workspace and then submit the prompt. Existing sessions remain bound to their stored workspace.
-5. Handle projects without a primary path by requiring explicit project/folder selection or showing `No workspace`; never silently use the gateway launch directory.
-6. Run focused tests; expect GREEN.
-7. Commit: `feat: start tasks in selected project workspace`.
+- Add one typed run-event model or extend `HermesChatEvent`.
+- Add one small pure reducer/state model if event replacement cannot remain clear in `ChatSessionSnapshot`.
+- Modify `gateway/HermesChatGateway.kt` and protocol tests.
+- Modify `connection/HermesConnectionViewModel.kt` and integration tests.
+- Modify the existing session workspace UI and focused Compose tests.
 
----
+### Immediate event set
 
-### Task 8: Parse rich live agent events
+- Existing message start/delta/complete/error.
+- `tool.start`.
+- `tool.complete`.
+- `status.update`.
+- `clarify.request` plus `clarify.respond`.
+- `approval.request` plus `approval.respond`.
+- Expiry/terminal state for blocking requests when advertised by the released contract.
+- `session.interrupt` for the selected active runtime.
 
-**Objective:** Convert official tool/reasoning/thinking/status events into bounded typed Android events instead of dropping them.
+### Required behavior
 
-**Files:**
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/gateway/AgentRunEvent.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/gateway/HermesChatGateway.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/gateway/HermesChatGatewayTest.kt`
+1. Pair tool start/complete by stable `tool_id`; completion replaces transient active state rather than adding a duplicate operation.
+2. Retain bounded safe context and summary only. Do not retain or render unbounded raw tool arguments/results by default.
+3. Preserve event ordering and accept stream events that race the prompt-submit acknowledgment.
+4. Render a compact tool/status row inside the current session workspace. A sophisticated grouped Working Set is not required in this sprint.
+5. Render live clarification and approval controls only when their matching response RPC is wired.
+6. Generation-guard responses so an old request cannot answer a different runtime or origin.
+7. For recognized but unsupported blocking requests such as secret/sudo/terminal input, show a truthful non-interactive state indicating that another supported controller is required. Do not show dead input controls.
+8. Label interruption as `Stop`; call `session.interrupt` only for the selected active runtime.
+9. Back must preserve the runtime ID, selected durable ID, sending state, partial output, socket, and recovery work. It must not call `session.close` or `session.interrupt`.
+10. Unknown event types and fields remain nonfatal.
 
-1. Write RED parser tests for `tool.start`, `tool.complete`, `tool.output_risk`, `reasoning.available`, `reasoning.delta`, `thinking.delta`, and `status.update`.
-2. Pair tool start/complete by `tool_id`; preserve name, safe context, duration, summary, todos, and bounded `inline_diff` when present.
-3. Do not retain or display unbounded raw args/results by default. Treat tool output as potentially sensitive and cap all previews.
-4. Preserve event ordering; high-frequency reasoning/thinking deltas may be coalesced for display, but terminal tool/message events must flush in order.
-5. Unknown event types/fields remain forward-compatible and nonfatal.
-6. Add approval/clarification models only if their response RPCs are implemented in the same bounded slice; never display dead controls.
-7. Run focused gateway tests; expect GREEN.
-8. Commit: `feat: parse live Hermes run events`.
+### Focused acceptance checks
 
----
-
-### Task 9: Reduce events into timeline and Working Sets
-
-**Objective:** Build a deterministic, testable run-state reducer independent of Compose.
-
-**Files:**
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/app/AgentRunState.kt`
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/app/AgentRunReducer.kt`
-- Create: `app/src/test/java/com/unsupportedpastels/hermesandroid/app/AgentRunReducerTest.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/gateway/HermesGateway.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/connection/HermesConnectionViewModel.kt`
-
-1. Write RED tests for objective, thinking lifecycle, adjacent-tool grouping, start→complete replacement, active/completed counts, error/cancel states, filter projections, and reconnect snapshot replacement.
-2. Use stable IDs: message ID where available, first tool ID for Working Set groups, durable ID for navigation, runtime ID only for live routing.
-3. Group adjacent tool events into one Working Set while preserving expandable children and inline diff details.
-4. Derive `completeCount` and `activeCount`; never derive percentages or future totals.
-5. Preserve the existing transcript as the durable fallback. On reconnect, replace partial streaming snapshots rather than duplicating them.
-6. Run reducer and integration tests; expect GREEN.
-7. Commit: `feat: reduce agent events into working sets`.
+- Tool completion replaces its matching start row.
+- Clarification and approval responses target the correct request/runtime.
+- Stop is idempotent and scoped to the active runtime.
+- Back during a long run hides the workspace without stopping it; reopening shows the retained partial response.
+- Reconnect snapshot replacement does not duplicate the streaming assistant text or tool row.
 
 ---
 
-### Task 10: Build the active run timeline and command dock
+## Slice 4: Nous × Hermes visual treatment and adaptive workspace
 
-**Objective:** Replace role-labeled transcript rows with the Hybrid C agent harness while preserving Markdown, attachments, slash completion, streaming, and accessibility.
+**Objective:** Present the new project-first flow as an agent workspace without adding speculative desktop-style panes.
 
-**Files:**
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/AgentRunScreen.kt`
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/RunTimeline.kt`
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/WorkingSetCard.kt`
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/RunCommandDock.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/HermesApp.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/ui/HermesAppTest.kt`
+**Expected files:**
 
-1. Write RED Compose tests for objective, All/Thinking/Tools/Output filters, one selected chip only, grouped tool expansion, diff display, conditional thinking, streaming agent output, complete/active state semantics, attachment chips, slash menu, and command submission.
-2. Render user objective and assistant output uncontained; do not use chat bubbles or sender avatars.
-3. Render tools as compact timeline rows; expand only the selected group/operation. Use teal for structure/selection, gold for current progress and Send, green for completion.
-4. Preserve `MarkdownMessage`, streaming anchor behavior, attachment staging, and slash completion.
-5. Replace `Message` copy with `Next instruction or /command`; retain IME and safe-area behavior.
-6. Run focused Compose tests; expect GREEN.
-7. Commit: `feat: render agent run workspace`.
+- Modify `theme/Theme.kt`; add a semantic color file only if it improves call-site clarity.
+- Modify the project Home, Project, and Session workspace composables.
+- Modify focused Compose and screenshot fixtures.
 
----
+### Required behavior
 
-### Task 11: Add truthful Stop and interactive boundaries
+1. Apply semantic visual roles:
+   - teal for navigation, selection, links, and timeline structure;
+   - gold for New task, Send, Stop/current-operation emphasis;
+   - green for completed state;
+   - neutral graphite/charcoal surfaces;
+   - Material error roles for failures.
+2. Verify semantics through behavior and screenshot tests; do not add tests that merely freeze literal color values.
+3. Home clearly separates Projects from flat/unscoped Recent Sessions.
+4. Project drill-in lists its durable sessions with Open/Resume and New task actions.
+5. Session workspace preserves Markdown, streaming bottom-follow behavior, attachments, slash completion, and IME/system-bar handling.
+6. Move away from chat bubbles and sender avatars where practical, but evolve the current screen incrementally rather than replacing it in one big rewrite.
+7. Compact windows remain one pane.
+8. Suitable wider windows show the project/session master and session workspace through the existing `ListDetailSceneStrategy`.
+9. Do not add a permanent navigation rail, supporting inspector, or third pane in this sprint.
+10. Keep minimum touch targets, accessibility descriptions, selected-state semantics, and large-text readability.
 
-**Objective:** Wire controls only to real RPC behavior and preserve dangerous-action boundaries.
+### Focused screenshot set
 
-**Files:**
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/gateway/HermesChatGateway.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/connection/HermesConnectionViewModel.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/AgentRunScreen.kt`
-- Modify: matching gateway, integration, and Compose tests.
+- Compact project Home, light theme.
+- Compact active session workspace with one tool operation.
+- Medium list/detail state.
+- Opened approximately 4:3 project/session master plus workspace.
+- One compact dark-theme, 1.5× font-scale state.
 
-1. Write RED tests for `session.interrupt`, idempotent Stop state, terminal cancellation event, and Back-without-interrupt.
-2. Label the control `Stop`, not Pause. Send `session.interrupt` only for the selected live runtime.
-3. Preserve runtime/session state until terminal confirmation; do not call destructive `session.close` from Back.
-4. If approval/clarification events were included in Task 8, implement their official response RPCs and expiry states now; otherwise hide those controls and defer them explicitly.
-5. Run focused tests; expect GREEN.
-6. Commit: `feat: add truthful run controls`.
-
----
-
-### Task 12: Implement opened 4:3 adaptive workspace
-
-**Objective:** Match Hybrid C on an unfolded Fold without shrinking a desktop dashboard into unreadable columns.
-
-**Files:**
-- Create: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/WorkspaceInspector.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/ui/HermesApp.kt`
-- Modify: `app/src/main/java/com/unsupportedpastels/hermesandroid/navigation/Routes.kt`
-- Modify: `app/src/test/java/com/unsupportedpastels/hermesandroid/ui/HermesAppTest.kt`
-
-1. Write RED tests at compact and 900dp widths for one-pane drill-down versus simultaneous master/detail.
-2. Keep Navigation 3 `SceneStrategy`; do not introduce legacy `ListDetailPaneScaffold`/`SupportingPaneScaffold`.
-3. At opened 4:3, show combined project/session master plus run workspace and a navigation rail. Do not show a Back button in simultaneous list/detail.
-4. Implement Plan/Changes/Terminal as a supporting route presented in a Material sheet at medium width. Promote it to a persistent supporting scene only when window metrics prove usable minimum pane widths and screenshot tests remain readable.
-5. Drive decisions from window metrics/posture, never the Fold model name or orientation.
-6. Verify no double system-bar/IME padding and no occlusion at the hinge.
-7. Run focused Compose tests; expect GREEN.
-8. Commit: `feat: adapt agent workspace for foldables`.
+Do not regenerate references without visual inspection.
 
 ---
 
-### Task 13: Expand screenshot and accessibility coverage
+## Slice 5: Sprint verification
 
-**Objective:** Lock the approved design across compact cover, opened 4:3, dark/light, and large text without blindly updating references.
+**Objective:** Prove the narrowed sprint works against the unchanged real Hermes host on the local foldable emulator.
 
-**Files:**
-- Modify: `app/src/screenshotTest/java/com/unsupportedpastels/hermesandroid/ui/HermesAppScreenshotTest.kt`
-- Add screenshot preview fixtures for Home, Project, Active Run, expanded Working Set, and inspector sheet.
+1. Run focused tests while implementing each slice.
+2. At sprint completion run:
 
-1. Add deterministic fake project/session/run fixtures with no private transcript content.
-2. Add preview tests for approximately 400×900 cover and 900×1000 opened 4:3, plus 1.5× font scale and dark/light.
-3. Run `./gradlew updateDebugScreenshotTest` only in an isolated review step to create candidate references.
-4. Inspect every diff visually before accepting; do not update references merely to make CI green.
-5. Run `./gradlew validateDebugScreenshotTest` and Compose semantics tests.
-6. Check minimum targets, content descriptions, selected-state announcements, contrast, truncation, and keyboard navigation where applicable.
-7. Commit: `test: cover Hybrid C adaptive workspace`.
-
----
-
-### Task 14: Full verification and deployment
-
-**Objective:** Prove the implementation works against the real unchanged Hermes host on the Fold emulator and physical device.
-
-1. Run:
    ```bash
    git diff --check &&
-   ./gradlew clean testDebugUnitTest validateDebugScreenshotTest lintDebug assembleDebug
+   ./gradlew testDebugUnitTest lintDebug assembleDebug
    ```
-2. Confirm all tests pass with zero lint errors and a debug APK is produced.
-3. Run `adb devices -l`; choose explicit serials for every command.
-4. Install on the API 36 foldable emulator without clearing auth state.
-5. Verify compact: Home → expand project → resume session → active run → Back preserves run → reopen continues.
-6. Resize/open to approximately 4:3; verify rail + project/session master + workspace, then open/close Plan/Changes/Terminal inspector.
-7. Execute a harmless tool-heavy test prompt against the real host and confirm tool start/complete replacement, grouped Working Set, conditional diff, streaming output, and truthful counts.
-8. Verify New task under a test project sends the expected workspace `cwd` without creating an empty durable session before first Send.
-9. Verify Stop maps to `session.interrupt`; Back never stops the run.
-10. Capture settled screenshots and inspect them; scan package logcat for fatal exceptions.
-11. Install and inspect on the physical Fold only after emulator gates pass. If the device is locked, report visual verification as blocked rather than claiming it.
-12. Request independent spec-compliance and code-quality/security review; remediate high-confidence findings and rerun the full gate.
-13. Final commit or bounded commit series; leave the tree clean.
+
+3. Run `validateDebugScreenshotTest` after visually reviewing any intentional candidate reference changes.
+4. Use `adb devices -l` and qualify every command with the selected emulator serial.
+5. Install the exact debug APK without clearing authentication state.
+6. Verify compact flow:
+   - Home loads projects;
+   - open project;
+   - create local task;
+   - confirm no runtime exists before Send;
+   - Send creates the runtime in the expected workspace;
+   - tool/status rows update;
+   - clarification/approval can be answered;
+   - Stop interrupts only the selected run;
+   - Back during a run preserves it;
+   - reopen continues from retained state.
+7. Verify opened approximately 4:3 flow:
+   - project/session master and workspace are simultaneously readable;
+   - no unnecessary Back control appears;
+   - no hinge, system-bar, or IME occlusion is visible.
+8. Capture settled screenshots, inspect the UI hierarchy, and scan package logcat for fatal exceptions.
+9. Report any blocked real-host interaction honestly. Do not substitute a build or static screenshot for interaction proof.
 
 ---
 
-## Expected commit sequence
+## Suggested commit boundaries
 
-1. Existing attachment slice (separate baseline commit)
-2. `feat: add Nous Hermes design tokens`
-3. `feat: model projects and workspace sessions`
-4. `feat: load Hermes projects over JSON RPC`
-5. `feat: publish project workspace state`
-6. `feat: add project-first navigation`
-7. `feat: build project-first Hermes home`
-8. `feat: start tasks in selected project workspace`
-9. `feat: parse live Hermes run events`
-10. `feat: reduce agent events into working sets`
-11. `feat: render agent run workspace`
-12. `feat: add truthful run controls`
-13. `feat: adapt agent workspace for foldables`
-14. `test: cover Hybrid C adaptive workspace`
+Use coherent commits rather than one commit per micro-step:
+
+1. `feat: add project-first Hermes navigation`
+2. `feat: create project tasks lazily on first send`
+3. `feat: handle essential Hermes run interactions`
+4. `feat: apply adaptive Nous Hermes workspace design`
+5. `test: verify project-first agent workspace`
+
+The exact boundary may be adjusted to keep every commit buildable and to avoid splitting tightly coupled production and test changes.
+
+---
+
+## Tracked backlog after the immediate sprint
+
+These items remain intentional future work. They are not deleted from the product direction, but they require a separate scope decision before implementation.
+
+### Rich run visualization
+
+- Parse and present `thinking.delta`, `reasoning.delta`, and `reasoning.available` when available.
+- Add All/Thinking/Tools/Output filters only after the underlying content is useful on mobile.
+- Group adjacent tools into expandable Working Sets with stable first-tool IDs.
+- Render bounded inline diffs with an explicit expansion interaction.
+- Present `tool.output_risk` metadata with a reviewed redaction and severity design.
+- Add truthful active/completed counts; continue to prohibit percentages and invented totals.
+
+### Workspace inspector
+
+- Re-evaluate Plan/Changes/Terminal only after each tab has an authoritative released contract.
+- Start as a supporting sheet; consider a persistent supporting scene only after measured pane widths and screenshot review.
+- Never infer plan or terminal state from unrelated transcript text.
+- Do not add a third pane solely to imitate a desktop IDE.
+
+### Navigation and project depth
+
+- Add a permanent navigation rail only when there are multiple useful top-level destinations.
+- Add full repository/lane hierarchy when users need branch/worktree navigation rather than a flat project session list.
+- Add advanced project search, expand/collapse state, pinning, ordering, or discovery controls only with concrete use cases and released contracts.
+
+### Additional controller inputs
+
+- Secure secret-entry response UI.
+- Secure sudo-password response UI.
+- Terminal input/read-response UI where the released remote contract supports the Android use case.
+- Expiry, cancellation, process-recreation, and accessibility tests for each sensitive input type.
+
+### Release hardening
+
+- Broader compact/medium/expanded screenshot permutations.
+- Additional dark-theme and large-font component matrices.
+- Keyboard, mouse/trackpad, split-screen, freeform, DeX, predictive Back, and process-recreation coverage.
+- Physical Fold install and cover/unfolded verification before declaring a release milestone complete.
+- Independent security/code review when auth, origin scoping, sensitive input, attachment boundaries, or complex reconnect races materially change; not as an automatic step for every ordinary slice.
+
+---
 
 ## Risks and mitigations
 
-- **Dirty overlapping worktree:** complete/commit attachment work first; never reset or overwrite it.
-- **Older server lacks project RPCs:** capability-fail to flat Recent Sessions; distinguish unsupported from transient failure.
-- **Project metadata size:** bound all project/lane/session collections and strings.
-- **Cross-client runtime takeover:** project browsing is metadata-only; resume only after explicit user selection.
-- **Sensitive tool output:** default to safe context/summary and bounded inline diff; raw results require explicit expansion and redaction policy.
-- **Reasoning unavailable:** show generic active state or omit the block; never invent reasoning.
-- **Unknown progress:** use counts plus indeterminate progress only.
-- **4:3 density:** keep two persistent content panes; inspector is a sheet unless measured width supports more.
-- **Reconnect races:** generation-guard project loads and replace inflight snapshots without duplicating events.
-- **Navigation teardown:** Back hides the run but does not close or interrupt it.
-- **Theme drift:** semantic token tests and reviewed screenshots prevent teal/gold roles from becoming random accents.
+- **Older server lacks project RPCs:** distinguish method-not-found and retain flat Recent Sessions.
+- **Project metadata is large:** bound collections, strings, preview counts, and frame bodies.
+- **Cross-client runtime takeover:** project browsing remains metadata-only; resume/control follows explicit selection.
+- **Local draft creates an empty runtime:** move `session.create` from draft-open to first Send and cover it with an integration test.
+- **Blocking request is silently dropped:** support clarification/approval now and render a truthful handoff state for unsupported sensitive requests.
+- **Sensitive tool output leaks:** keep bounded context/summary; do not retain raw args/results by default.
+- **Reconnect duplicates state:** generation-guard operations and replace inflight snapshots/tool state by stable IDs.
+- **Back destroys a live run:** separate workspace visibility from selected session/runtime ownership.
+- **Adaptive scope expands into a desktop clone:** reuse list/detail and defer rail, inspector, and third pane.
+- **Visual regression work dominates the sprint:** use representative screenshots during the sprint and track the exhaustive matrix under release hardening.
 
-## Definition of done
+---
 
-- Project-first Home clearly distinguishes Projects and Sessions.
-- A project can be opened, its durable sessions listed, and a session resumed.
-- New task is project-aware and lazy-creates the server runtime on first Send.
-- Active Run displays objective, conditional thinking, grouped tools, inline diffs, streamed output, filters, and command dock without chat bubbles.
-- Only real server data is rendered; no fictional telemetry.
-- Cover and opened 4:3 layouts pass screenshot, semantics, unit, lint, build, emulator, and physical-device verification.
-- Existing OAuth, transcript IDs/profile scope, stale-auth recovery, Markdown, attachments, slash completion, security boundaries, and adaptive navigation remain intact.
-- No custom Hermes backend changes are required.
+## Immediate sprint definition of done
+
+- Home loads authoritative projects when supported and falls back to flat sessions when not.
+- A project can be opened and its durable sessions browsed without activating a runtime.
+- New task remains local until first Send and then creates the runtime with the selected project workspace.
+- Session workspace shows streamed output, essential tool/status activity, and working clarification/approval controls.
+- Stop maps to `session.interrupt`; Back never stops or closes the run.
+- Existing OAuth, origin/profile scoping, transcript loading, reconnect behavior, Markdown, attachments, slash completion, and security boundaries remain intact.
+- Compact and opened approximately 4:3 layouts pass focused behavior/screenshot checks.
+- Unit tests, lint, debug assembly, screenshot validation, emulator install, interaction smoke test, and logcat inspection complete successfully.
+- No custom Hermes backend change is required.
+
+## Explicit non-goals for this sprint
+
+- Full desktop/Hermex feature parity.
+- Plan/Changes/Terminal inspector.
+- Three persistent content panes.
+- Permanent navigation rail.
+- Exhaustive reasoning and tool visualization.
+- Secret/sudo/terminal input entry.
+- Project administration or repository discovery controls.
+- Physical-device release certification.
+- Automatic independent review for every commit.

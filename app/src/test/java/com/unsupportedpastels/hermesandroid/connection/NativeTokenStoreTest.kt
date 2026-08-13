@@ -2,7 +2,12 @@ package com.unsupportedpastels.hermesandroid.connection
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.google.crypto.tink.Aead
 import java.security.MessageDigest
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Runnable
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -38,6 +43,49 @@ class NativeTokenStoreTest {
         store.save(origin, tokens)
 
         assertEquals(tokens, store.load(origin))
+    }
+
+    @Test
+    fun tokenOperationsUseTheConfiguredIoDispatcher() = runTest {
+        val dispatcher = CountingDispatcher(StandardTestDispatcher(testScheduler))
+        val store = EncryptedNativeTokenStore(
+            context = context,
+            preferencesName = preferencesName,
+            ioDispatcher = dispatcher,
+        )
+        val tokens = tokenSet("access-token", "refresh-token")
+
+        store.save(origin, tokens)
+        val afterSave = dispatcher.dispatchCount
+        store.load(origin)
+        val afterLoad = dispatcher.dispatchCount
+        store.clear(origin)
+
+        assertTrue(afterSave > 0)
+        assertTrue(afterLoad > afterSave)
+        assertTrue(dispatcher.dispatchCount > afterLoad)
+    }
+
+    @Test
+    fun encryptionPrimitiveInitializationIsDeferredUntilAnIoOperation() = runTest {
+        var factoryCalls = 0
+        val store = EncryptedNativeTokenStore(
+            context = context,
+            preferencesName = preferencesName,
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            aeadFactory = {
+                factoryCalls += 1
+                PassthroughAead
+            },
+        )
+
+        assertEquals(0, factoryCalls)
+
+        store.save(origin, tokenSet("access-token", "refresh-token"))
+        assertEquals(1, factoryCalls)
+
+        store.load(origin)
+        assertEquals(1, factoryCalls)
     }
 
     @Test
@@ -115,4 +163,22 @@ class NativeTokenStoreTest {
         "token_" + MessageDigest.getInstance("SHA-256")
             .digest(serverOrigin.value.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+    private class CountingDispatcher(
+        private val delegate: CoroutineDispatcher,
+    ) : CoroutineDispatcher() {
+        var dispatchCount: Int = 0
+            private set
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            dispatchCount += 1
+            delegate.dispatch(context, block)
+        }
+    }
+
+    private object PassthroughAead : Aead {
+        override fun encrypt(plaintext: ByteArray, associatedData: ByteArray): ByteArray = plaintext
+
+        override fun decrypt(ciphertext: ByteArray, associatedData: ByteArray): ByteArray = ciphertext
+    }
 }

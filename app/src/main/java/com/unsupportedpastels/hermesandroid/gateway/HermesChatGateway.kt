@@ -1,6 +1,14 @@
 package com.unsupportedpastels.hermesandroid.gateway
 
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
+import com.unsupportedpastels.hermesandroid.app.DelegatedSubagent
+import com.unsupportedpastels.hermesandroid.app.DelegationStatus
+import com.unsupportedpastels.hermesandroid.app.ProjectId
+import com.unsupportedpastels.hermesandroid.app.ProjectSessionsResult
+import com.unsupportedpastels.hermesandroid.app.ProjectSummary
+import com.unsupportedpastels.hermesandroid.app.ProjectTreeResult
+import com.unsupportedpastels.hermesandroid.app.SessionSummary
+import com.unsupportedpastels.hermesandroid.app.validProjectWorkspacePath
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.connection.readBodyTextBounded
 import io.ktor.client.HttpClient
@@ -29,11 +37,14 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -46,6 +57,21 @@ private const val MAX_CONFIGURED_FRAME_BYTES = HERMES_CHAT_MAX_FRAME_BYTES
 private const val DEFAULT_MAX_FRAME_BYTES = MAX_CONFIGURED_FRAME_BYTES
 private const val MAX_TICKET_RESPONSE_BYTES = 16 * 1024
 private const val MAX_EVENT_BUFFER = 128
+internal const val HERMES_CHAT_MAX_EVENT_ID_CHARS = 256
+internal const val HERMES_CHAT_MAX_EVENT_NAME_CHARS = 256
+internal const val HERMES_CHAT_MAX_EVENT_TEXT_CHARS = 4_096
+internal const val HERMES_CHAT_MAX_MESSAGE_TEXT_CHARS = 1024 * 1024
+internal const val HERMES_CHAT_MAX_EVENT_CONTEXT_CHARS = 4_096
+internal const val HERMES_CHAT_MAX_EVENT_CHOICE_CHARS = 256
+internal const val HERMES_CHAT_MAX_EVENT_CHOICES = 32
+const val DEFAULT_PROJECT_PREVIEW_LIMIT = 3
+const val DEFAULT_PROJECT_SESSION_LIMIT = 500
+private const val MAX_PROJECT_PREVIEW_LIMIT = 3
+private const val MAX_PROJECT_SESSION_LIMIT = 500
+private const val MAX_MODEL_PROVIDERS = 64
+private const val MAX_MODELS_PER_PROVIDER = 512
+private const val MAX_MODEL_PROVIDER_CHARS = 128
+private const val MAX_MODEL_ID_CHARS = 512
 
 /** A fresh, single-use ticket returned by /api/auth/ws-ticket. */
 data class WsTicket(
@@ -80,10 +106,14 @@ open class HermesChatException(
     cause: Throwable? = null,
 ) : Exception(message, cause)
 
-class HermesChatProtocolException(
+open class HermesChatProtocolException(
     message: String,
     cause: Throwable? = null,
 ) : HermesChatException(message, cause)
+
+class HermesChatMethodNotFoundException(
+    val method: String,
+) : HermesChatProtocolException("Hermes method is not supported: $method")
 
 class HermesChatTransportException(
     message: String,
@@ -97,6 +127,9 @@ data class ResumedChatSession(
     val messages: List<JsonObject>,
     val running: Boolean,
     val inflight: InflightPrompt?,
+    val model: String? = null,
+    val provider: String? = null,
+    val reasoningEffort: String? = null,
 )
 
 data class InflightPrompt(
@@ -107,6 +140,29 @@ data class InflightPrompt(
 
 data class PromptSubmission(
     val status: String,
+)
+
+enum class HermesChatResponseStatus {
+    Ok,
+    Expired,
+    Interrupted,
+    Resolved,
+    Unknown,
+    ;
+
+    companion object {
+        fun fromWire(value: String?): HermesChatResponseStatus = when (value?.trim()?.lowercase()) {
+            "ok" -> Ok
+            "expired" -> Expired
+            "interrupted" -> Interrupted
+            "resolved" -> Resolved
+            else -> Unknown
+        }
+    }
+}
+
+data class HermesChatResponse(
+    val status: HermesChatResponseStatus,
 )
 
 /**
@@ -120,13 +176,65 @@ data class SlashCompletionItem(
     val meta: String? = null,
 )
 
+data class HostDirectoryEntry(
+    val name: String,
+    val path: String,
+)
+
+data class HostDirectoryListing(
+    val path: String,
+    val directories: List<HostDirectoryEntry>,
+    val parentPath: String? = null,
+    val lockedRoot: String? = null,
+    val canChangePath: Boolean = true,
+)
+
 /** Tolerantly parsed `complete.slash` JSON-RPC result. */
 data class SlashCompletionResult(
     val items: List<SlashCompletionItem>,
     val replaceFrom: Int,
 )
 
-sealed interface HermesChatEvent {
+data class ModelSelection(
+    val provider: String,
+    val model: String,
+)
+
+data class ModelProviderOption(
+    val slug: String,
+    val name: String,
+    val models: List<String>,
+)
+
+data class ModelOptions(
+    val current: ModelSelection?,
+    val providers: List<ModelProviderOption>,
+)
+
+data class ModelSwitchResult(
+    val accepted: Boolean,
+    val deferred: Boolean = false,
+    val confirmationRequired: Boolean = false,
+    val confirmationMessage: String? = null,
+)
+
+private val ValidReasoningEfforts = setOf(
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
+
+fun canonicalReasoningEffort(value: String): String? = value
+    .trim()
+    .lowercase()
+    .takeIf(ValidReasoningEfforts::contains)
+
+interface HermesChatEvent {
     val sessionId: RuntimeSessionId
 
     data class MessageStart(
@@ -144,12 +252,132 @@ sealed interface HermesChatEvent {
         val text: String?,
         val status: String?,
         val error: String? = null,
+        val reasoning: String? = null,
+        val warning: String? = null,
+        val failureReason: String? = null,
+        val recoverable: Boolean = false,
+        val billing: BillingInfo? = null,
+    ) : HermesChatEvent
+
+    /** Structured billing-wall descriptor from `message.complete`. */
+    data class BillingInfo(
+        val provider: String?,
+        val billingUrl: String?,
+        val isNous: Boolean,
+        val message: String?,
+    )
+
+    /** Reasoning text; `replace` is true for authoritative `reasoning.available` snapshots. */
+    data class ReasoningDelta(
+        override val sessionId: RuntimeSessionId,
+        val text: String,
+        val replace: Boolean = false,
+    ) : HermesChatEvent
+
+    /** Interim assistant commentary sealed as its own segment before tool calls. */
+    data class MessageInterim(
+        override val sessionId: RuntimeSessionId,
+        val text: String,
+        val alreadyStreamed: Boolean,
+    ) : HermesChatEvent
+
+    /** The model is generating arguments for a tool. */
+    data class ToolGenerating(
+        override val sessionId: RuntimeSessionId,
+        val name: String,
+    ) : HermesChatEvent
+
+    /** Live session title rename pushed by the server. */
+    data class SessionTitle(
+        override val sessionId: RuntimeSessionId,
+        val title: String,
+    ) : HermesChatEvent
+
+    /**
+     * Tolerant runtime metadata patch (`session.info`). Only the fields HAM
+     * surfaces are decoded; unknown/additive fields are ignored.
+     */
+    data class SessionInfo(
+        override val sessionId: RuntimeSessionId,
+        val storedSessionId: DurableSessionId? = null,
+        val model: String? = null,
+        val provider: String? = null,
+        val reasoningEffort: String? = null,
+        val title: String? = null,
+        val running: Boolean? = null,
     ) : HermesChatEvent
 
     data class Error(
         override val sessionId: RuntimeSessionId,
         val message: String,
     ) : HermesChatEvent
+
+    data class ToolStart(
+        override val sessionId: RuntimeSessionId,
+        val toolId: String,
+        val name: String,
+        val context: String?,
+    ) : HermesChatEvent
+
+    data class ToolComplete(
+        override val sessionId: RuntimeSessionId,
+        val toolId: String,
+        val name: String,
+        val summary: String?,
+    ) : HermesChatEvent
+
+    data class StatusUpdate(
+        override val sessionId: RuntimeSessionId,
+        val kind: String,
+        val text: String,
+    ) : HermesChatEvent
+
+    data class ClarifyRequest(
+        override val sessionId: RuntimeSessionId,
+        val requestId: String,
+        val question: String,
+        val choices: List<String>,
+        val multiSelect: Boolean,
+    ) : HermesChatEvent
+
+    data class ClarifyExpire(
+        override val sessionId: RuntimeSessionId,
+        val requestId: String,
+    ) : HermesChatEvent
+
+    data class ApprovalRequest(
+        override val sessionId: RuntimeSessionId,
+        val requestId: String?,
+        val command: String?,
+        val description: String?,
+        val choices: List<String>,
+    ) : HermesChatEvent
+
+    data class ApprovalExpire(
+        override val sessionId: RuntimeSessionId,
+        val requestId: String,
+    ) : HermesChatEvent
+
+    data class UnsupportedBlockingRequest(
+        override val sessionId: RuntimeSessionId,
+        val kind: UnsupportedBlockingKind,
+        val requestId: String,
+        val prompt: String?,
+    ) : HermesChatEvent
+
+    data class UnsupportedBlockingExpire(
+        override val sessionId: RuntimeSessionId,
+        val kind: UnsupportedBlockingKind,
+        val requestId: String,
+    ) : HermesChatEvent
+}
+
+enum class UnsupportedBlockingKind {
+    Secret,
+    Sudo,
+    TerminalRead,
+    PreviewRead,
+    WindowRead,
 }
 
 fun interface HermesChatConnector {
@@ -164,6 +392,31 @@ interface HermesChatSession {
         profile: String? = null,
     ): ResumedChatSession
 
+    /** Read-only project metadata; this never resumes or creates a runtime. */
+    suspend fun loadProjectTree(
+        profile: String? = null,
+        previewLimit: Int = DEFAULT_PROJECT_PREVIEW_LIMIT,
+        sessionLimit: Int = DEFAULT_PROJECT_SESSION_LIMIT,
+    ): ProjectTreeResult = throw HermesChatMethodNotFoundException("projects.tree")
+
+    /** Read-only durable sessions for one project; this never activates a runtime. */
+    suspend fun loadProjectSessions(
+        projectId: ProjectId,
+        profile: String? = null,
+        sessionLimit: Int = DEFAULT_PROJECT_SESSION_LIMIT,
+    ): ProjectSessionsResult = throw HermesChatMethodNotFoundException("projects.project_sessions")
+
+    /** Process-local delegated children from the authoritative gateway registry. */
+    suspend fun loadDelegationStatus(): DelegationStatus =
+        throw HermesChatMethodNotFoundException("delegation.status")
+
+    /** Creates and activates a project rooted at an existing host directory. */
+    suspend fun createProject(
+        name: String,
+        path: String,
+        profile: String? = null,
+    ): ProjectSummary = throw HermesChatMethodNotFoundException("projects.create")
+
     /**
      * Creates a fresh runtime (gateway `session.create`). The server persists the
      * durable row lazily on the first prompt; [durableSessionId] is the client-side
@@ -172,12 +425,28 @@ interface HermesChatSession {
     suspend fun createSession(
         durableSessionId: DurableSessionId,
         profile: String? = null,
+        workspacePath: String? = null,
     ): ResumedChatSession = throw HermesChatProtocolException("Session creation is not available")
 
     suspend fun submitPrompt(
         runtimeSessionId: RuntimeSessionId,
         text: String,
     ): PromptSubmission
+
+    suspend fun respondToClarification(
+        requestId: String,
+        answer: String,
+    ): HermesChatResponse = throw HermesChatProtocolException("Clarification response is not available")
+
+    suspend fun respondToApproval(
+        runtimeSessionId: RuntimeSessionId,
+        choice: String,
+        all: Boolean = false,
+    ): HermesChatResponse = throw HermesChatProtocolException("Approval response is not available")
+
+    suspend fun interruptSession(
+        runtimeSessionId: RuntimeSessionId,
+    ): HermesChatResponse = throw HermesChatProtocolException("Session interrupt is not available")
 
     /**
      * Stage a non-image file on the remote host via `file.attach` and return its
@@ -200,6 +469,21 @@ interface HermesChatSession {
     /** Live slash-command completion from the connected host; never a static local list. */
     suspend fun completeSlash(text: String): SlashCompletionResult =
         throw HermesChatProtocolException("Slash completion is not available")
+
+    suspend fun loadModelOptions(runtimeSessionId: RuntimeSessionId): ModelOptions =
+        throw HermesChatProtocolException("Model selection is not available")
+
+    suspend fun setModel(
+        runtimeSessionId: RuntimeSessionId,
+        provider: String,
+        model: String,
+        confirmExpensiveModel: Boolean = false,
+    ): ModelSwitchResult = throw HermesChatProtocolException("Model selection is not available")
+
+    suspend fun setReasoning(
+        runtimeSessionId: RuntimeSessionId,
+        effort: String,
+    ): Unit = throw HermesChatProtocolException("Reasoning selection is not available")
 
     suspend fun close()
 }
@@ -250,15 +534,50 @@ class HermesChatGateway(
     }
 }
 
+private data class PendingApproval(
+    val requestId: String?,
+    val choices: List<String>,
+)
+
 class HermesChatConnection internal constructor(
     private val socket: HermesChatSocket,
     private val maxFrameBytes: Int,
     parentScope: CoroutineScope,
 ) : HermesChatSession {
+    override suspend fun loadDelegationStatus(): DelegationStatus {
+        val result = request("delegation.status", buildJsonObject {})
+        val active = (result["active"] as? JsonArray)
+            .orEmpty()
+            .mapNotNull { element ->
+                val row = element as? JsonObject ?: return@mapNotNull null
+                val subagentId = row.boundedRequired("subagent_id", 256) ?: return@mapNotNull null
+                val goal = row.boundedRequired("goal", 2_000) ?: return@mapNotNull null
+                val status = row.boundedRequired("status", 64) ?: return@mapNotNull null
+                DelegatedSubagent(
+                    subagentId = subagentId,
+                    goal = goal,
+                    status = status,
+                    parentSubagentId = row.boundedOptional("parent_id", 256)
+                        ?: row.boundedOptional("parent_subagent_id", 256),
+                    startedAtEpochSeconds = row.longValue("started_at")?.coerceAtLeast(0),
+                )
+            }
+            .distinctBy(DelegatedSubagent::subagentId)
+            .take(32)
+        return DelegationStatus(
+            active = active,
+            paused = result.booleanValue("paused") ?: false,
+            maxSpawnDepth = result.longValue("max_spawn_depth")?.coerceIn(0, 32)?.toInt(),
+            maxConcurrentChildren = result.longValue("max_concurrent_children")?.coerceIn(0, 128)?.toInt(),
+        )
+    }
     private val closed = AtomicBoolean(false)
     private val lifecycleLock = Any()
     private val nextRequestId = AtomicLong(1)
     private val pendingRequests = ConcurrentHashMap<Long, kotlinx.coroutines.CompletableDeferred<JsonObject>>()
+    private val pendingRequestMethods = ConcurrentHashMap<Long, String>()
+    private val interactionLock = Any()
+    private val pendingApprovals = HashMap<String, ArrayDeque<PendingApproval>>()
     private val eventChannel = Channel<HermesChatEvent>(capacity = MAX_EVENT_BUFFER)
     private val connectionJob = SupervisorJob(parentScope.coroutineContext[Job])
     private val connectionScope = CoroutineScope(parentScope.coroutineContext + connectionJob)
@@ -279,6 +598,65 @@ class HermesChatConnection internal constructor(
         return parseResumeResult(request("session.resume", params), durableSessionId)
     }
 
+    override suspend fun loadProjectTree(
+        profile: String?,
+        previewLimit: Int,
+        sessionLimit: Int,
+    ): ProjectTreeResult {
+        val params = buildJsonObject {
+            profile?.let { put("profile", it) }
+            put("preview_limit", previewLimit.coerceIn(0, MAX_PROJECT_PREVIEW_LIMIT))
+            put("session_limit", sessionLimit.coerceIn(0, MAX_PROJECT_SESSION_LIMIT))
+        }
+        return parseProjectTreeResult(request("projects.tree", params))
+    }
+
+    override suspend fun loadProjectSessions(
+        projectId: ProjectId,
+        profile: String?,
+        sessionLimit: Int,
+    ): ProjectSessionsResult {
+        val params = buildJsonObject {
+            put("project_id", projectId.value)
+            profile?.let { put("profile", it) }
+            put("session_limit", sessionLimit.coerceIn(0, MAX_PROJECT_SESSION_LIMIT))
+        }
+        return parseProjectSessionsResult(request("projects.project_sessions", params), projectId)
+    }
+
+    override suspend fun createProject(
+        name: String,
+        path: String,
+        profile: String?,
+    ): ProjectSummary {
+        val projectName = name.trim()
+            .takeIf { it.isNotBlank() && it.length <= ProjectSummary.MAX_LABEL_LENGTH && !it.hasControlCharacters() }
+            ?: throw HermesChatProtocolException("Project name is invalid")
+        val requestedPath = validProjectWorkspacePath(path)
+            ?: throw HermesChatProtocolException("Host folder path must be absolute")
+        val resolveParams = buildJsonObject {
+            put("cwd", requestedPath)
+            profile?.let { put("profile", it) }
+        }
+        val resolvedPath = request("projects.for_cwd", resolveParams)
+            .stringValue("cwd")
+            ?.let(::validProjectWorkspacePath)
+            ?: throw HermesChatProtocolException("Hermes did not return a valid host folder")
+        if (!sameHostPath(requestedPath, resolvedPath)) {
+            throw HermesChatProtocolException("Host folder does not exist")
+        }
+        val params = buildJsonObject {
+            put("name", projectName)
+            put("folders", JsonArray(listOf(JsonPrimitive(resolvedPath))))
+            put("primary_path", resolvedPath)
+            put("use", true)
+            profile?.let { put("profile", it) }
+        }
+        val project = request("projects.create", params)["project"] as? JsonObject
+        return parseProjectSummary(project)
+            ?: throw HermesChatProtocolException("Project creation response was incomplete")
+    }
+
     override suspend fun submitPrompt(
         runtimeSessionId: RuntimeSessionId,
         text: String,
@@ -293,13 +671,73 @@ class HermesChatConnection internal constructor(
         return PromptSubmission(status)
     }
 
+    override suspend fun respondToClarification(
+        requestId: String,
+        answer: String,
+    ): HermesChatResponse {
+        val params = buildJsonObject {
+            put("request_id", boundedRpcInput(requestId, HERMES_CHAT_MAX_EVENT_ID_CHARS, "request ID"))
+            put("answer", boundedRpcInput(answer, HERMES_CHAT_MAX_EVENT_TEXT_CHARS, "answer", allowBlank = true))
+        }
+        return parseInteractionResponse(request("clarify.respond", params))
+    }
+
+    override suspend fun respondToApproval(
+        runtimeSessionId: RuntimeSessionId,
+        choice: String,
+        all: Boolean,
+    ): HermesChatResponse {
+        val boundedChoice = boundedRpcInput(choice, HERMES_CHAT_MAX_EVENT_CHOICE_CHARS, "approval choice")
+        val sessionKey = boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID")
+        synchronized(interactionLock) {
+            val pending = pendingApprovals[sessionKey]?.peekFirst()
+                ?: throw HermesChatProtocolException("No pending approval choices for this session")
+            if (boundedChoice !in pending.choices) {
+                throw HermesChatProtocolException("Approval choice was not advertised")
+            }
+        }
+        val params = buildJsonObject {
+            put("session_id", sessionKey)
+            put("choice", boundedChoice)
+            put("all", all)
+        }
+        val response = parseInteractionResponse(request("approval.respond", params))
+        synchronized(interactionLock) {
+            val queue = pendingApprovals[sessionKey]
+            if (queue != null && queue.isNotEmpty()) queue.removeFirst()
+            if (queue == null || queue.isEmpty()) pendingApprovals.remove(sessionKey)
+        }
+        return response
+    }
+
+    override suspend fun interruptSession(
+        runtimeSessionId: RuntimeSessionId,
+    ): HermesChatResponse {
+        val params = buildJsonObject {
+            put(
+                "session_id",
+                boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"),
+            )
+        }
+        return parseInteractionResponse(request("session.interrupt", params))
+    }
+
+    private fun parseInteractionResponse(result: JsonObject): HermesChatResponse {
+        val wireStatus = result.stringValue("status")
+            ?: result.booleanValue("resolved")?.let { resolved -> if (resolved) "ok" else "expired" }
+            ?: throw HermesChatProtocolException("Hermes interaction response was incomplete")
+        return HermesChatResponse(HermesChatResponseStatus.fromWire(wireStatus))
+    }
+
     override suspend fun createSession(
         durableSessionId: DurableSessionId,
         profile: String?,
+        workspacePath: String?,
     ): ResumedChatSession {
         val params = buildJsonObject {
             put("close_on_disconnect", false)
             profile?.let { put("profile", it) }
+            validProjectWorkspacePath(workspacePath)?.let { put("cwd", it) }
         }
         val result = request("session.create", params)
         val runtimeSessionId = result.stringValue("session_id")?.let {
@@ -368,6 +806,111 @@ class HermesChatConnection internal constructor(
         return SlashCompletionResult(items = items, replaceFrom = replaceFrom)
     }
 
+    override suspend fun loadModelOptions(runtimeSessionId: RuntimeSessionId): ModelOptions {
+        val params = buildJsonObject {
+            put("session_id", boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"))
+            put("explicit_only", true)
+            put("include_unconfigured", false)
+        }
+        val result = request("model.options", params)
+        val providers = (result["providers"] as? JsonArray)
+            .orEmpty()
+            .take(MAX_MODEL_PROVIDERS)
+            .mapNotNull { element ->
+                val row = element as? JsonObject ?: return@mapNotNull null
+                if (row.booleanValue("authenticated") == false) return@mapNotNull null
+                val slug = row.boundedModelField("slug", MAX_MODEL_PROVIDER_CHARS)
+                    ?.takeIf { it.none(Char::isWhitespace) && !it.startsWith('-') }
+                    ?: return@mapNotNull null
+                val name = row.boundedModelField("name", MAX_MODEL_PROVIDER_CHARS) ?: slug
+                val seen = linkedSetOf<String>()
+                val models = (row["models"] as? JsonArray)
+                    .orEmpty()
+                    .take(MAX_MODELS_PER_PROVIDER)
+                    .mapNotNull { modelElement ->
+                        (modelElement as? JsonPrimitive)
+                            ?.contentOrNull
+                            ?.trim()
+                            ?.takeIf {
+                                it.isNotEmpty() &&
+                                    it.length <= MAX_MODEL_ID_CHARS &&
+                                    !it.hasControlCharacters() &&
+                                    it.none(Char::isWhitespace) &&
+                                    !it.startsWith('-')
+                            }
+                    }
+                    .filter(seen::add)
+                if (models.isEmpty()) return@mapNotNull null
+                ModelProviderOption(slug = slug, name = name, models = models)
+            }
+        val currentProvider = result.boundedModelField("provider", MAX_MODEL_PROVIDER_CHARS)
+        val currentModel = result.boundedModelField("model", MAX_MODEL_ID_CHARS)
+        return ModelOptions(
+            current = if (currentProvider != null && currentModel != null) {
+                ModelSelection(currentProvider, currentModel)
+            } else {
+                null
+            },
+            providers = providers,
+        )
+    }
+
+    override suspend fun setModel(
+        runtimeSessionId: RuntimeSessionId,
+        provider: String,
+        model: String,
+        confirmExpensiveModel: Boolean,
+    ): ModelSwitchResult {
+        val boundedProvider = boundedModelInput(provider, MAX_MODEL_PROVIDER_CHARS, "model provider")
+        val boundedModel = boundedModelInput(model, MAX_MODEL_ID_CHARS, "model ID")
+        val params = buildJsonObject {
+            put("session_id", boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"))
+            put("key", "model")
+            put("value", "$boundedModel --provider $boundedProvider --session")
+            put("confirm_expensive_model", confirmExpensiveModel)
+        }
+        val result = request("config.set", params)
+        val scope = result.stringValue("scope")
+        if (scope != null && scope != "session") {
+            throw HermesChatProtocolException("Hermes model switch returned an unsafe scope")
+        }
+        val confirmationRequired = result.booleanValue("confirm_required") == true
+        return ModelSwitchResult(
+            accepted = !confirmationRequired,
+            deferred = result.booleanValue("deferred") == true,
+            confirmationRequired = confirmationRequired,
+            confirmationMessage = result.stringValue("confirm_message")
+                ?.trim()
+                ?.take(1_000)
+                ?.takeIf(String::isNotEmpty),
+        )
+    }
+
+    override suspend fun setReasoning(
+        runtimeSessionId: RuntimeSessionId,
+        effort: String,
+    ) {
+        val canonicalEffort = canonicalReasoningEffort(effort)
+            ?: throw HermesChatProtocolException("Reasoning effort is invalid")
+        val params = buildJsonObject {
+            put(
+                "session_id",
+                boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"),
+            )
+            put("key", "reasoning")
+            put("value", canonicalEffort)
+        }
+        val result = request("config.set", params)
+        val scope = result.stringValue("scope")
+        if (scope != null && scope != "session") {
+            throw HermesChatProtocolException("Hermes reasoning switch returned an unsafe scope")
+        }
+        val key = result.stringValue("key")
+        if (key != null && key != "reasoning") {
+            throw HermesChatProtocolException("Hermes reasoning switch returned the wrong key")
+        }
+    }
+
     override suspend fun close() {
         if (!markClosed()) return
         connectionJob.cancel()
@@ -384,6 +927,7 @@ class HermesChatConnection internal constructor(
                 throw HermesChatTransportException("Hermes chat connection is closed")
             }
             pendingRequests[id] = deferred
+            pendingRequestMethods[id] = method
         }
         val frame = buildJsonObject {
             put("jsonrpc", "2.0")
@@ -403,6 +947,7 @@ class HermesChatConnection internal constructor(
             throw HermesChatTransportException("Could not send Hermes chat request", error)
         } finally {
             pendingRequests.remove(id, deferred)
+            pendingRequestMethods.remove(id)
         }
     }
 
@@ -445,9 +990,14 @@ class HermesChatConnection internal constructor(
 
         val id = message.longValue("id") ?: return
         val deferred = pendingRequests.remove(id) ?: return
+        val method = pendingRequestMethods.remove(id).orEmpty()
         val error = message["error"] as? JsonObject
         if (error != null) {
             val code = error.longValue("code")
+            if (code == -32601L) {
+                deferred.completeExceptionally(HermesChatMethodNotFoundException(method))
+                return
+            }
             val suffix = code?.let { " ($it)" }.orEmpty()
             deferred.completeExceptionally(
                 HermesChatProtocolException("Hermes RPC request failed$suffix"),
@@ -464,32 +1014,239 @@ class HermesChatConnection internal constructor(
 
     private fun handleEvent(message: JsonObject) {
         val params = message["params"] as? JsonObject ?: return
-        val sessionId = params.stringValue("session_id")?.let {
+        val sessionId = params.boundedRequired("session_id", HERMES_CHAT_MAX_EVENT_ID_CHARS)?.let {
             runCatching { RuntimeSessionId(it) }.getOrNull()
         } ?: return
         val type = params.stringValue("type") ?: return
-        if (type !in setOf("message.start", "message.delta", "message.complete", "error")) return
+        val knownTypes = setOf(
+            "message.start",
+            "message.delta",
+            "message.complete",
+            "error",
+            "tool.start",
+            "tool.complete",
+            "tool.generating",
+            "status.update",
+            "clarify.request",
+            "clarify.expire",
+            "approval.request",
+            "approval.expire",
+            "secret.request",
+            "secret.expire",
+            "sudo.request",
+            "sudo.expire",
+            "terminal.read.request",
+            "terminal.read.expire",
+            "preview.read.request",
+            "preview.read.expire",
+            "window.read.request",
+            "window.read.expire",
+            "session.info",
+            "session.title",
+            "reasoning.delta",
+            "reasoning.available",
+            "message.interim",
+            // Intentionally ignored (no mobile surface in HAM): gateway.ready,
+            // skin.changed, sessions.changed, cron.changed, pet.changed,
+            // thinking.delta (spinner copy, not model reasoning), reaction,
+            // moa.*, voice.*, wake.detected, browser.progress,
+            // terminal.close, notification.clear, preview.restart.progress.
+            // They are display chrome or desktop-only affordances; HAM polls
+            // session lists instead of trusting change events.
+        )
+        if (type !in knownTypes) return
         val payload = params["payload"] as? JsonObject ?: return
         val event = when (type) {
             "message.start" -> HermesChatEvent.MessageStart(
                 sessionId = sessionId,
-                text = payload.stringValue("text"),
+                text = payload.boundedText("text", HERMES_CHAT_MAX_MESSAGE_TEXT_CHARS),
             )
 
-            "message.delta" -> payload.stringValue("text")?.let { text ->
+            "message.delta" -> payload.boundedText("text", HERMES_CHAT_MAX_MESSAGE_TEXT_CHARS)?.let { text ->
                 HermesChatEvent.MessageDelta(sessionId, text)
             }
 
             "message.complete" -> HermesChatEvent.MessageComplete(
                 sessionId = sessionId,
-                text = payload.stringValue("text"),
-                status = payload.stringValue("status"),
-                error = payload.stringValue("error"),
+                text = payload.boundedText("text", HERMES_CHAT_MAX_MESSAGE_TEXT_CHARS),
+                status = payload.boundedOptional("status", HERMES_CHAT_MAX_EVENT_NAME_CHARS),
+                error = payload.boundedOptional("error", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                reasoning = payload.boundedText("reasoning", HERMES_CHAT_MAX_MESSAGE_TEXT_CHARS),
+                warning = payload.boundedOptional("warning", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                failureReason = payload.boundedOptional("failure_reason", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                recoverable = payload.booleanValue("recoverable") ?: false,
+                billing = (payload["billing"] as? JsonObject)?.let { billing ->
+                    HermesChatEvent.BillingInfo(
+                        provider = billing.boundedOptional("provider", MAX_MODEL_PROVIDER_CHARS),
+                        billingUrl = billing.boundedOptional("billing_url", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                        isNous = billing.booleanValue("is_nous") ?: false,
+                        message = billing.boundedOptional("message", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                    )
+                },
             )
 
-            "error" -> payload.stringValue("message")
-                ?.takeIf(String::isNotBlank)
+            "reasoning.delta", "reasoning.available" ->
+                payload.boundedText("text", HERMES_CHAT_MAX_MESSAGE_TEXT_CHARS)?.let { text ->
+                    HermesChatEvent.ReasoningDelta(
+                        sessionId = sessionId,
+                        text = text,
+                        replace = type == "reasoning.available",
+                    )
+                }
+
+            "message.interim" -> payload.boundedText("text", HERMES_CHAT_MAX_MESSAGE_TEXT_CHARS)?.let { text ->
+                HermesChatEvent.MessageInterim(
+                    sessionId = sessionId,
+                    text = text,
+                    alreadyStreamed = payload.booleanValue("already_streamed") ?: false,
+                )
+            }
+
+            "tool.generating" -> payload.boundedRequired("name", HERMES_CHAT_MAX_EVENT_NAME_CHARS)
+                ?.let { HermesChatEvent.ToolGenerating(sessionId, it) }
+
+            "session.title" -> payload.boundedRequired("title", HERMES_CHAT_MAX_EVENT_NAME_CHARS)
+                ?.let { HermesChatEvent.SessionTitle(sessionId, it) }
+
+            "session.info" -> HermesChatEvent.SessionInfo(
+                sessionId = sessionId,
+                storedSessionId = payload.boundedOptional(
+                    "stored_session_id",
+                    ProjectSummary.MAX_SESSION_TITLE_LENGTH,
+                )?.let { runCatching { DurableSessionId(it) }.getOrNull() },
+                model = payload.boundedOptional("model", MAX_MODEL_ID_CHARS),
+                provider = payload.boundedOptional("provider", MAX_MODEL_PROVIDER_CHARS),
+                reasoningEffort = payload.boundedOptional(
+                    "reasoning_effort",
+                    HERMES_CHAT_MAX_EVENT_NAME_CHARS,
+                ),
+                title = payload.boundedOptional("title", HERMES_CHAT_MAX_EVENT_NAME_CHARS),
+                running = payload.booleanValue("running"),
+            )
+
+            "error" -> payload.boundedOptional("message", HERMES_CHAT_MAX_EVENT_TEXT_CHARS)
                 ?.let { HermesChatEvent.Error(sessionId, it) }
+
+            "tool.start" -> {
+                val toolId = payload.boundedRequired("tool_id", HERMES_CHAT_MAX_EVENT_ID_CHARS)
+                val name = payload.boundedRequired("name", HERMES_CHAT_MAX_EVENT_NAME_CHARS)
+                if (toolId == null || name == null) {
+                    null
+                } else {
+                    HermesChatEvent.ToolStart(
+                        sessionId = sessionId,
+                        toolId = toolId,
+                        name = name,
+                        context = payload.boundedOptional("context", HERMES_CHAT_MAX_EVENT_CONTEXT_CHARS),
+                    )
+                }
+            }
+
+            "tool.complete" -> {
+                val toolId = payload.boundedRequired("tool_id", HERMES_CHAT_MAX_EVENT_ID_CHARS)
+                val name = payload.boundedRequired("name", HERMES_CHAT_MAX_EVENT_NAME_CHARS)
+                if (toolId == null || name == null) {
+                    null
+                } else {
+                    HermesChatEvent.ToolComplete(
+                        sessionId = sessionId,
+                        toolId = toolId,
+                        name = name,
+                        summary = payload.boundedOptional("summary", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                    )
+                }
+            }
+
+            "status.update" -> {
+                val kind = payload.boundedRequired("kind", HERMES_CHAT_MAX_EVENT_NAME_CHARS)
+                val text = payload.boundedRequired("text", HERMES_CHAT_MAX_EVENT_TEXT_CHARS)
+                if (kind == null || text == null) null else HermesChatEvent.StatusUpdate(sessionId, kind, text)
+            }
+
+            "clarify.request" -> {
+                val requestId = payload.boundedRequired("request_id", HERMES_CHAT_MAX_EVENT_ID_CHARS)
+                val question = payload.boundedRequired("question", HERMES_CHAT_MAX_EVENT_TEXT_CHARS)
+                if (requestId == null || question == null) {
+                    null
+                } else {
+                    HermesChatEvent.ClarifyRequest(
+                        sessionId = sessionId,
+                        requestId = requestId,
+                        question = question,
+                        choices = payload.boundedChoices(),
+                        multiSelect = payload.booleanValue("multi_select") ?: false,
+                    )
+                }
+            }
+
+            "clarify.expire" -> payload.boundedRequired("request_id", HERMES_CHAT_MAX_EVENT_ID_CHARS)
+                ?.let { HermesChatEvent.ClarifyExpire(sessionId, it) }
+
+            "approval.request" -> {
+                val choices = payload.boundedChoices()
+                if (choices.isEmpty()) {
+                    null
+                } else {
+                    val approval = HermesChatEvent.ApprovalRequest(
+                        sessionId = sessionId,
+                        requestId = payload.boundedOptional("request_id", HERMES_CHAT_MAX_EVENT_ID_CHARS),
+                        command = payload.boundedOptional("command", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                        description = payload.boundedOptional("description", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                        choices = choices,
+                    )
+                    synchronized(interactionLock) {
+                        pendingApprovals.getOrPut(sessionId.value) { ArrayDeque() }
+                            .addLast(PendingApproval(approval.requestId, choices))
+                    }
+                    approval
+                }
+            }
+
+            "approval.expire" -> payload.boundedRequired("request_id", HERMES_CHAT_MAX_EVENT_ID_CHARS)
+                ?.let { requestId ->
+                    synchronized(interactionLock) {
+                        pendingApprovals[sessionId.value]?.let { queue ->
+                            queue.removeIf { it.requestId == requestId }
+                            if (queue.isEmpty()) pendingApprovals.remove(sessionId.value)
+                        }
+                    }
+                    HermesChatEvent.ApprovalExpire(sessionId, requestId)
+                }
+
+            "secret.request", "sudo.request", "terminal.read.request",
+            "preview.read.request", "window.read.request",
+            -> {
+                val requestId = payload.boundedRequired("request_id", HERMES_CHAT_MAX_EVENT_ID_CHARS)
+                val kind = when (type) {
+                    "secret.request" -> UnsupportedBlockingKind.Secret
+                    "sudo.request" -> UnsupportedBlockingKind.Sudo
+                    "preview.read.request" -> UnsupportedBlockingKind.PreviewRead
+                    "window.read.request" -> UnsupportedBlockingKind.WindowRead
+                    else -> UnsupportedBlockingKind.TerminalRead
+                }
+                requestId?.let {
+                    HermesChatEvent.UnsupportedBlockingRequest(
+                        sessionId = sessionId,
+                        kind = kind,
+                        requestId = it,
+                        prompt = payload.boundedOptional("prompt", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                    )
+                }
+            }
+
+            "secret.expire", "sudo.expire", "terminal.read.expire",
+            "preview.read.expire", "window.read.expire",
+            -> {
+                val requestId = payload.boundedRequired("request_id", HERMES_CHAT_MAX_EVENT_ID_CHARS)
+                val kind = when (type) {
+                    "secret.expire" -> UnsupportedBlockingKind.Secret
+                    "sudo.expire" -> UnsupportedBlockingKind.Sudo
+                    "preview.read.expire" -> UnsupportedBlockingKind.PreviewRead
+                    "window.read.expire" -> UnsupportedBlockingKind.WindowRead
+                    else -> UnsupportedBlockingKind.TerminalRead
+                }
+                requestId?.let { HermesChatEvent.UnsupportedBlockingExpire(sessionId, kind, it) }
+            }
 
             else -> null
         }
@@ -519,6 +1276,7 @@ class HermesChatConnection internal constructor(
                 streaming = value.booleanValue("streaming") ?: false,
             )
         }
+        val info = result["info"] as? JsonObject
         return ResumedChatSession(
             runtimeSessionId = runtimeSessionId,
             durableSessionId = durableSessionId,
@@ -526,8 +1284,144 @@ class HermesChatConnection internal constructor(
             messages = messages.filterIsInstance<JsonObject>(),
             running = result.booleanValue("running") ?: false,
             inflight = inflight,
+            model = info?.boundedOptional("model", MAX_MODEL_ID_CHARS),
+            provider = info?.boundedOptional("provider", MAX_MODEL_PROVIDER_CHARS),
+            reasoningEffort = info?.boundedOptional(
+                "reasoning_effort",
+                HERMES_CHAT_MAX_EVENT_NAME_CHARS,
+            ),
         )
     }
+
+    private fun parseProjectTreeResult(result: JsonObject): ProjectTreeResult {
+        val projects = (result["projects"] as? JsonArray)
+            .orEmpty()
+            .mapNotNull { element -> parseProjectSummary(element as? JsonObject) }
+            .distinctBy { it.id }
+            .take(ProjectSummary.MAX_PROJECTS)
+        val activeProjectId = parseProjectId(result["active_id"])
+        val scopedSessionIds = (result["scoped_session_ids"] as? JsonArray)
+            .orEmpty()
+            .mapNotNull { element ->
+                val value = (element as? JsonPrimitive)?.contentOrNull
+                    ?: (element as? JsonObject)?.stringValue("id")
+                    ?: (element as? JsonObject)?.stringValue("session_key")
+                value?.takeIf(String::isNotBlank)?.let { runCatching { DurableSessionId(it) }.getOrNull() }
+            }
+            .distinct()
+            .take(ProjectSummary.MAX_SCOPED_SESSION_IDS)
+            .toSet()
+        return ProjectTreeResult(projects, activeProjectId, scopedSessionIds)
+    }
+
+    private fun parseProjectSessionsResult(
+        result: JsonObject,
+        requestedProjectId: ProjectId,
+    ): ProjectSessionsResult {
+        val projectJson = result["project"] as? JsonObject
+        val sessions = projectSessionRows(projectJson, result)
+            .mapNotNull { element -> parseSessionSummary(element as? JsonObject, requestedProjectId) }
+            .distinctBy { it.id }
+            .take(ProjectSummary.MAX_PROJECT_SESSIONS)
+            .toList()
+        val project = parseProjectSummary(projectJson, requestedProjectId, sessions.size)
+            ?: ProjectSummary(
+                id = requestedProjectId,
+                label = requestedProjectId.value,
+                primaryPath = null,
+                sessionCount = sessions.size,
+                previewSessions = emptyList(),
+            )
+        return ProjectSessionsResult(project, sessions)
+    }
+
+    private fun projectSessionRows(
+        project: JsonObject?,
+        result: JsonObject,
+    ): Sequence<kotlinx.serialization.json.JsonElement> = sequence {
+        val repos = (project?.get("repos") as? JsonArray).orEmpty()
+            .take(ProjectSummary.MAX_PROJECTS)
+        for (repoElement in repos) {
+            val repo = repoElement as? JsonObject ?: continue
+            val groups = (repo["groups"] as? JsonArray).orEmpty()
+                .take(ProjectSummary.MAX_PROJECTS)
+            for (groupElement in groups) {
+                val group = groupElement as? JsonObject ?: continue
+                val rows = (group["sessions"] as? JsonArray).orEmpty()
+                    .take(ProjectSummary.MAX_PROJECT_SESSIONS)
+                for (row in rows) yield(row)
+            }
+        }
+        for (row in (project?.get("sessions") as? JsonArray).orEmpty()) yield(row)
+        for (row in (result["sessions"] as? JsonArray).orEmpty()) yield(row)
+    }
+
+    private fun parseProjectSummary(
+        value: JsonObject?,
+        fallbackId: ProjectId? = null,
+        fallbackSessionCount: Int = 0,
+    ): ProjectSummary? {
+        val id = parseProjectId(value?.get("id"))
+            ?: parseProjectId(value?.get("project_id"))
+            ?: fallbackId
+            ?: return null
+        val label = value?.stringValue("label")
+            ?: value?.stringValue("name")
+            ?: id.value
+        val path = value?.stringValue("path")
+            ?: value?.stringValue("primary_path")
+        val previewSessions = (value?.get("previewSessions") as? JsonArray)
+            ?: (value?.get("preview_sessions") as? JsonArray)
+        val parsedPreview = previewSessions
+            .orEmpty()
+            .mapNotNull { element -> parseSessionSummary(element as? JsonObject, id) }
+            .take(ProjectSummary.MAX_PREVIEW_SESSIONS)
+        val sessionCount = value?.longValue("sessionCount")?.toInt()
+            ?: value?.longValue("session_count")?.toInt()
+            ?: value?.longValue("count")?.toInt()
+            ?: fallbackSessionCount
+        return ProjectSummary(id, label, path, sessionCount, parsedPreview)
+    }
+
+    private fun parseSessionSummary(
+        value: JsonObject?,
+        projectId: ProjectId?,
+    ): SessionSummary? {
+        val id = value?.stringValue("id")
+            ?: value?.stringValue("session_key")
+            ?: value?.stringValue("durable_id")
+            ?: return null
+        val durableId = runCatching { DurableSessionId(id) }.getOrNull() ?: return null
+        val title = value?.stringValue("title")
+            ?: value?.stringValue("name")
+            ?: "Untitled session"
+        val workspacePath = value?.stringValue("workspace_path")
+            ?: value?.stringValue("workspace")
+            ?: value?.stringValue("cwd")
+        val lastActive = value?.get("last_active")?.jsonPrimitive?.doubleOrNull
+            ?: value?.get("lastActive")?.jsonPrimitive?.doubleOrNull
+        val messageCount = value?.longValue("message_count")?.toInt()
+            ?: value?.longValue("messageCount")?.toInt()
+        return SessionSummary(
+            id = durableId,
+            title = title.take(ProjectSummary.MAX_SESSION_TITLE_LENGTH).ifBlank { "Untitled session" },
+            projectId = projectId,
+            workspacePath = workspacePath?.take(ProjectSummary.MAX_PATH_LENGTH),
+            preview = value?.stringValue("preview")?.take(ProjectSummary.MAX_SESSION_TITLE_LENGTH),
+            lastActiveEpochSeconds = lastActive,
+            messageCount = messageCount?.coerceAtLeast(0),
+            model = value?.stringValue("model"),
+            provider = value?.stringValue("provider") ?: value?.stringValue("billing_provider"),
+            profile = value?.stringValue("profile"),
+            pinned = value?.booleanValue("pinned") ?: false,
+            archived = value?.booleanValue("archived") ?: false,
+        )
+    }
+
+    private fun parseProjectId(value: kotlinx.serialization.json.JsonElement?): ProjectId? =
+        (value as? JsonPrimitive)?.contentOrNull
+            ?.takeIf(String::isNotBlank)
+            ?.let { runCatching { ProjectId(it) }.getOrNull() }
 
     private fun ensureFrameSize(frame: String) {
         if (frame.toByteArray(StandardCharsets.UTF_8).size > maxFrameBytes) {
@@ -542,8 +1436,79 @@ class HermesChatConnection internal constructor(
     private fun failPending(error: HermesChatException) {
         pendingRequests.values.forEach { it.completeExceptionally(error) }
         pendingRequests.clear()
+        pendingRequestMethods.clear()
     }
 }
+
+private fun JsonObject.boundedChoices(): List<String> =
+    (this["choices"] as? JsonArray)
+        .orEmpty()
+        .mapNotNull { element ->
+            (element as? JsonPrimitive)?.contentOrNull
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() && it.length <= HERMES_CHAT_MAX_EVENT_CHOICE_CHARS }
+        }
+        .distinct()
+        .take(HERMES_CHAT_MAX_EVENT_CHOICES)
+
+private fun sameHostPath(first: String, second: String): Boolean {
+    fun normalized(value: String): String {
+        val slashed = value.replace('\\', '/')
+        val trimmed = slashed.trimEnd('/').ifEmpty { "/" }
+        return if (trimmed.length >= 2 && trimmed[1] == ':') trimmed.lowercase() else trimmed
+    }
+    return normalized(first) == normalized(second)
+}
+
+private fun boundedRpcInput(
+    value: String,
+    maxChars: Int,
+    label: String,
+    allowBlank: Boolean = false,
+): String {
+    if (value.length > maxChars) throw HermesChatProtocolException("Hermes $label is too long")
+    if (!allowBlank && value.isBlank()) throw HermesChatProtocolException("Hermes $label must not be blank")
+    return value
+}
+
+private fun boundedModelInput(value: String, maxChars: Int, label: String): String {
+    val bounded = boundedRpcInput(value.trim(), maxChars, label)
+    if (bounded.hasControlCharacters() || bounded.any(Char::isWhitespace) || bounded.startsWith('-')) {
+        throw HermesChatProtocolException("Hermes $label was invalid")
+    }
+    return bounded
+}
+
+private fun JsonObject.boundedModelField(name: String, maxChars: Int): String? =
+    stringValue(name)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && it.length <= maxChars && !it.hasControlCharacters() }
+
+private fun String.hasControlCharacters(): Boolean = any(Char::isISOControl)
+
+private fun JsonObject.boundedRequired(name: String, maxChars: Int): String? =
+    stringValue(name)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && it.length <= maxChars }
+
+private fun JsonObject.boundedOptional(name: String, maxChars: Int): String? =
+    stringValue(name)
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?.take(maxChars)
+
+/**
+ * Bounded read for message TEXT fields (message.start/delta/complete).
+ *
+ * Unlike [boundedOptional] this never trims: streaming tokenizers attach the
+ * inter-word space to the FRONT of the next token ("HE", " WORLD"), so trimming
+ * each delta destroys word boundaries and jams the streamed text together.
+ * Metadata fields (status, error, question, ...) keep the trimming read.
+ */
+private fun JsonObject.boundedText(name: String, maxChars: Int): String? =
+    stringValue(name)
+        ?.takeIf(String::isNotEmpty)
+        ?.take(maxChars)
 
 private fun JsonObject.stringValue(name: String): String? =
     (this[name] as? JsonPrimitive)?.contentOrNull

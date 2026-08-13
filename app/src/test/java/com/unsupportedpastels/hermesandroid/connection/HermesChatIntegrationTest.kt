@@ -2,14 +2,21 @@ package com.unsupportedpastels.hermesandroid.connection
 
 import com.unsupportedpastels.hermesandroid.app.ComposerAttachment
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
+import com.unsupportedpastels.hermesandroid.app.RunEventState
+import com.unsupportedpastels.hermesandroid.app.RunInteractionLifecycle
+import com.unsupportedpastels.hermesandroid.app.RunToolRow
+import com.unsupportedpastels.hermesandroid.app.RunToolState
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentByteReader
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentReadException
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
+import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatConnector
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatEvent
+import com.unsupportedpastels.hermesandroid.gateway.HermesChatResponse
+import com.unsupportedpastels.hermesandroid.gateway.HermesChatResponseStatus
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatProtocolException
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatSession
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatTransportException
@@ -17,8 +24,10 @@ import com.unsupportedpastels.hermesandroid.gateway.InflightPrompt
 import com.unsupportedpastels.hermesandroid.gateway.PromptSubmission
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
+import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionResult
+import com.unsupportedpastels.hermesandroid.gateway.UnsupportedBlockingKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +39,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -422,27 +432,76 @@ class HermesChatIntegrationTest {
     }
 
     @Test
-    fun createNewSessionAddsDraftAndPublishesRuntimeOnOpen() = runTest(dispatcher) {
+    fun backgroundControllerCompletesSlashWithoutDependingOnSelectedSession() = runTest(dispatcher) {
+        val firstId = DurableSessionId("slash-first")
+        val secondId = DurableSessionId("slash-second")
+        val first = CompletableSlashChatSession(
+            result = SlashCompletionResult(
+                items = listOf(SlashCompletionItem("goal", "/goal", null)),
+                replaceFrom = 1,
+            ),
+        )
+        val second = CompletableSlashChatSession(
+            result = SlashCompletionResult(emptyList(), 0),
+        )
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(first)
+            add(second)
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> sessions.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.openSession(firstId)
+        advanceUntilIdle()
+        viewModel.openSession(secondId)
+        advanceUntilIdle()
+
+        viewModel.updateSlashCompletion(firstId, "/go")
+        advanceUntilIdle()
+
+        assertEquals(listOf("/go"), first.completionRequests)
+        assertEquals("/goal", viewModel.slashCompletions.value[firstId]?.items?.single()?.display)
+    }
+
+    @Test
+    fun createNewSessionAddsExplicitUnscopedDraftWithoutOpeningRuntime() = runTest(dispatcher) {
         val session = CompletableSlashChatSession(
             result = SlashCompletionResult(emptyList(), 0),
         )
-        val viewModel = chatViewModel(session)
+        var connections = 0
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ ->
+                connections += 1
+                session
+            },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
         advanceUntilIdle()
 
         val draftId = viewModel.createNewSession()
         advanceUntilIdle()
 
         val snapshot = viewModel.snapshots.value
-        assertTrue(snapshot.durableSessions.any { it.id == draftId })
-        assertEquals(
-            "New chat",
-            snapshot.durableSessions.first { it.id == draftId }.title,
-        )
+        val draft = snapshot.durableSessions.first { it.id == draftId }
+        assertEquals("New chat", draft.title)
+        assertNull(draft.projectId)
+        assertNull(draft.workspacePath)
+        assertTrue(draft.isLocalDraft)
 
         viewModel.openSession(draftId)
         advanceUntilIdle()
 
-        assertEquals(draftId, session.createdForDurableId)
+        assertEquals(0, connections)
+        assertNull(session.createdForDurableId)
     }
 
     @Test
@@ -522,6 +581,73 @@ class HermesChatIntegrationTest {
         assertTrue(viewModel.attachments.value[draftId].orEmpty().isEmpty())
     }
 
+    @Test
+    fun acceptedDraftPromptResumesCanonicalSessionAfterTransportClosesBeforeCompletion() =
+        runTest(dispatcher) {
+            val canonicalId = DurableSessionId("server-canonical-accepted")
+            val first = CanonicalClosingDraftSession(
+                canonicalId = canonicalId,
+                completeFirstTurn = false,
+            )
+            val recovery = StreamingChatSession()
+            val secondSend = StreamingChatSession()
+            val candidates = ArrayDeque<HermesChatSession>().apply {
+                add(first)
+                add(recovery)
+                add(secondSend)
+            }
+            val viewModel = HermesConnectionViewModel(
+                settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+                client = ChatConnectionClient(),
+                tokenStore = MemoryTokenStore(tokens),
+                chatConnector = HermesChatConnector { _, _ -> candidates.removeFirst() },
+                nowEpochSeconds = { 1_900_000_000 },
+            )
+            advanceUntilIdle()
+
+            val draftId = viewModel.createNewSession()
+            viewModel.sendMessage(draftId, "First prompt")
+            advanceUntilIdle()
+            first.closeEvents()
+            advanceUntilIdle()
+
+            viewModel.sendMessage(draftId, "Second prompt")
+            advanceUntilIdle()
+
+            assertEquals(canonicalId, recovery.resumedDurableId)
+            assertEquals(canonicalId, secondSend.resumedDurableId)
+            assertEquals("Second prompt", secondSend.submittedText)
+        }
+
+    @Test
+    fun openingAnotherSessionDoesNotCancelConcurrentDraftCreation() = runTest(dispatcher) {
+        val candidate = CancellableCreateChatSession()
+        val replacement = StreamingChatSession()
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(candidate)
+            add(replacement)
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> sessions.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        val draftId = viewModel.createNewSession()
+        viewModel.sendMessage(draftId, "Start creation")
+        runCurrent()
+        candidate.createStarted.await()
+
+        viewModel.openSession(DurableSessionId("replacement"))
+        advanceUntilIdle()
+
+        assertFalse(candidate.closeStarted)
+        assertFalse(candidate.closeCompleted)
+    }
+
     private fun chatViewModel(
         session: HermesChatSession,
         attachmentReader: AttachmentByteReader =
@@ -552,7 +678,7 @@ class HermesChatIntegrationTest {
     }
 
     @Test
-    fun replacingStagedSendFinalizesTransientUiState() = runTest(dispatcher) {
+    fun openingAnotherSessionPreservesStagedConcurrentSend() = runTest(dispatcher) {
         val session = BlockingSubmitChatSession()
         val viewModel = chatViewModel(session)
         advanceUntilIdle()
@@ -562,12 +688,129 @@ class HermesChatIntegrationTest {
         assertTrue(session.submitStarted.isCompleted)
         assertTrue(viewModel.snapshots.value.chatSessions.getValue(durableId).isSending)
 
-        viewModel.openSession(durableId)
+        viewModel.openSession(DurableSessionId("durable-2"))
         advanceUntilIdle()
 
         val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
-        assertFalse(chat.isSending)
-        assertFalse(chat.messages.any { it.isStreaming })
+        assertTrue(chat.isSending)
+        assertTrue(chat.messages.any { it.isStreaming })
+    }
+
+    @Test
+    fun twoHamStartedSessionsStreamAndCompleteIndependently() = runTest(dispatcher) {
+        val firstId = DurableSessionId("durable-first")
+        val secondId = DurableSessionId("durable-second")
+        val first = RunEventChatSession("runtime-first")
+        val second = RunEventChatSession("runtime-second")
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(first)
+            add(second)
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> sessions.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.sendMessage(firstId, "Run the first task")
+        runCurrent()
+        viewModel.sendMessage(secondId, "Run the second task")
+        runCurrent()
+
+        first.emit(HermesChatEvent.MessageDelta(first.runtimeSessionId, "first partial"))
+        second.emit(HermesChatEvent.MessageDelta(second.runtimeSessionId, "second partial"))
+        runCurrent()
+
+        assertEquals(
+            "first partial",
+            viewModel.snapshots.value.chatSessions.getValue(firstId).messages.last().text,
+        )
+        assertEquals(
+            "second partial",
+            viewModel.snapshots.value.chatSessions.getValue(secondId).messages.last().text,
+        )
+        assertEquals(2, viewModel.snapshots.value.activeRuntimes.size)
+
+        first.emit(HermesChatEvent.MessageComplete(first.runtimeSessionId, "first done", "complete"))
+        runCurrent()
+        assertFalse(viewModel.snapshots.value.chatSessions.getValue(firstId).isSending)
+        assertTrue(viewModel.snapshots.value.chatSessions.getValue(secondId).isSending)
+
+        second.emit(HermesChatEvent.MessageComplete(second.runtimeSessionId, "second done", "complete"))
+        runCurrent()
+        assertFalse(viewModel.snapshots.value.chatSessions.getValue(secondId).isSending)
+        assertTrue(viewModel.snapshots.value.activeRuntimes.isEmpty())
+    }
+
+    @Test
+    fun backgroundedStreamingDisconnectWaitsForForegroundBeforeReconnect() = runTest(dispatcher) {
+        val foreground = MutableStateFlow(true)
+        val first = ReconnectingChatSession(
+            runtimeId = "runtime-backgrounded",
+            running = false,
+            inflightText = null,
+            onSubmit = { channel, runtime ->
+                channel.trySend(HermesChatEvent.MessageDelta(runtime, "partial before background"))
+                channel.close()
+            },
+        )
+        val recovered = ReconnectingChatSession(
+            runtimeId = "runtime-foreground-recovered",
+            running = true,
+            inflightText = "authoritative recovered partial",
+            inflightUser = "Keep working",
+            onResume = { channel, runtime ->
+                channel.trySend(
+                    HermesChatEvent.MessageComplete(
+                        runtime,
+                        "completed after foreground",
+                        "complete",
+                    ),
+                )
+                channel.close()
+            },
+        )
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(first)
+            add(recovered)
+        }
+        var connections = 0
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ ->
+                connections += 1
+                sessions.removeFirst()
+            },
+            nowEpochSeconds = { 1_900_000_000 },
+            appForegroundStates = foreground,
+        )
+        advanceUntilIdle()
+
+        viewModel.sendMessage(durableId, "Keep working")
+        runCurrent()
+        foreground.value = false
+        advanceTimeBy(10_000)
+        runCurrent()
+
+        val backgrounded = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertEquals(1, connections)
+        assertTrue(backgrounded.isSending)
+        assertEquals(null, backgrounded.error)
+        assertTrue(backgrounded.messages.last().isStreaming)
+
+        foreground.value = true
+        advanceUntilIdle()
+
+        val foregrounded = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertEquals(2, connections)
+        assertEquals("completed after foreground", foregrounded.messages.last().text)
+        assertFalse(foregrounded.isSending)
+        assertEquals(null, foregrounded.error)
     }
 
     @Test
@@ -642,6 +885,67 @@ class HermesChatIntegrationTest {
             },
         )
         assertFalse(chat.isSending)
+    }
+
+    @Test
+    fun reconnectReplayReducesTheSameToolIdIntoOneCompletedRow() = runTest(dispatcher) {
+        val first = ReconnectingChatSession(
+            runtimeId = "runtime-tool-first",
+            running = false,
+            inflightText = null,
+            submitFailure = HermesChatTransportException("socket closed"),
+            onSubmit = { channel, runtime ->
+                channel.trySend(HermesChatEvent.ToolStart(runtime, "tool-1", "shell", "/workspace"))
+            },
+        )
+        val recovered = ReconnectingChatSession(
+            runtimeId = "runtime-tool-recovered",
+            running = true,
+            inflightText = "partial answer",
+            onResume = { channel, runtime ->
+                channel.trySend(HermesChatEvent.ToolStart(runtime, "tool-1", "shell", "/workspace"))
+                channel.trySend(HermesChatEvent.ToolComplete(runtime, "tool-1", "shell", "finished"))
+            },
+        )
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(first)
+            add(recovered)
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> sessions.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.sendMessage(durableId, "Run with a tool")
+        advanceUntilIdle()
+
+        val tools = viewModel.snapshots.value.chatSessions.getValue(durableId).runState.tools
+        assertEquals(1, tools.size)
+        assertEquals("tool-1", tools.single().toolId)
+        assertEquals(RunToolState.Completed, tools.single().state)
+        assertEquals("finished", tools.single().summary)
+    }
+
+    @Test
+    fun genuinelyNewPromptResetsRunStateWithoutAffectingAttachedSessionPreservation() = runTest(dispatcher) {
+        val session = RunEventChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        session.emit(HermesChatEvent.ToolStart(session.runtimeSessionId, "old-tool", "shell", null))
+        advanceUntilIdle()
+        assertTrue(viewModel.snapshots.value.chatSessions.getValue(durableId).runState.tools.isNotEmpty())
+
+        viewModel.sendMessage(durableId, "New prompt")
+        advanceUntilIdle()
+
+        assertEquals(RunEventState(), viewModel.snapshots.value.chatSessions.getValue(durableId).runState)
     }
 
     @Test
@@ -727,6 +1031,544 @@ class HermesChatIntegrationTest {
             chat.messages.takeLast(2).map { it.text },
         )
         assertTrue(chat.messages.last().isStreaming)
+    }
+
+    @Test
+    fun streamedRunEventsReduceIntoTheMatchingDurableSessionInFifoOrder() = runTest(dispatcher) {
+        val session = RunEventChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        val runtime = session.runtimeSessionId
+        session.emit(HermesChatEvent.ToolStart(runtime, "tool-1", "shell", "/workspace"))
+        session.emit(HermesChatEvent.ToolComplete(runtime, "tool-1", "shell", "finished"))
+        session.emit(HermesChatEvent.StatusUpdate(runtime, "working", "Running checks"))
+        session.emit(
+            HermesChatEvent.ClarifyRequest(
+                runtime,
+                requestId = "clarify-1",
+                question = "Which target?",
+                choices = listOf("debug", "release"),
+                multiSelect = false,
+            ),
+        )
+        session.emit(HermesChatEvent.ClarifyExpire(runtime, "clarify-1"))
+        session.emit(
+            HermesChatEvent.ApprovalRequest(
+                runtime,
+                requestId = "approval-1",
+                command = "./gradlew test",
+                description = "Run tests",
+                choices = listOf("allow", "deny"),
+            ),
+        )
+        session.emit(HermesChatEvent.ApprovalExpire(runtime, "approval-1"))
+        session.emit(
+            HermesChatEvent.UnsupportedBlockingRequest(
+                runtime,
+                kind = UnsupportedBlockingKind.Secret,
+                requestId = "secret-1",
+                prompt = "Password",
+            ),
+        )
+        session.emit(
+            HermesChatEvent.UnsupportedBlockingExpire(
+                runtime,
+                kind = UnsupportedBlockingKind.Secret,
+                requestId = "secret-1",
+            ),
+        )
+        session.emit(HermesChatEvent.ToolStart(RuntimeSessionId("stale-runtime"), "stale", "ignored", null))
+        advanceUntilIdle()
+
+        val runState = viewModel.snapshots.value.chatSessions.getValue(durableId).runState
+        assertEquals(
+            listOf(RunToolRow("tool-1", "shell", "/workspace", "finished", RunToolState.Completed)),
+            runState.tools,
+        )
+        assertEquals("working", runState.status?.kind)
+        assertEquals("Running checks", runState.status?.text)
+        assertEquals(RunInteractionLifecycle.Expired, runState.clarification?.lifecycle)
+        assertEquals(RunInteractionLifecycle.Expired, runState.approval?.lifecycle)
+        assertEquals(RunInteractionLifecycle.Expired, runState.unsupportedBlocking?.lifecycle)
+        assertTrue(runState.tools.none { it.toolId == "stale" })
+    }
+
+    @Test
+    fun clarificationControllerTargetsPendingRuntimeOnceAndMapsResolvedResponse() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        session.emit(
+            HermesChatEvent.ClarifyRequest(
+                session.runtimeSessionId,
+                requestId = "clarify-1",
+                question = "Which target?",
+                choices = listOf("debug", "release"),
+                multiSelect = false,
+            ),
+        )
+        advanceUntilIdle()
+
+        viewModel.respondToClarification(DurableSessionId("other"), "clarify-1", "debug").join()
+        viewModel.respondToClarification(durableId, "wrong-request", "debug").join()
+        assertTrue(session.clarificationCalls.isEmpty())
+
+        val first = viewModel.respondToClarification(durableId, "clarify-1", "release")
+        val duplicate = viewModel.respondToClarification(durableId, "clarify-1", "release")
+        runCurrent()
+
+        assertEquals(listOf("clarify-1" to "release"), session.clarificationCalls)
+        assertEquals(
+            RunInteractionLifecycle.Responding,
+            viewModel.snapshots.value.chatSessions.getValue(durableId).runState.clarification?.lifecycle,
+        )
+
+        session.clarificationResponse.complete(HermesChatResponse(HermesChatResponseStatus.Resolved))
+        first.join()
+        duplicate.join()
+
+        assertEquals(
+            RunInteractionLifecycle.Resolved,
+            viewModel.snapshots.value.chatSessions.getValue(durableId).runState.clarification?.lifecycle,
+        )
+    }
+
+    @Test
+    fun approvalControllerRequiresAdvertisedChoiceTargetsRuntimeOnceAndMapsExpiredResponse() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        session.emit(
+            HermesChatEvent.ApprovalRequest(
+                session.runtimeSessionId,
+                requestId = "approval-1",
+                command = "secret command must stay out of controller calls",
+                description = "Run the build",
+                choices = listOf("allow", "deny"),
+            ),
+        )
+        advanceUntilIdle()
+
+        viewModel.respondToApproval(DurableSessionId("other"), "allow").join()
+        viewModel.respondToApproval(durableId, "not-advertised").join()
+        assertTrue(session.approvalCalls.isEmpty())
+
+        val first = viewModel.respondToApproval(durableId, "allow", all = true)
+        val duplicate = viewModel.respondToApproval(durableId, "allow", all = true)
+        runCurrent()
+
+        assertEquals(
+            listOf(Triple(session.runtimeSessionId, "allow", true)),
+            session.approvalCalls,
+        )
+        assertEquals(
+            RunInteractionLifecycle.Responding,
+            viewModel.snapshots.value.chatSessions.getValue(durableId).runState.approval?.lifecycle,
+        )
+
+        session.approvalResponse.complete(HermesChatResponse(HermesChatResponseStatus.Expired))
+        first.join()
+        duplicate.join()
+
+        assertEquals(
+            RunInteractionLifecycle.Expired,
+            viewModel.snapshots.value.chatSessions.getValue(durableId).runState.approval?.lifecycle,
+        )
+    }
+
+    @Test
+    fun stopControllerTargetsSendingRuntimeOnceAndTerminalizesLiveInteractionsWithoutClosingSocket() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        viewModel.sendMessage(durableId, "Long-running prompt")
+        advanceUntilIdle()
+        assertTrue(viewModel.snapshots.value.chatSessions.getValue(durableId).isSending)
+
+        session.emit(
+            HermesChatEvent.ClarifyRequest(
+                session.runtimeSessionId,
+                requestId = "clarify-stop",
+                question = "Continue?",
+                choices = listOf("yes", "no"),
+                multiSelect = false,
+            ),
+        )
+        session.emit(
+            HermesChatEvent.ApprovalRequest(
+                session.runtimeSessionId,
+                requestId = "approval-stop",
+                command = "hidden command",
+                description = "A gated action",
+                choices = listOf("allow", "deny"),
+            ),
+        )
+        advanceUntilIdle()
+
+        viewModel.stopSession(DurableSessionId("other")).join()
+        assertTrue(session.interruptCalls.isEmpty())
+
+        val first = viewModel.stopSession(durableId)
+        val duplicate = viewModel.stopSession(durableId)
+        runCurrent()
+
+        assertEquals(listOf(session.runtimeSessionId), session.interruptCalls)
+        assertTrue(viewModel.snapshots.value.chatSessions.getValue(durableId).isStopping)
+
+        session.interruptResponse.complete(HermesChatResponse(HermesChatResponseStatus.Ok))
+        first.join()
+        duplicate.join()
+
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertFalse(chat.isSending)
+        assertFalse(chat.isStopping)
+        assertTrue(chat.messages.none { it.isStreaming })
+        assertEquals(RunInteractionLifecycle.Expired, chat.runState.clarification?.lifecycle)
+        assertEquals(RunInteractionLifecycle.Expired, chat.runState.approval?.lifecycle)
+        assertTrue(viewModel.snapshots.value.activeRuntimes.none { it.runtimeSessionId == session.runtimeSessionId })
+        assertFalse(session.closed)
+    }
+
+    @Test
+    fun failedStopClearsStoppingWithBoundedErrorAndAllowsRetry() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        viewModel.sendMessage(durableId, "Long-running prompt")
+        advanceUntilIdle()
+
+        val failed = viewModel.stopSession(durableId)
+        runCurrent()
+        session.interruptResponse.completeExceptionally(
+            HermesChatTransportException("transport detail must not become UI state"),
+        )
+        failed.join()
+
+        val failedChat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertFalse(failedChat.isStopping)
+        assertTrue(failedChat.isSending)
+        assertEquals("Could not stop session", failedChat.error)
+        assertTrue(failedChat.error.orEmpty().length <= 160)
+
+        session.interruptResponse = CompletableDeferred()
+        val retry = viewModel.stopSession(durableId)
+        runCurrent()
+        assertEquals(listOf(session.runtimeSessionId, session.runtimeSessionId), session.interruptCalls)
+        session.interruptResponse.complete(HermesChatResponse(HermesChatResponseStatus.Interrupted))
+        retry.join()
+        assertFalse(viewModel.snapshots.value.chatSessions.getValue(durableId).isSending)
+    }
+
+    @Test
+    fun staleNonCooperativeClarificationResponseCannotMutateReplacementRuntime() = runTest(dispatcher) {
+        val first = ControllerChatSession("runtime-clarify-old").apply {
+            clarificationNonCooperative = true
+        }
+        val second = ControllerChatSession("runtime-clarify-current")
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(first)
+            add(second)
+        }
+        val secondDurableId = DurableSessionId("durable-2")
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> sessions.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        first.emit(
+            HermesChatEvent.ClarifyRequest(
+                first.runtimeSessionId,
+                "clarify-shared",
+                "Old question",
+                listOf("old"),
+                false,
+            ),
+        )
+        advanceUntilIdle()
+        val staleResponse = viewModel.respondToClarification(durableId, "clarify-shared", "old")
+        runCurrent()
+
+        viewModel.openSession(secondDurableId)
+        advanceUntilIdle()
+        second.emit(
+            HermesChatEvent.ClarifyRequest(
+                second.runtimeSessionId,
+                "clarify-shared",
+                "Current question",
+                listOf("current"),
+                false,
+            ),
+        )
+        advanceUntilIdle()
+
+        first.clarificationResponse.complete(HermesChatResponse(HermesChatResponseStatus.Resolved))
+        staleResponse.join()
+
+        val current = viewModel.snapshots.value.chatSessions
+            .getValue(secondDurableId)
+            .runState
+            .clarification
+        assertEquals(second.runtimeSessionId, current?.runtimeSessionId)
+        assertEquals("Current question", current?.question)
+        assertEquals(RunInteractionLifecycle.Pending, current?.lifecycle)
+    }
+
+    @Test
+    fun staleNonCooperativeApprovalResponseCannotMutateReplacementRuntime() = runTest(dispatcher) {
+        val first = ControllerChatSession("runtime-approval-old").apply {
+            approvalNonCooperative = true
+        }
+        val second = ControllerChatSession("runtime-approval-current")
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(first)
+            add(second)
+        }
+        val secondDurableId = DurableSessionId("durable-2")
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> sessions.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        first.emit(
+            HermesChatEvent.ApprovalRequest(
+                first.runtimeSessionId,
+                requestId = "approval-shared",
+                command = null,
+                description = "Old approval",
+                choices = listOf("allow", "deny"),
+            ),
+        )
+        advanceUntilIdle()
+        val staleResponse = viewModel.respondToApproval(durableId, "allow")
+        runCurrent()
+
+        viewModel.openSession(secondDurableId)
+        advanceUntilIdle()
+        second.emit(
+            HermesChatEvent.ApprovalRequest(
+                second.runtimeSessionId,
+                requestId = "approval-shared",
+                command = null,
+                description = "Current approval",
+                choices = listOf("allow", "deny"),
+            ),
+        )
+        advanceUntilIdle()
+
+        first.approvalResponse.complete(HermesChatResponse(HermesChatResponseStatus.Resolved))
+        staleResponse.join()
+
+        val current = viewModel.snapshots.value.chatSessions
+            .getValue(secondDurableId)
+            .runState
+            .approval
+        assertEquals(second.runtimeSessionId, current?.runtimeSessionId)
+        assertEquals("Current approval", current?.descriptionPreview)
+        assertEquals(RunInteractionLifecycle.Pending, current?.lifecycle)
+    }
+
+    @Test
+    fun staleNonCooperativeStopCannotTerminalizeReplacementController() = runTest(dispatcher) {
+        val first = ControllerChatSession("runtime-stop-old").apply {
+            interruptNonCooperative = true
+        }
+        val second = ControllerChatSession("runtime-stop-current")
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(first)
+            add(second)
+        }
+        val secondDurableId = DurableSessionId("durable-2")
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> sessions.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        viewModel.sendMessage(durableId, "Old run")
+        advanceUntilIdle()
+        val staleStop = viewModel.stopSession(durableId)
+        runCurrent()
+
+        viewModel.openSession(secondDurableId)
+        advanceUntilIdle()
+        viewModel.sendMessage(secondDurableId, "Current run")
+        advanceUntilIdle()
+
+        first.interruptResponse.complete(HermesChatResponse(HermesChatResponseStatus.Interrupted))
+        staleStop.join()
+
+        val current = viewModel.snapshots.value.chatSessions.getValue(secondDurableId)
+        assertTrue(current.isSending)
+        assertFalse(current.isStopping)
+        assertEquals(
+            listOf(second.runtimeSessionId),
+            viewModel.snapshots.value.activeRuntimes.map { it.runtimeSessionId },
+        )
+    }
+
+    @Test
+    fun secondPromptRepublishesControllerRuntimeAfterTheFirstTurnCompletes() = runTest(dispatcher) {
+        val session = ControllerChatSession("runtime-reused")
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> session },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        session.emit(HermesChatEvent.MessageComplete(session.runtimeSessionId, "First turn", "done"))
+        advanceUntilIdle()
+        assertTrue(viewModel.snapshots.value.activeRuntimes.isEmpty())
+
+        viewModel.sendMessage(durableId, "Second turn")
+        advanceUntilIdle()
+
+        assertTrue(viewModel.snapshots.value.chatSessions.getValue(durableId).isSending)
+        assertEquals(
+            listOf(session.runtimeSessionId),
+            viewModel.snapshots.value.activeRuntimes.map { it.runtimeSessionId },
+        )
+    }
+
+    @Test
+    fun runningControllerRuntimeIsPublishedWithDurableIdentityAndRemovedOnTerminalMessage() = runTest(dispatcher) {
+        val session = RunEventChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf(
+                ActiveRuntimeSession(
+                    runtimeSessionId = session.runtimeSessionId,
+                    durableSessionId = durableId,
+                    title = "Test session",
+                    access = RuntimeAccess.Controller,
+                ),
+            ),
+            viewModel.snapshots.value.activeRuntimes,
+        )
+
+        session.emit(HermesChatEvent.MessageComplete(session.runtimeSessionId, "done", "done"))
+        advanceUntilIdle()
+
+        assertTrue(viewModel.snapshots.value.activeRuntimes.isEmpty())
+    }
+
+    @Test
+    fun terminalErrorRemovesOnlyTheMatchingControllerRuntime() = runTest(dispatcher) {
+        val session = RunEventChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        session.emit(HermesChatEvent.Error(session.runtimeSessionId, "failed"))
+        advanceUntilIdle()
+
+        assertTrue(viewModel.snapshots.value.activeRuntimes.isEmpty())
+    }
+
+    @Test
+    fun openingAnotherControllerPublishesBothConcurrentRuntimes() = runTest(dispatcher) {
+        val first = RunEventChatSession("runtime-first")
+        val second = RunEventChatSession("runtime-second")
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(first)
+            add(second)
+        }
+        val secondDurableId = DurableSessionId("durable-2")
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> sessions.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        viewModel.openSession(secondDurableId)
+        advanceUntilIdle()
+
+        assertEquals(
+            setOf(first.runtimeSessionId, second.runtimeSessionId),
+            viewModel.snapshots.value.activeRuntimes.map { it.runtimeSessionId }.toSet(),
+        )
+    }
+
+    @Test
+    fun reopeningTheSameAttachedSessionIsANoopAndPreservesTheLivePartialRun() = runTest(dispatcher) {
+        val session = ReopenPreservingChatSession()
+        val client = ChatConnectionClient()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> session },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        session.emit(HermesChatEvent.ToolStart(session.runtimeSessionId, "tool-1", "shell", null))
+        advanceUntilIdle()
+
+        val beforeReopen = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        val transcriptLoadsBeforeReopen = client.transcriptLoads
+        val activeRuntimeBeforeReopen = viewModel.snapshots.value.activeRuntimes.single()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        val afterReopen = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertEquals(1, session.resumeCalls)
+        assertEquals(transcriptLoadsBeforeReopen, client.transcriptLoads)
+        assertEquals(0, session.closeCalls)
+        assertEquals(beforeReopen.messages, afterReopen.messages)
+        assertEquals(beforeReopen.runState, afterReopen.runState)
+        assertEquals(activeRuntimeBeforeReopen, viewModel.snapshots.value.activeRuntimes.single())
     }
 
     @Test
@@ -1087,7 +1929,7 @@ class HermesChatIntegrationTest {
     }
 
     @Test
-    fun replacingTranscriptLoadClearsCancelledSessionLoadingState() = runTest(dispatcher) {
+    fun openingAnotherTranscriptDoesNotCancelTheFirstLoad() = runTest(dispatcher) {
         val client = BlockingTranscriptClient()
         val secondDurableId = DurableSessionId("durable-2")
         val viewModel = HermesConnectionViewModel(
@@ -1103,7 +1945,7 @@ class HermesChatIntegrationTest {
         viewModel.openSession(secondDurableId)
         runCurrent()
 
-        assertFalse(viewModel.snapshots.value.chatSessions.getValue(durableId).isLoading)
+        assertTrue(viewModel.snapshots.value.chatSessions.getValue(durableId).isLoading)
     }
 }
 
@@ -1391,6 +2233,7 @@ private class CompletableSlashChatSession(
     override suspend fun createSession(
         durableSessionId: DurableSessionId,
         profile: String?,
+        workspacePath: String?,
     ): ResumedChatSession {
         createdForDurableId = durableSessionId
         return resume(durableSessionId, profile)
@@ -1423,6 +2266,7 @@ private class CompletableSlashChatSession(
 
 private class CanonicalClosingDraftSession(
     private val canonicalId: DurableSessionId,
+    private val completeFirstTurn: Boolean = true,
 ) : HermesChatSession {
     private val runtimeId = RuntimeSessionId("runtime-canonical-draft")
     private val channel = Channel<HermesChatEvent>(Channel.UNLIMITED)
@@ -1431,6 +2275,7 @@ private class CanonicalClosingDraftSession(
     override suspend fun createSession(
         durableSessionId: DurableSessionId,
         profile: String?,
+        workspacePath: String?,
     ) = ResumedChatSession(
         runtimeSessionId = runtimeId,
         durableSessionId = canonicalId,
@@ -1450,13 +2295,47 @@ private class CanonicalClosingDraftSession(
         text: String,
     ): PromptSubmission {
         channel.send(HermesChatEvent.MessageStart(runtimeId, null))
-        channel.send(HermesChatEvent.MessageComplete(runtimeId, "done", "complete", null))
+        if (completeFirstTurn) {
+            channel.send(HermesChatEvent.MessageComplete(runtimeId, "done", "complete", null))
+        }
         return PromptSubmission("streaming")
     }
 
     fun closeEvents() = channel.close()
 
     override suspend fun close() = Unit
+}
+
+private class CancellableCreateChatSession : HermesChatSession {
+    override val events: Flow<HermesChatEvent> = MutableSharedFlow()
+    val createStarted = CompletableDeferred<Unit>()
+    var closeStarted = false
+    var closeCompleted = false
+
+    override suspend fun createSession(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+        workspacePath: String?,
+    ): ResumedChatSession {
+        createStarted.complete(Unit)
+        awaitCancellation()
+    }
+
+    override suspend fun resume(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ): ResumedChatSession = error("candidate should not resume")
+
+    override suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+    ): PromptSubmission = error("candidate should not submit")
+
+    override suspend fun close() {
+        closeStarted = true
+        yield()
+        closeCompleted = true
+    }
 }
 
 private class StreamingChatSession(
@@ -1473,6 +2352,7 @@ private class StreamingChatSession(
     override suspend fun createSession(
         durableSessionId: DurableSessionId,
         profile: String?,
+        workspacePath: String?,
     ): ResumedChatSession = resume(durableSessionId, profile)
 
     override suspend fun resume(
@@ -1525,6 +2405,156 @@ private class StreamingChatSession(
         closed = true
     }
 }
+
+private class RunEventChatSession(
+    runtimeId: String = "runtime-run-events",
+) : HermesChatSession {
+    val runtimeSessionId = RuntimeSessionId(runtimeId)
+    private val channel = Channel<HermesChatEvent>(Channel.UNLIMITED)
+    override val events: Flow<HermesChatEvent> = channel.receiveAsFlow()
+
+    override suspend fun resume(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ) = ResumedChatSession(
+        runtimeSessionId = runtimeSessionId,
+        durableSessionId = durableSessionId,
+        resumed = true,
+        messages = emptyList(),
+        running = true,
+        inflight = null,
+    )
+
+    override suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+    ) = PromptSubmission("streaming")
+
+    suspend fun emit(event: HermesChatEvent) {
+        channel.send(event)
+    }
+
+    override suspend fun close() {
+        channel.close()
+    }
+}
+
+private class ControllerChatSession(
+    runtimeId: String = "runtime-controller",
+) : HermesChatSession {
+    val runtimeSessionId = RuntimeSessionId(runtimeId)
+    private val channel = Channel<HermesChatEvent>(Channel.UNLIMITED)
+    override val events: Flow<HermesChatEvent> = channel.receiveAsFlow()
+    val clarificationCalls = mutableListOf<Pair<String, String>>()
+    val approvalCalls = mutableListOf<Triple<RuntimeSessionId, String, Boolean>>()
+    val interruptCalls = mutableListOf<RuntimeSessionId>()
+    var clarificationResponse = CompletableDeferred<HermesChatResponse>()
+    var approvalResponse = CompletableDeferred<HermesChatResponse>()
+    var interruptResponse = CompletableDeferred<HermesChatResponse>()
+    var clarificationNonCooperative = false
+    var approvalNonCooperative = false
+    var interruptNonCooperative = false
+    var closed = false
+
+    override suspend fun resume(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ) = ResumedChatSession(
+        runtimeSessionId = runtimeSessionId,
+        durableSessionId = durableSessionId,
+        resumed = true,
+        messages = emptyList(),
+        running = true,
+        inflight = null,
+    )
+
+    override suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+    ) = PromptSubmission("streaming")
+
+    override suspend fun respondToClarification(
+        requestId: String,
+        answer: String,
+    ): HermesChatResponse {
+        clarificationCalls += requestId to answer
+        return if (clarificationNonCooperative) {
+            withContext(NonCancellable) { clarificationResponse.await() }
+        } else {
+            clarificationResponse.await()
+        }
+    }
+
+    override suspend fun respondToApproval(
+        runtimeSessionId: RuntimeSessionId,
+        choice: String,
+        all: Boolean,
+    ): HermesChatResponse {
+        approvalCalls += Triple(runtimeSessionId, choice, all)
+        return if (approvalNonCooperative) {
+            withContext(NonCancellable) { approvalResponse.await() }
+        } else {
+            approvalResponse.await()
+        }
+    }
+
+    override suspend fun interruptSession(
+        runtimeSessionId: RuntimeSessionId,
+    ): HermesChatResponse {
+        interruptCalls += runtimeSessionId
+        return if (interruptNonCooperative) {
+            withContext(NonCancellable) { interruptResponse.await() }
+        } else {
+            interruptResponse.await()
+        }
+    }
+
+    suspend fun emit(event: HermesChatEvent) {
+        channel.send(event)
+    }
+
+    override suspend fun close() {
+        closed = true
+        channel.close()
+    }
+}
+
+private class ReopenPreservingChatSession : HermesChatSession {
+    val runtimeSessionId = RuntimeSessionId("runtime-reopen-preserve")
+    private val channel = Channel<HermesChatEvent>(Channel.UNLIMITED)
+    override val events: Flow<HermesChatEvent> = channel.receiveAsFlow()
+    var resumeCalls = 0
+    var closeCalls = 0
+
+    override suspend fun resume(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ): ResumedChatSession {
+        resumeCalls += 1
+        return ResumedChatSession(
+            runtimeSessionId = runtimeSessionId,
+            durableSessionId = durableSessionId,
+            resumed = true,
+            messages = emptyList(),
+            running = true,
+            inflight = InflightPrompt("Question", "partial answer", true),
+        )
+    }
+
+    override suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+    ) = PromptSubmission("streaming")
+
+    suspend fun emit(event: HermesChatEvent) {
+        channel.send(event)
+    }
+
+    override suspend fun close() {
+        closeCalls += 1
+    }
+}
+
 private class ReconnectingChatSession(
     runtimeId: String,
     private val running: Boolean,
