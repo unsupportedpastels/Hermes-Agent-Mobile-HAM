@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -37,6 +38,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 
 internal sealed interface MarkdownBlock
@@ -105,6 +107,7 @@ private val imageAttachmentMarkerPattern = Regex(
 )
 private const val MESSAGE_RENDER_CHUNK_CHARS = 4_000
 private const val MIN_EMBEDDED_PAYLOAD_CHARS = 512
+private val webUrlPrefixes = listOf("https://", "http://")
 
 private fun splitMarkdownTableRow(line: String): List<String>? {
     val trimmed = line.trim()
@@ -408,6 +411,23 @@ private fun parseMarkdownInlines(text: String, inherited: InlineState = InlineSt
             }
         }
 
+        val webUrlPrefix = webUrlPrefixes.firstOrNull { prefix ->
+            text.startsWith(prefix, index, ignoreCase = true) &&
+                (index == 0 || text[index - 1].isWhitespace() || text[index - 1] in "([<{\"'")
+        }
+        if (inherited.link == null && webUrlPrefix != null) {
+            var end = index + webUrlPrefix.length
+            while (end < text.length && !text[end].isWhitespace()) end += 1
+            while (end > index && text[end - 1] in ".,;:!?") end -= 1
+            if (end > index + webUrlPrefix.length) {
+                flushPlain()
+                val url = text.substring(index, end)
+                append(MarkdownInline(text = url, link = url))
+                index = end
+                continue
+            }
+        }
+
         val marker = when {
             text.startsWith("***", index) -> "***"
             text.startsWith("___", index) -> "___"
@@ -643,24 +663,30 @@ private fun annotatedMarkdown(inlines: List<MarkdownInline>): AnnotatedString {
     val linkColor = MaterialTheme.colorScheme.primary
     return buildAnnotatedString {
         inlines.forEach { inline ->
-            withStyle(
-                SpanStyle(
-                    fontWeight = if (inline.bold) FontWeight.SemiBold else null,
-                    fontStyle = if (inline.italic) FontStyle.Italic else null,
-                    fontFamily = if (inline.code) FontFamily.Monospace else null,
-                    background = if (inline.code) codeBackground else androidx.compose.ui.graphics.Color.Unspecified,
-                    color = if (inline.link != null) linkColor else androidx.compose.ui.graphics.Color.Unspecified,
-                    textDecoration = when {
-                        inline.strikethrough && inline.link != null -> TextDecoration.combine(
-                            listOf(TextDecoration.LineThrough, TextDecoration.Underline),
-                        )
-                        inline.strikethrough -> TextDecoration.LineThrough
-                        inline.link != null -> TextDecoration.Underline
-                        else -> null
-                    },
-                ),
-            ) {
-                append(inline.text)
+            val style = SpanStyle(
+                fontWeight = if (inline.bold) FontWeight.SemiBold else null,
+                fontStyle = if (inline.italic) FontStyle.Italic else null,
+                fontFamily = if (inline.code) FontFamily.Monospace else null,
+                background = if (inline.code) codeBackground else androidx.compose.ui.graphics.Color.Unspecified,
+                color = if (inline.link != null) linkColor else androidx.compose.ui.graphics.Color.Unspecified,
+                textDecoration = when {
+                    inline.strikethrough && inline.link != null -> TextDecoration.combine(
+                        listOf(TextDecoration.LineThrough, TextDecoration.Underline),
+                    )
+                    inline.strikethrough -> TextDecoration.LineThrough
+                    inline.link != null -> TextDecoration.Underline
+                    else -> null
+                },
+            )
+            val webUrl = inline.link?.takeIf { url ->
+                webUrlPrefixes.any { prefix -> url.startsWith(prefix, ignoreCase = true) }
+            }
+            if (webUrl != null) {
+                withLink(LinkAnnotation.Url(webUrl)) {
+                    withStyle(style) { append(inline.text) }
+                }
+            } else {
+                withStyle(style) { append(inline.text) }
             }
         }
     }

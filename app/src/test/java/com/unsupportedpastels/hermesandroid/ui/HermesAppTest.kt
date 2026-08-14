@@ -27,6 +27,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.unsupportedpastels.hermesandroid.app.ComposerAttachment
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
@@ -1533,6 +1534,23 @@ class HermesAppTest {
         composeRule.onNodeWithText("Category").assertIsDisplayed()
         composeRule.onNodeWithText("Apple Watch + 18Birdies").assertIsDisplayed()
         composeRule.onAllNodesWithText("|---|---|").assertCountEquals(0)
+    }
+
+    @Test
+    fun bareMarkdownUrlExposesClickableLinkAnnotation() {
+        val url = "https://example.com/pr/1"
+
+        composeRule.setContent {
+            HermesAndroidTheme { MarkdownMessage(url) }
+        }
+
+        val annotated = composeRule.onNodeWithText(url)
+            .fetchSemanticsNode()
+            .config[SemanticsProperties.Text]
+            .single()
+        val link = annotated.getLinkAnnotations(0, annotated.length).single().item
+
+        assertEquals(url, (link as LinkAnnotation.Url).url)
     }
 
     @Test
