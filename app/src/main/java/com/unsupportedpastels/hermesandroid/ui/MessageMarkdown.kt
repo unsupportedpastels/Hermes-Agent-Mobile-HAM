@@ -115,7 +115,19 @@ private val pairedWebUrlDelimiters = listOf(
     '<' to '>',
 )
 
+private fun surroundingWebUrlQuote(text: String, start: Int): Char? {
+    var precedingIndex = start - 1
+    while (
+        precedingIndex >= 0 &&
+        pairedWebUrlDelimiters.any { (open, _) -> text[precedingIndex] == open }
+    ) {
+        precedingIndex -= 1
+    }
+    return text.getOrNull(precedingIndex)?.takeIf { it == '\'' || it == '"' }
+}
+
 private fun trimBareWebUrlEnd(text: String, start: Int, scannedEnd: Int): Int {
+    val surroundingQuote = surroundingWebUrlQuote(text, start)
     val delimiterBalances = pairedWebUrlDelimiters.associate { (_, close) -> close to 0 }.toMutableMap()
     for (index in start until scannedEnd) {
         val character = text[index]
@@ -131,7 +143,8 @@ private fun trimBareWebUrlEnd(text: String, start: Int, scannedEnd: Int): Int {
     while (end > start) {
         val trailing = text[end - 1]
         when {
-            trailing in ".,;:!?\"'" -> end -= 1
+            trailing in ".,;:!?" -> end -= 1
+            trailing == surroundingQuote -> end -= 1
             delimiterBalances.getOrDefault(trailing, 0) > 0 -> {
                 delimiterBalances[trailing] = delimiterBalances.getValue(trailing) - 1
                 end -= 1
