@@ -54,7 +54,8 @@ import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJobsState
+import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
+import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
 import com.unsupportedpastels.hermesandroid.gateway.SessionBranchResult
 import com.unsupportedpastels.hermesandroid.gateway.SessionContextBreakdown
 import com.unsupportedpastels.hermesandroid.gateway.SessionUsage
@@ -2010,36 +2011,79 @@ class HermesConnectionViewModel(
         )
     }
 
-    fun refreshScheduledJobs(): Job {
+    fun refreshCronJobs(): Job {
         val origin = activeOrigin
         val originGeneration = generation
         if (origin == null || !isCurrentProjectLoad(origin, originGeneration)) {
             return viewModelScope.launch {
                 mutableSnapshots.value = mutableSnapshots.value.copy(
-                    scheduledJobsState = ScheduledJobsState.Error(
-                        "Scheduled jobs require an authenticated server",
+                    cronJobsState = CronJobsState.Error(
+                        "Cron jobs require an authenticated server",
                     ),
                 )
             }
         }
         mutableSnapshots.value = mutableSnapshots.value.copy(
-            scheduledJobsState = ScheduledJobsState.Loading,
+            cronJobsState = CronJobsState.Loading,
         )
         return viewModelScope.launch {
             val state = try {
-                ScheduledJobsState.Ready(
-                    withProjectMetadataSession(HermesChatSession::loadScheduledJobs),
+                CronJobsState.Ready(
+                    withProjectMetadataSession(HermesChatSession::loadCronJobs),
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: HermesChatMethodNotFoundException) {
-                ScheduledJobsState.Unsupported
+                CronJobsState.Unsupported
             } catch (_: Exception) {
-                ScheduledJobsState.Error("Could not load scheduled jobs")
+                CronJobsState.Error("Could not load cron jobs")
             }
             currentCoroutineContext().ensureActive()
             if (isCurrentProjectLoad(origin, originGeneration)) {
-                mutableSnapshots.value = mutableSnapshots.value.copy(scheduledJobsState = state)
+                mutableSnapshots.value = mutableSnapshots.value.copy(cronJobsState = state)
+            }
+        }
+    }
+
+    /**
+     * Runs one lifecycle action against a cron job, then reloads the list so the
+     * panel reflects the server's post-action state rather than an optimistic guess.
+     */
+    fun manageCronJob(jobId: String, action: CronJobAction): Job {
+        val origin = activeOrigin
+        val originGeneration = generation
+        if (origin == null || !isCurrentProjectLoad(origin, originGeneration)) {
+            return viewModelScope.launch {
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    cronJobActionError = "Cron jobs require an authenticated server",
+                )
+            }
+        }
+        mutableSnapshots.value = mutableSnapshots.value.copy(
+            cronJobActionJobId = jobId,
+            cronJobActionError = null,
+        )
+        return viewModelScope.launch {
+            val error = try {
+                withProjectMetadataSession { session -> session.manageCronJob(jobId, action) }
+                null
+            } catch (cancelled: CancellationException) {
+                if (isCurrentProjectLoad(origin, originGeneration)) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(cronJobActionJobId = null)
+                }
+                throw cancelled
+            } catch (_: HermesChatMethodNotFoundException) {
+                "Cron job controls are not supported by this server"
+            } catch (_: Exception) {
+                "Could not ${action.failureVerb} the job"
+            }
+            currentCoroutineContext().ensureActive()
+            if (isCurrentProjectLoad(origin, originGeneration)) {
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    cronJobActionJobId = null,
+                    cronJobActionError = error,
+                )
+                if (error == null) refreshCronJobs()
             }
         }
     }

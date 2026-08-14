@@ -164,6 +164,7 @@ import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.ContextBreakdownCategory
+import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryListing
 import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
@@ -244,7 +245,8 @@ fun HermesApp(
     onCompressSession: (DurableSessionId, String?) -> Unit = { _, _ -> },
     onUndoSession: (DurableSessionId) -> Unit = {},
     onBranchSession: (DurableSessionId, Int?, String?) -> Unit = { _, _, _ -> },
-    onRefreshScheduledJobs: () -> Unit = {},
+    onRefreshCronJobs: () -> Unit = {},
+    onCronJobAction: (String, CronJobAction) -> Unit = { _, _ -> },
     isHomeRefreshing: Boolean = false,
     onRefreshHome: () -> Unit = {},
     onRenameSession: suspend (DurableSessionId, String) -> Result<Unit> = { _, _ -> Result.success(Unit) },
@@ -759,7 +761,8 @@ fun HermesApp(
                     onSave = onSaveServerOrigin,
                     onLoadManagementSettings = onLoadManagementSettings,
                     onSetProfileDefaultModel = onSetProfileDefaultModel,
-                    onRefreshScheduledJobs = onRefreshScheduledJobs,
+                    onRefreshCronJobs = onRefreshCronJobs,
+                    onCronJobAction = onCronJobAction,
                     onLogout = onLogout,
                 )
             }
@@ -2770,7 +2773,8 @@ internal fun ServerSettingsScreen(
     onSetProfileDefaultModel: suspend (ModelSelection, Boolean) -> ModelSwitchResult = { _, _ ->
         ModelSwitchResult(accepted = false)
     },
-    onRefreshScheduledJobs: () -> Unit = {},
+    onRefreshCronJobs: () -> Unit = {},
+    onCronJobAction: (String, CronJobAction) -> Unit = { _, _ -> },
     onLogout: suspend () -> Unit = {},
 ) {
     var value by rememberSaveable(serverOrigin?.value) {
@@ -2786,7 +2790,7 @@ internal fun ServerSettingsScreen(
     LaunchedEffect(serverOrigin, snapshot.authenticationState) {
         if (serverOrigin != null && snapshot.authenticationState == AuthenticationState.Authenticated) {
             onLoadManagementSettings(snapshot.selectedProfile)
-            onRefreshScheduledJobs()
+            onRefreshCronJobs()
         }
     }
     val parsedOrigin = remember(value) {
@@ -2950,9 +2954,12 @@ internal fun ServerSettingsScreen(
                 }
                 TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
                 snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                ScheduledJobsPanel(
-                    state = snapshot.scheduledJobsState,
-                    onRefresh = onRefreshScheduledJobs,
+                CronJobsPanel(
+                    state = snapshot.cronJobsState,
+                    onRefresh = onRefreshCronJobs,
+                    actionJobId = snapshot.cronJobActionJobId,
+                    actionError = snapshot.cronJobActionError,
+                    onJobAction = onCronJobAction,
                     modifier = Modifier.heightIn(max = 360.dp),
                 )
             }

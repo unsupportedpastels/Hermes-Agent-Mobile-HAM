@@ -221,8 +221,11 @@ internal fun HermesAppHost(
         onBranchSession = { sessionId, count, name ->
             connectionViewModel?.branchSession(sessionId, count, name)
         },
-        onRefreshScheduledJobs = {
-            connectionViewModel?.refreshScheduledJobs()
+        onRefreshCronJobs = {
+            connectionViewModel?.refreshCronJobs()
+        },
+        onCronJobAction = { jobId, action ->
+            connectionViewModel?.manageCronJob(jobId, action)
         },
         isHomeRefreshing = homeRefreshing,
         onRefreshHome = { connectionViewModel?.refreshHomeData() },

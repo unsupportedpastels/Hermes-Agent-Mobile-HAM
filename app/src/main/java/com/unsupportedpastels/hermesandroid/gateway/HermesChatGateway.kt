@@ -467,8 +467,11 @@ interface HermesChatSession {
         text: String,
     ): SubagentSteerResult = throw HermesChatMethodNotFoundException("subagent.steer")
 
-    /** Read-only monitor; include_disabled is intentionally true so paused jobs are visible. */
-    suspend fun loadScheduledJobs(): List<ScheduledJob> =
+    /** include_disabled is intentionally true so paused jobs are visible. */
+    suspend fun loadCronJobs(): List<CronJob> =
+        throw HermesChatMethodNotFoundException("cron.manage")
+
+    suspend fun manageCronJob(jobId: String, action: CronJobAction): Unit =
         throw HermesChatMethodNotFoundException("cron.manage")
 
     suspend fun respondToClarification(
@@ -777,12 +780,20 @@ class HermesChatConnection internal constructor(
         return SubagentSteerResult(status, result.stringValue("text")?.take(HERMES_CHAT_MAX_EVENT_TEXT_CHARS))
     }
 
-    override suspend fun loadScheduledJobs(): List<ScheduledJob> {
+    override suspend fun loadCronJobs(): List<CronJob> {
         val result = request("cron.manage", buildJsonObject {
             put("action", "list")
             put("include_disabled", true)
         })
-        return parseScheduledJobs(result)
+        return parseCronJobs(result)
+    }
+
+    override suspend fun manageCronJob(jobId: String, action: CronJobAction) {
+        // The gateway resolves jobs by ID or name through the `name` param.
+        request("cron.manage", buildJsonObject {
+            put("action", action.wireValue)
+            put("name", boundedRpcInput(jobId, HERMES_CHAT_MAX_EVENT_ID_CHARS, "cron job ID"))
+        })
     }
 
     private fun sessionParams(runtimeSessionId: RuntimeSessionId): JsonObject = buildJsonObject {

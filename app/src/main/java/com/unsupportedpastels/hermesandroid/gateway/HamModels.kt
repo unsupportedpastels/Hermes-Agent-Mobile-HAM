@@ -65,7 +65,7 @@ data class DelegationPauseResult(val paused: Boolean)
 data class SubagentInterruptResult(val found: Boolean, val subagentId: String?)
 data class SubagentSteerResult(val status: String, val text: String?)
 
-data class ScheduledJob(
+data class CronJob(
     val jobId: String,
     val name: String,
     val schedule: String,
@@ -76,16 +76,28 @@ data class ScheduledJob(
     val lastStatus: String? = null,
 )
 
-sealed interface ScheduledJobsState {
-    data object Idle : ScheduledJobsState
-    data object Loading : ScheduledJobsState
-    data class Ready(val jobs: List<ScheduledJob>) : ScheduledJobsState
-    data object Unsupported : ScheduledJobsState
-    data class Error(val message: String) : ScheduledJobsState
+sealed interface CronJobsState {
+    data object Idle : CronJobsState
+    data object Loading : CronJobsState
+    data class Ready(val jobs: List<CronJob>) : CronJobsState
+    data object Unsupported : CronJobsState
+    data class Error(val message: String) : CronJobsState
+}
+
+/**
+ * Lifecycle controls forwarded to `cron.manage`. Enable/disable ride the
+ * server's `resume`/`pause` actions; run/stop are forwarded verbatim and
+ * surface a clear error on servers that do not accept them.
+ */
+enum class CronJobAction(val wireValue: String, val failureVerb: String) {
+    Enable("resume", "enable"),
+    Disable("pause", "disable"),
+    Run("run", "run"),
+    Stop("stop", "stop"),
 }
 
 /** Parse only the bounded, display-safe subset of `cron.manage list`. */
-fun parseScheduledJobs(result: JsonObject): List<ScheduledJob> =
+fun parseCronJobs(result: JsonObject): List<CronJob> =
     (result["jobs"] as? JsonArray)
         .orEmpty()
         .take(MAX_HAM_ROWS)
@@ -94,7 +106,7 @@ fun parseScheduledJobs(result: JsonObject): List<ScheduledJob> =
             val id = row.text("job_id", MAX_HAM_FIELD) ?: row.text("id", MAX_HAM_FIELD) ?: return@mapNotNull null
             val name = row.text("name", MAX_HAM_FIELD) ?: return@mapNotNull null
             val schedule = row.text("schedule", MAX_HAM_FIELD) ?: return@mapNotNull null
-            ScheduledJob(
+            CronJob(
                 jobId = id,
                 name = name,
                 schedule = schedule,
@@ -105,7 +117,7 @@ fun parseScheduledJobs(result: JsonObject): List<ScheduledJob> =
                 lastStatus = row.text("last_status", MAX_HAM_FIELD),
             )
         }
-        .distinctBy(ScheduledJob::jobId)
+        .distinctBy(CronJob::jobId)
 
 internal fun parseSessionUsage(result: JsonObject): SessionUsage = SessionUsage(
     inputTokens = result.long("input_tokens", "input", "prompt_tokens"),

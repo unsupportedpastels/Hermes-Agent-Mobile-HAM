@@ -18,8 +18,10 @@ import com.unsupportedpastels.hermesandroid.app.ProjectSessionsResult
 import com.unsupportedpastels.hermesandroid.app.ProjectTreeResult
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJob
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJobsState
+import com.unsupportedpastels.hermesandroid.gateway.CronJob
+import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
+import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
+import com.unsupportedpastels.hermesandroid.gateway.HermesChatProtocolException
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.DelegatedSubagent
 import com.unsupportedpastels.hermesandroid.app.DelegationStatus
@@ -1436,18 +1438,18 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
-    fun refreshScheduledJobsPublishesEnabledAndPausedJobsReadOnly() = runTest(dispatcher) {
+    fun refreshCronJobsPublishesEnabledAndPausedJobsReadOnly() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val expected = listOf(
-            ScheduledJob("job-enabled", "Daily brief", "0 8 * * *", enabled = true),
-            ScheduledJob("job-paused", "Price watch", "every 2h", enabled = false),
+            CronJob("job-enabled", "Daily brief", "0 8 * * *", enabled = true),
+            CronJob("job-paused", "Price watch", "every 2h", enabled = false),
         )
         val delegate = MetadataOnlyProjectSession.fromTreeAndSessions(
             ProjectTreeResult(emptyList()),
             CompletableDeferred(),
         )
         val metadata = object : HermesChatSession by delegate {
-            override suspend fun loadScheduledJobs(): List<ScheduledJob> = expected
+            override suspend fun loadCronJobs(): List<CronJob> = expected
         }
         val client = AuthenticatingHermesConnectionClient()
         val viewModel = HermesConnectionViewModel(
@@ -1462,9 +1464,53 @@ class HermesConnectionViewModelTest {
         client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
         advanceUntilIdle()
 
-        viewModel.refreshScheduledJobs().join()
+        viewModel.refreshCronJobs().join()
 
-        assertEquals(ScheduledJobsState.Ready(expected), viewModel.snapshots.value.scheduledJobsState)
+        assertEquals(CronJobsState.Ready(expected), viewModel.snapshots.value.cronJobsState)
+    }
+
+    @Test
+    fun manageCronJobRunsActionThenReloadsJobsAndSurfacesFailures() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val managed = mutableListOf<Pair<String, CronJobAction>>()
+        val jobs = listOf(CronJob("job-1", "Daily brief", "0 8 * * *", enabled = true))
+        val delegate = MetadataOnlyProjectSession.fromTreeAndSessions(
+            ProjectTreeResult(emptyList()),
+            CompletableDeferred(),
+        )
+        val metadata = object : HermesChatSession by delegate {
+            override suspend fun loadCronJobs(): List<CronJob> = jobs
+            override suspend fun manageCronJob(jobId: String, action: CronJobAction) {
+                if (action == CronJobAction.Stop) throw HermesChatProtocolException("unknown cron action: stop")
+                managed += jobId to action
+            }
+        }
+        val client = AuthenticatingHermesConnectionClient()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = FixedTokenStore(),
+            projectConnector = HermesChatConnector { _, _ -> metadata },
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        viewModel.manageCronJob("job-1", CronJobAction.Disable).join()
+        advanceUntilIdle()
+
+        assertEquals(listOf("job-1" to CronJobAction.Disable), managed)
+        assertEquals(null, viewModel.snapshots.value.cronJobActionJobId)
+        assertEquals(null, viewModel.snapshots.value.cronJobActionError)
+        assertEquals(CronJobsState.Ready(jobs), viewModel.snapshots.value.cronJobsState)
+
+        viewModel.manageCronJob("job-1", CronJobAction.Stop).join()
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.snapshots.value.cronJobActionJobId)
+        assertEquals("Could not stop the job", viewModel.snapshots.value.cronJobActionError)
     }
 
     @Test
