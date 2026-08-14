@@ -1,29 +1,41 @@
-# Hermes Android
+# Repository Instructions
 
-## Product
-Native Android remote shell for Hermes Agent. The phone never embeds or reimplements the agent: models, tools, skills, memory, sessions, projects, and filesystem access remain on a remote `hermes serve` host.
+## Product boundary
 
-## Stack
-- Kotlin, Jetpack Compose, Material 3
-- minSdk 26, target/compileSdk 35
-- OkHttp for REST and the upcoming JSON-RPC WebSocket client
-- Tolerant JSON decoding: unknown/missing fields must not crash the app
+This is a native Android client for the official interfaces of an unchanged shared `hermes serve` process. Do not add, require, or assume custom server routes, plugins, forks, dashboard extensions, or gateway workers.
 
-## UI
-- When making UI changes, reference the Material 3 documentation: https://m3.material.io/components/chips/overview
+Released Hermes compatibility is conservative: observe durable/live metadata without implicit transport takeover. Resume or activate another remote connected client's runtime only after explicit user action. Never close a shared runtime merely because this client disconnects. Capability-gate multi-subscriber streaming until a safe released transport advertises it.
 
-## Remote contract
-Use the current Hermes Agent source and docs as the authority. Never invent endpoint or RPC shapes. Relevant surfaces:
-- `GET /api/status` for liveness/auth/profile topology
-- `GET /api/profiles/sessions` for the cross-profile session list
-- WebSocket `/api/ws` using JSON-RPC 2.0 for live chat
-- Core RPCs: `session.create`, `session.resume`, `prompt.submit`
-- Project RPCs: `projects.list`, `projects.tree`, `projects.project_sessions`
-- Event notifications arrive as method `event`, with types such as `message.delta`, `message.complete`, `tool.start`, `tool.complete`, `session.info`, and `status.update`
+## Android architecture
 
-## Rules
-- Keep secrets in encrypted Android storage before production; never log tokens.
-- Strip auth/custom headers on cross-origin redirects.
-- Prefer OAuth or a VPN/Tailscale-protected host; basic shared-password auth is trusted-network only.
-- Preserve per-session model/tool configuration; model switching is a session override, not a global default change.
-- Build with the Android Studio JBR on this Windows host.
+- Kotlin, single-activity Jetpack Compose, Material 3.
+- Navigation 3 with serializable `NavKey`s and saveable back stacks.
+- Adaptive list/detail uses `ListDetailSceneStrategy` from `adaptive-navigation3`; do not use legacy `ListDetailPaneScaffold` or `NavigableListDetailPaneScaffold`.
+- Make decisions from current window metrics/posture, never device model names or orientation alone.
+- Edge-to-edge is mandatory. Apply insets at individual screen/list/composer boundaries and avoid double IME/system-bar padding.
+- Keep durable stored-session IDs separate from transient live runtime-session IDs.
+- Keep observer and controller roles explicit.
+
+## Security
+
+- Scope credentials, cookies, trust decisions, cached transcripts, and connection settings by normalized server origin.
+- Treat WebSocket tickets as fresh, single-use, in-memory values.
+- Never log credentials, tokens, cookies, tickets, prompts, transcripts, attachments, secrets, sudo/terminal input, or connection strings.
+- Export only the launcher activity. Add no exported component without an explicit threat model and tests.
+- Do not commit `local.properties`, signing material, credentials, server URLs, or generated build output.
+
+## Development workflow
+
+Use strict RED -> GREEN -> REFACTOR. Every behavior change starts with a meaningful failing test. Keep reducers, protocol parsing, reconciliation, and policy decisions platform-independent where practical and test them locally.
+
+Required gates for changed Android code:
+
+```bash
+./gradlew testDebugUnitTest lintDebug assembleDebug
+```
+
+For adaptive UI changes, also run the configured screenshot/UI test gates and test compact, medium, and expanded windows. Do not update screenshot references without visual review.
+
+## Official project-local skills
+
+The current Google-authored skills live under `.agents/skills/`. Consult matching skills before changes, especially `adaptive`, `navigation-3`, `edge-to-edge`, `testing-setup`, `android-intent-security`, and `android-cli`.

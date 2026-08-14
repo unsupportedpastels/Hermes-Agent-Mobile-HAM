@@ -1,1 +1,0 @@
-This project is to create an android version of hermes. it will need to connect back to a remote version of hermes. it should work very similar to the gpt app and how it remotely connects back to codex. I want the app to use all the skills/models of the desktop app, its just a shell with a window basically, i should be able to swap between projects/sessions, see token usage, etc.
