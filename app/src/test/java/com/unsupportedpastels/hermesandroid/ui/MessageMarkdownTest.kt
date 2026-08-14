@@ -195,6 +195,28 @@ class MessageMarkdownTest {
     }
 
     @Test
+    fun trimsUnmatchedPairedDelimitersFromBareUrls() {
+        val block = parseMessageMarkdown(
+            "See (https://example.com/docs), \"https://example.com/quoted\", " +
+                "[https://example.com/square], {https://example.com/curly}, " +
+                "<https://example.com/angle>, and " +
+                "https://en.wikipedia.org/wiki/Function_(mathematics).",
+        ).single() as MarkdownTextBlock
+
+        assertEquals(
+            listOf(
+                "https://example.com/docs",
+                "https://example.com/quoted",
+                "https://example.com/square",
+                "https://example.com/curly",
+                "https://example.com/angle",
+                "https://en.wikipedia.org/wiki/Function_(mathematics)",
+            ),
+            block.inlines.mapNotNull { it.link },
+        )
+    }
+
+    @Test
     fun preservesUnmatchedInlineMarkersAndTreatsStreamingFenceAsCode() {
         val unmatched = parseMessageMarkdown("Keep **unfinished and `partial")
             .single() as MarkdownTextBlock
