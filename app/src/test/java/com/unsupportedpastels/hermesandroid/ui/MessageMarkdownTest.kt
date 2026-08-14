@@ -199,6 +199,7 @@ class MessageMarkdownTest {
         val block = parseMessageMarkdown(
             "See (https://example.com/docs), \"https://example.com/quoted\", " +
                 "'https://example.com/single-quoted', " +
+                "\"(https://example.com/nested)\", " +
                 "[https://example.com/square], {https://example.com/curly}, " +
                 "<https://example.com/angle>, and " +
                 "https://en.wikipedia.org/wiki/Function_(mathematics), plus " +
@@ -210,6 +211,7 @@ class MessageMarkdownTest {
                 "https://example.com/docs",
                 "https://example.com/quoted",
                 "https://example.com/single-quoted",
+                "https://example.com/nested",
                 "https://example.com/square",
                 "https://example.com/curly",
                 "https://example.com/angle",
