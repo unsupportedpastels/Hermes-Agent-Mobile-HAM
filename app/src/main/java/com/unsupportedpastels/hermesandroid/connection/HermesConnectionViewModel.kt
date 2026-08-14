@@ -1608,14 +1608,16 @@ class HermesConnectionViewModel(
                         billingNotice = null,
                     )
                 }
+                promptStaged = true
+                yield()
+                session.submitPrompt(runtimeId, submittedText)
+                // Only count the turn once the prompt was accepted; a rejected or failed
+                // submission must not leave a phantom active turn (foreground service).
                 notifications.turnStarted(
                     durableSessionId,
                     sessionTitle(durableSessionId),
                     activeTurnIds.apply { add(durableSessionId) }.size,
                 )
-                promptStaged = true
-                yield()
-                session.submitPrompt(runtimeId, submittedText)
                 markDraftPersisted(
                     durableSessionId,
                     origin,
@@ -2695,7 +2697,10 @@ class HermesConnectionViewModel(
                         )
                         activeTurnIds.remove(durableSessionId)
                         notifications.activeCountChanged(activeTurnIds.size)
-                        removeActiveRuntime(runtimeSessionId)
+                        // The controller remains connected after a normal completion, so the
+                        // runtime marker is retained (maintenance stays available while idle).
+                        // It is removed when the controller is detached (error, stop, or
+                        // event-stream end below) or on disconnect.
                         markDraftPersisted(
                             durableSessionId,
                             origin,

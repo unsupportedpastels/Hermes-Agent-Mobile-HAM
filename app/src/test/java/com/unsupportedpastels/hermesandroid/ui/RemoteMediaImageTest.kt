@@ -6,11 +6,14 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import java.net.InetAddress
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+
+private fun inetAddress(value: String): InetAddress = InetAddress.getByName(value)
 
 class RemoteMediaImageTest {
     @Test
@@ -21,6 +24,68 @@ class RemoteMediaImageTest {
         assertFalse(validateRemoteMediaUrl("https://cdn.example:8443/image.png"))
         assertFalse(validateRemoteMediaUrl("https://127.0.0.1/image.png"))
         assertFalse(validateRemoteMediaUrl("https://localhost/image.png"))
+    }
+
+    @Test
+    fun rejectsHostsThatResolveToNonPublicAddresses() {
+        assertFalse(hostResolvesToPublicNetwork("127.0.0.1"))
+        assertFalse(hostResolvesToPublicNetwork("169.254.169.254"))
+        assertFalse(hostResolvesToPublicNetwork("10.0.0.5"))
+        assertFalse(hostResolvesToPublicNetwork("192.168.1.10"))
+        assertFalse(hostResolvesToPublicNetwork("172.16.0.1"))
+        assertFalse(hostResolvesToPublicNetwork("0.0.0.0"))
+        assertFalse(hostResolvesToPublicNetwork("100.64.0.1"))
+        assertTrue(hostResolvesToPublicNetwork("93.184.216.34"))
+        assertTrue(hostResolvesToPublicNetwork("8.8.8.8"))
+    }
+
+    @Test
+    fun rejectsHostResolvingToPrivateWhenAnyResolvedAddressIsPrivate() {
+        // A hostname (DNS rebinding target) that also resolves to a private address is rejected.
+        assertFalse(
+            hostResolvesToPublicNetwork(
+                "public.example.com",
+                resolve = { listOf(inetAddress("93.184.216.34"), inetAddress("10.0.0.5")) },
+            ),
+        )
+        assertTrue(
+            hostResolvesToPublicNetwork(
+                "public.example.com",
+                resolve = { listOf(inetAddress("93.184.216.34"), inetAddress("8.8.8.8")) },
+            ),
+        )
+    }
+
+    @Test
+    fun downloaderRefusesPrivateResolvingHostBeforeIssuingRequest() = runTest {
+        var requests = 0
+        val client = HttpClient(MockEngine {
+            requests += 1
+            respond(
+                content = ByteArray(16),
+                headers = headersOf(HttpHeaders.ContentType, "image/png"),
+            )
+        }) { configureRemoteImageHttpClient() }
+
+        val downloader = RemoteImageDownloader(
+            client = client,
+            resolveHost = { host ->
+                when (host) {
+                    "internal.example.com" -> listOf(inetAddress("127.0.0.1"))
+                    "cdn.example" -> listOf(inetAddress("93.184.216.34"))
+                    else -> emptyList()
+                }
+            },
+        )
+
+        val rejected = downloader.download("https://internal.example.com/image.png")
+        assertTrue(rejected is RemoteImageDownloadResult.InvalidUrl)
+        assertEquals(0, requests)
+
+        val accepted = downloader.download("https://cdn.example/image.png")
+        assertTrue(accepted is RemoteImageDownloadResult.Success)
+        assertEquals(1, requests)
+        client.close()
     }
 
     @Test
@@ -41,8 +106,11 @@ class RemoteMediaImageTest {
             )
         }) { configureRemoteImageHttpClient() }
 
-        val result = RemoteImageDownloader(client, maxBytes = 2_048)
-            .download("https://cdn.example/image.png")
+        val result = RemoteImageDownloader(
+            client,
+            maxBytes = 2_048,
+            resolveHost = { listOf(inetAddress("93.184.216.34")) },
+        ).download("https://cdn.example/image.png")
 
         assertTrue(result is RemoteImageDownloadResult.TooLarge)
         client.close()
@@ -60,7 +128,10 @@ class RemoteMediaImageTest {
             )
         }) { configureRemoteImageHttpClient() }
 
-        val result = RemoteImageDownloader(client).download("https://cdn.example/image.png")
+        val result = RemoteImageDownloader(
+            client,
+            resolveHost = { listOf(inetAddress("93.184.216.34")) },
+        ).download("https://cdn.example/image.png")
 
         assertTrue(result is RemoteImageDownloadResult.HttpFailure)
         assertEquals(302, (result as RemoteImageDownloadResult.HttpFailure).statusCode)

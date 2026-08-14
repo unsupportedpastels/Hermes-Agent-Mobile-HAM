@@ -53,6 +53,8 @@ import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.readRemaining
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.URI
 import java.util.LinkedHashMap
 import kotlinx.coroutines.CancellationException
@@ -75,6 +77,39 @@ internal fun validateRemoteMediaUrl(value: String): Boolean {
     if (host.contains(':') || host.all { it.isDigit() || it == '.' }) return false
     return true
 }
+
+/** True when [address] is reachable only from a public (non-private/non-loopback) network. */
+internal fun isPublicRemoteAddress(address: InetAddress): Boolean {
+    if (address.isLoopbackAddress || address.isAnyLocalAddress) return false
+    if (address.isLinkLocalAddress || address.isSiteLocalAddress) return false
+    if (address.isMulticastAddress) return false
+    if (address is Inet4Address) {
+        val raw = address.address
+        val first = raw[0].toInt() and 0xff
+        val second = raw[1].toInt() and 0xff
+        // Carrier-grade NAT (CGNAT) 100.64.0.0/10 and documentation/test ranges.
+        if (first == 100 && second in 64..127) return false
+        if (first == 192 && second == 0) return false // 192.0.0.0/24, 192.0.2.0/24
+        if (first == 198 && second == 18) return false // 198.18.0.0/15 benchmarking
+    }
+    return true
+}
+
+/**
+ * Resolves [host] and returns true only if every resolved address is public.
+ * Empty resolution (unresolvable host) is treated as not safe.
+ */
+internal fun hostResolvesToPublicNetwork(
+    host: String,
+    resolve: (String) -> List<InetAddress> = { resolveHostToAddresses(it) },
+): Boolean {
+    val addresses = resolve(host)
+    if (addresses.isEmpty()) return false
+    return addresses.all(::isPublicRemoteAddress)
+}
+
+internal fun resolveHostToAddresses(host: String): List<InetAddress> =
+    runCatching { InetAddress.getAllByName(host).toList() }.getOrElse { emptyList() }
 
 internal fun validateGatewayMediaPath(value: String): Boolean =
     value.startsWith('/') &&
@@ -105,6 +140,7 @@ internal sealed interface RemoteImageDownloadResult {
 internal class RemoteImageDownloader(
     private val client: HttpClient,
     private val maxBytes: Int = MAX_REMOTE_IMAGE_BYTES,
+    private val resolveHost: (String) -> List<InetAddress> = ::resolveHostToAddresses,
 ) {
     init {
         require(maxBytes > 0)
@@ -112,6 +148,13 @@ internal class RemoteImageDownloader(
 
     suspend fun download(url: String): RemoteImageDownloadResult {
         if (!validateRemoteMediaUrl(url)) return RemoteImageDownloadResult.InvalidUrl
+        // Reject hosts whose resolved addresses are non-public (loopback, link-local,
+        // RFC1918, CGNAT) so untrusted response content cannot reach internal networks.
+        val host = runCatching { URI(url).host }.getOrNull()
+            ?: return RemoteImageDownloadResult.InvalidUrl
+        if (!hostResolvesToPublicNetwork(host, resolveHost)) {
+            return RemoteImageDownloadResult.InvalidUrl
+        }
         return try {
             val response = client.get(url)
             if (!response.status.isSuccess()) {

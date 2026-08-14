@@ -38,6 +38,7 @@ import com.unsupportedpastels.hermesandroid.gateway.SubagentSteerResult
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionResult
 import com.unsupportedpastels.hermesandroid.gateway.UnsupportedBlockingKind
+import com.unsupportedpastels.hermesandroid.notifications.TurnNotificationController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -263,6 +264,31 @@ class HermesChatIntegrationTest {
         val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
         assertTrue(chat.error != null)
         assertFalse(chat.isSending)
+    }
+
+    @Test
+    fun rejectedPromptDoesNotStartAPhantomActiveTurn() = runTest(dispatcher) {
+        val session = StreamingChatSession(
+            submitFailure = HermesChatProtocolException("prompt rejected"),
+        )
+        val notifications = RecordingTurnNotificationController()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> session },
+            nowEpochSeconds = { 1_900_000_000 },
+            notifications = notifications,
+        )
+        advanceUntilIdle()
+
+        viewModel.sendMessage(durableId, "Summon a response")
+        advanceUntilIdle()
+
+        // The prompt was rejected by the server, so no turn was accepted and the
+        // foreground "working" notification must not be started for this session.
+        assertFalse(notifications.turnStarts.any { it == durableId })
+        assertEquals(0, notifications.lastActiveCount)
     }
 
     @Test
@@ -753,7 +779,11 @@ class HermesChatIntegrationTest {
         second.emit(HermesChatEvent.MessageComplete(second.runtimeSessionId, "second done", "complete"))
         runCurrent()
         assertFalse(viewModel.snapshots.value.chatSessions.getValue(secondId).isSending)
-        assertTrue(viewModel.snapshots.value.activeRuntimes.isEmpty())
+        // Both controllers are retained after completion, so both runtime markers persist.
+        assertEquals(
+            setOf(first.runtimeSessionId, second.runtimeSessionId),
+            viewModel.snapshots.value.activeRuntimes.map { it.runtimeSessionId }.toSet(),
+        )
     }
 
     @Test
@@ -1561,7 +1591,7 @@ class HermesChatIntegrationTest {
     }
 
     @Test
-    fun secondPromptRepublishesControllerRuntimeAfterTheFirstTurnCompletes() = runTest(dispatcher) {
+    fun secondPromptReusesRetainedControllerRuntimeAfterTheFirstTurnCompletes() = runTest(dispatcher) {
         val session = ControllerChatSession("runtime-reused")
         val viewModel = HermesConnectionViewModel(
             settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
@@ -1576,7 +1606,12 @@ class HermesChatIntegrationTest {
         advanceUntilIdle()
         session.emit(HermesChatEvent.MessageComplete(session.runtimeSessionId, "First turn", "done"))
         advanceUntilIdle()
-        assertTrue(viewModel.snapshots.value.activeRuntimes.isEmpty())
+        // The controller is retained across turns, so the runtime marker persists
+        // while the live controller is still connected (maintenance stays available).
+        assertEquals(
+            listOf(session.runtimeSessionId),
+            viewModel.snapshots.value.activeRuntimes.map { it.runtimeSessionId },
+        )
 
         viewModel.sendMessage(durableId, "Second turn")
         advanceUntilIdle()
@@ -1589,7 +1624,7 @@ class HermesChatIntegrationTest {
     }
 
     @Test
-    fun runningControllerRuntimeIsPublishedWithDurableIdentityAndRemovedOnTerminalMessage() = runTest(dispatcher) {
+    fun runningControllerRuntimeIsPublishedWithDurableIdentityAndRetainedUntilControllerDetaches() = runTest(dispatcher) {
         val session = RunEventChatSession()
         val viewModel = chatViewModel(session)
         advanceUntilIdle()
@@ -1612,7 +1647,19 @@ class HermesChatIntegrationTest {
         session.emit(HermesChatEvent.MessageComplete(session.runtimeSessionId, "done", "done"))
         advanceUntilIdle()
 
-        assertTrue(viewModel.snapshots.value.activeRuntimes.isEmpty())
+        // A normal completion does not detach the controller; the runtime marker
+        // is retained so maintenance remains available while the controller is idle.
+        assertEquals(
+            listOf(
+                ActiveRuntimeSession(
+                    runtimeSessionId = session.runtimeSessionId,
+                    durableSessionId = durableId,
+                    title = "Test session",
+                    access = RuntimeAccess.Controller,
+                ),
+            ),
+            viewModel.snapshots.value.activeRuntimes,
+        )
     }
 
     @Test
@@ -2126,6 +2173,50 @@ private class ChatConnectionClient : HermesConnectionClient {
             com.unsupportedpastels.hermesandroid.gateway.ChatMessage(ChatMessageRole.User, "Earlier question"),
             com.unsupportedpastels.hermesandroid.gateway.ChatMessage(ChatMessageRole.Assistant, "Earlier answer"),
         )
+    }
+}
+
+private class RecordingTurnNotificationController : TurnNotificationController {
+    val turnStarts = mutableListOf<DurableSessionId>()
+    var lastActiveCount = 0
+    override fun turnStarted(
+        sessionId: DurableSessionId,
+        title: String,
+        activeCount: Int,
+    ) {
+        turnStarts += sessionId
+        lastActiveCount = activeCount
+    }
+
+    override fun activeCountChanged(activeCount: Int) {
+        lastActiveCount = activeCount
+    }
+
+    override fun approvalRequired(
+        sessionId: DurableSessionId,
+        title: String,
+        preview: String,
+    ) = Unit
+
+    override fun clarificationRequired(
+        sessionId: DurableSessionId,
+        title: String,
+        preview: String,
+    ) = Unit
+
+    override fun unsupportedInputRequired(
+        sessionId: DurableSessionId,
+        title: String,
+        preview: String,
+    ) = Unit
+
+    override fun turnCompleted(
+        sessionId: DurableSessionId,
+        title: String,
+        text: String,
+        status: String?,
+    ) {
+        lastActiveCount = 0
     }
 }
 
