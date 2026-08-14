@@ -91,6 +91,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -221,6 +222,7 @@ fun HermesApp(
     initialRoute: NavKey = HomeRoute,
     requestedSessionId: DurableSessionId? = null,
     requestedSessionRequestId: Long? = null,
+    onVisibleSessionChanged: (DurableSessionId?) -> Unit = {},
     initialHomeSearchOpen: Boolean = false,
     initialProjectDockCollapsed: Boolean = false,
     initialProjectSessionPaneCollapsed: Boolean = false,
@@ -453,6 +455,12 @@ fun HermesApp(
         else -> null
     }
     val selectedSessionId = (backStack.lastOrNull() as? SessionDetailRoute)?.durableSessionId
+    LaunchedEffect(selectedSessionId) {
+        onVisibleSessionChanged(selectedSessionId)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onVisibleSessionChanged(null) }
+    }
     val workingSessionIds = buildSet {
         snapshot.chatSessions
             .filterValues(ChatSessionSnapshot::isSending)

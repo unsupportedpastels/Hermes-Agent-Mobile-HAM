@@ -98,6 +98,7 @@ class HermesTurnNotificationService : Service() {
             ACTION_CLARIFICATION -> postInput(intent, "Hermes needs your input")
             ACTION_UNSUPPORTED -> postInput(intent, "Hermes needs secure input")
             ACTION_COMPLETE -> postCompletion(intent)
+            ACTION_CANCEL_SESSION -> cancelSessionNotifications(intent)
         }
         return START_NOT_STICKY
     }
@@ -128,6 +129,11 @@ class HermesTurnNotificationService : Service() {
 
     private fun postInput(intent: Intent, heading: String) {
         val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: return
+        val durableSessionId = sessionId.toDurableSessionIdOrNull() ?: return
+        if (!shouldPostSessionNotification(durableSessionId, SessionNotificationVisibilityRegistry.states.value)) {
+            manager.cancel(notificationId(sessionId, 1))
+            return
+        }
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
         val preview = intent.getStringExtra(EXTRA_TEXT).orEmpty().take(240)
         manager.notify(notificationId(sessionId, 1), NotificationCompat.Builder(this, CHANNEL_ATTENTION)
@@ -147,6 +153,7 @@ class HermesTurnNotificationService : Service() {
 
     private fun postCompletion(intent: Intent) {
         val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: return
+        val durableSessionId = sessionId.toDurableSessionIdOrNull() ?: return
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
         val preview = finalResponsePreview(intent.getStringExtra(EXTRA_TEXT).orEmpty())
         val status = intent.getStringExtra(EXTRA_STATUS)?.lowercase()
@@ -156,6 +163,10 @@ class HermesTurnNotificationService : Service() {
             else -> "Hermes finished"
         }
         manager.cancel(notificationId(sessionId, 1))
+        if (!shouldPostSessionNotification(durableSessionId, SessionNotificationVisibilityRegistry.states.value)) {
+            manager.cancel(notificationId(sessionId, 2))
+            return
+        }
         manager.notify(notificationId(sessionId, 2), NotificationCompat.Builder(this, CHANNEL_COMPLETE)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(heading)
@@ -200,6 +211,12 @@ class HermesTurnNotificationService : Service() {
 
     private fun notificationId(sessionId: String, kind: Int): Int = 31 * sessionId.hashCode() + kind
 
+    private fun cancelSessionNotifications(intent: Intent) {
+        val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)?.toDurableSessionIdOrNull() ?: return
+        manager.cancel(notificationId(sessionId.value, 1))
+        manager.cancel(notificationId(sessionId.value, 2))
+    }
+
     companion object {
         private const val CHANNEL_ACTIVE = "hermes_active_tasks"
         private const val CHANNEL_ATTENTION = "hermes_task_attention"
@@ -217,5 +234,21 @@ class HermesTurnNotificationService : Service() {
         internal const val ACTION_CLARIFICATION = "com.unsupportedpastels.hermesandroid.notifications.CLARIFICATION"
         internal const val ACTION_UNSUPPORTED = "com.unsupportedpastels.hermesandroid.notifications.UNSUPPORTED"
         internal const val ACTION_COMPLETE = "com.unsupportedpastels.hermesandroid.notifications.COMPLETE"
+        internal const val ACTION_CANCEL_SESSION = "com.unsupportedpastels.hermesandroid.notifications.CANCEL_SESSION"
+    }
+}
+
+private fun String.toDurableSessionIdOrNull(): DurableSessionId? = trim()
+    .takeIf { it.isNotEmpty() && it.length <= 256 }
+    ?.let { runCatching { DurableSessionId(it) }.getOrNull() }
+
+internal fun synchronizeVisibleSessionNotifications(context: Context) {
+    val visibility = SessionNotificationVisibilityRegistry.states.value
+    val sessionId = visibility.visibleSessionId ?: return
+    if (!shouldPostSessionNotification(sessionId, visibility)) {
+        context.startService(Intent(context, HermesTurnNotificationService::class.java).apply {
+            action = HermesTurnNotificationService.ACTION_CANCEL_SESSION
+            putExtra(HermesTurnNotificationService.EXTRA_SESSION_ID, sessionId.value)
+        })
     }
 }

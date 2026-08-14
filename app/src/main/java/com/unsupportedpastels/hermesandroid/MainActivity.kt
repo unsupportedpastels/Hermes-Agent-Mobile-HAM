@@ -29,6 +29,8 @@ import com.unsupportedpastels.hermesandroid.connection.launchBrowserAndAwaitRetu
 import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.notifications.NotificationNavigationInbox
+import com.unsupportedpastels.hermesandroid.notifications.SessionNotificationVisibilityRegistry
+import com.unsupportedpastels.hermesandroid.notifications.synchronizeVisibleSessionNotifications
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.ui.HermesApp
 import com.unsupportedpastels.hermesandroid.ui.ProjectIconAssignmentsState
@@ -71,6 +73,10 @@ class MainActivity : ComponentActivity() {
                     snapshot = snapshot,
                     requestedSessionId = notificationRequest?.sessionId,
                     requestedSessionRequestId = notificationRequest?.requestId,
+                    onVisibleSessionChanged = { sessionId ->
+                        SessionNotificationVisibilityRegistry.publishVisibleSession(sessionId)
+                        synchronizeVisibleSessionNotifications(this)
+                    },
                     onSignIn = {
                         connectionViewModel.signIn { authorizationUrl ->
                             launchBrowserAndAwaitReturn(HermesWindowFocus.state) {
@@ -103,15 +109,20 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         HermesWindowFocus.state.value = hasFocus
+        SessionNotificationVisibilityRegistry.publishWindowFocused(hasFocus)
+        synchronizeVisibleSessionNotifications(this)
     }
 
     override fun onStart() {
         super.onStart()
         HermesAppForeground.publish(true)
+        SessionNotificationVisibilityRegistry.publishAppForeground(true)
+        synchronizeVisibleSessionNotifications(this)
     }
 
     override fun onStop() {
         HermesAppForeground.publish(false)
+        SessionNotificationVisibilityRegistry.publishAppForeground(false)
         super.onStop()
     }
 }
@@ -124,6 +135,7 @@ internal fun HermesAppHost(
     snapshot: HermesGatewaySnapshot,
     requestedSessionId: DurableSessionId? = null,
     requestedSessionRequestId: Long? = null,
+    onVisibleSessionChanged: (DurableSessionId?) -> Unit = {},
     onSignIn: () -> Unit = {},
     onOpenProject: (ProjectId) -> Unit = {},
     onCreateProjectSession: (ProjectId) -> DurableSessionId? = { null },
@@ -163,6 +175,7 @@ internal fun HermesAppHost(
         snapshot = snapshot,
         requestedSessionId = requestedSessionId,
         requestedSessionRequestId = requestedSessionRequestId,
+        onVisibleSessionChanged = onVisibleSessionChanged,
         serverSettingsState = serverSettingsState,
         onSaveServerOrigin = { origin -> viewModel.save(origin).await() },
         onLoadManagementSettings = { profile -> connectionViewModel?.loadManagementSettings(profile) },
