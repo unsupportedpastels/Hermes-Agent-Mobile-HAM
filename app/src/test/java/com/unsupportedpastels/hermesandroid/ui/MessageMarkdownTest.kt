@@ -198,19 +198,23 @@ class MessageMarkdownTest {
     fun trimsUnmatchedPairedDelimitersFromBareUrls() {
         val block = parseMessageMarkdown(
             "See (https://example.com/docs), \"https://example.com/quoted\", " +
+                "'https://example.com/single-quoted', " +
                 "[https://example.com/square], {https://example.com/curly}, " +
                 "<https://example.com/angle>, and " +
-                "https://en.wikipedia.org/wiki/Function_(mathematics).",
+                "https://en.wikipedia.org/wiki/Function_(mathematics), plus " +
+                "https://example.com/wiki/Readers'.",
         ).single() as MarkdownTextBlock
 
         assertEquals(
             listOf(
                 "https://example.com/docs",
                 "https://example.com/quoted",
+                "https://example.com/single-quoted",
                 "https://example.com/square",
                 "https://example.com/curly",
                 "https://example.com/angle",
                 "https://en.wikipedia.org/wiki/Function_(mathematics)",
+                "https://example.com/wiki/Readers'",
             ),
             block.inlines.mapNotNull { it.link },
         )
