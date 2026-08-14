@@ -80,6 +80,12 @@ data class ChatSessionSnapshot(
     val model: String? = null,
     val provider: String? = null,
     val reasoningEffort: String? = null,
+    val sessionUsage: SessionUsage? = null,
+    val contextBreakdown: SessionContextBreakdown? = null,
+    val insightsLoading: Boolean = false,
+    val insightsError: String? = null,
+    val maintenanceLoading: Boolean = false,
+    val maintenanceError: String? = null,
 )
 
 data class HermesGatewaySnapshot(
@@ -99,6 +105,7 @@ data class HermesGatewaySnapshot(
     val activeRuntimes: List<ActiveRuntimeSession> = emptyList(),
     val chatSessions: Map<DurableSessionId, ChatSessionSnapshot> = emptyMap(),
     val delegationStatus: DelegationStatus = DelegationStatus(),
+    val scheduledJobsState: ScheduledJobsState = ScheduledJobsState.Idle,
     val profiles: List<String> = emptyList(),
     val selectedProfile: String = "default",
     val defaultModelOptions: ModelOptions? = null,
@@ -108,6 +115,7 @@ data class HermesGatewaySnapshot(
     val transcriptSearchResults: List<SessionSearchResult> = emptyList(),
     val searchLoading: Boolean = false,
     val searchError: String? = null,
+    val lastBranchedSessionId: DurableSessionId? = null,
 )
 
 interface HermesGateway {

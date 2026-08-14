@@ -18,6 +18,8 @@ import com.unsupportedpastels.hermesandroid.app.ProjectSessionsResult
 import com.unsupportedpastels.hermesandroid.app.ProjectTreeResult
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
+import com.unsupportedpastels.hermesandroid.gateway.ScheduledJob
+import com.unsupportedpastels.hermesandroid.gateway.ScheduledJobsState
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.DelegatedSubagent
 import com.unsupportedpastels.hermesandroid.app.DelegationStatus
@@ -1431,6 +1433,38 @@ class HermesConnectionViewModelTest {
         viewModel.refreshHomeData().join()
 
         assertEquals("child-1", viewModel.snapshots.value.delegationStatus.active.single().subagentId)
+    }
+
+    @Test
+    fun refreshScheduledJobsPublishesEnabledAndPausedJobsReadOnly() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val expected = listOf(
+            ScheduledJob("job-enabled", "Daily brief", "0 8 * * *", enabled = true),
+            ScheduledJob("job-paused", "Price watch", "every 2h", enabled = false),
+        )
+        val delegate = MetadataOnlyProjectSession.fromTreeAndSessions(
+            ProjectTreeResult(emptyList()),
+            CompletableDeferred(),
+        )
+        val metadata = object : HermesChatSession by delegate {
+            override suspend fun loadScheduledJobs(): List<ScheduledJob> = expected
+        }
+        val client = AuthenticatingHermesConnectionClient()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = FixedTokenStore(),
+            projectConnector = HermesChatConnector { _, _ -> metadata },
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        viewModel.refreshScheduledJobs().join()
+
+        assertEquals(ScheduledJobsState.Ready(expected), viewModel.snapshots.value.scheduledJobsState)
     }
 
     @Test

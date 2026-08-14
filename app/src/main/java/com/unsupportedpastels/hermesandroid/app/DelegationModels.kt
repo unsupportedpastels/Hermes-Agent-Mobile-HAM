@@ -13,4 +13,8 @@ data class DelegationStatus(
     val paused: Boolean = false,
     val maxSpawnDepth: Int? = null,
     val maxConcurrentChildren: Int? = null,
+    /** Process-local result copy; never implies cross-process ownership. */
+    val notice: String? = null,
+    val actionLoading: Boolean = false,
+    val error: String? = null,
 )

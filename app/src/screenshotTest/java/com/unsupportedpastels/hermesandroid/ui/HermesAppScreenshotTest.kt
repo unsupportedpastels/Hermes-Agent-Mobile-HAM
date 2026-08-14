@@ -338,23 +338,6 @@ fun HermesExpandedCollapsedProjectDockScreenshot() {
 }
 
 @PreviewTest
-@Preview(name = "Expanded collapsed project sessions", widthDp = 900, heightDp = 675, showBackground = true)
-@Composable
-fun HermesExpandedCollapsedProjectSessionsScreenshot() {
-    ScreenshotNavigationHost {
-        HermesAndroidTheme(darkTheme = false) {
-            HermesApp(
-                snapshot = screenshotWorkspaceSnapshot(),
-                initialRoute = SessionDetailRoute(screenshotAlphaWorkspaceSession.id),
-                serverSettingsState = screenshotServerSettings,
-                initialProjectDockCollapsed = true,
-                initialProjectSessionPaneCollapsed = true,
-            )
-        }
-    }
-}
-
-@PreviewTest
 @Preview(
     name = "Expanded dark home placeholder",
     widthDp = 900,

@@ -33,6 +33,8 @@ import com.unsupportedpastels.hermesandroid.notifications.SessionNotificationVis
 import com.unsupportedpastels.hermesandroid.notifications.synchronizeVisibleSessionNotifications
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.ui.HermesApp
+import com.unsupportedpastels.hermesandroid.ui.PaneLayoutPreferencesViewModel
+import com.unsupportedpastels.hermesandroid.ui.ProjectDockState
 import com.unsupportedpastels.hermesandroid.ui.ProjectIconAssignmentsState
 import com.unsupportedpastels.hermesandroid.ui.ProjectIconViewModel
 import kotlinx.coroutines.CancellationException
@@ -54,6 +56,9 @@ class MainActivity : ComponentActivity() {
     private val projectIconViewModel by viewModels<ProjectIconViewModel> {
         ProjectIconViewModel.Factory(this)
     }
+    private val paneLayoutPreferencesViewModel by viewModels<PaneLayoutPreferencesViewModel> {
+        PaneLayoutPreferencesViewModel.Factory(this)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +75,7 @@ class MainActivity : ComponentActivity() {
                     viewModel = serverSettingsViewModel,
                     connectionViewModel = connectionViewModel,
                     projectIconViewModel = projectIconViewModel,
+                    paneLayoutPreferencesViewModel = paneLayoutPreferencesViewModel,
                     snapshot = snapshot,
                     requestedSessionId = notificationRequest?.sessionId,
                     requestedSessionRequestId = notificationRequest?.requestId,
@@ -132,6 +138,7 @@ internal fun HermesAppHost(
     viewModel: ServerSettingsViewModel,
     connectionViewModel: HermesConnectionViewModel? = null,
     projectIconViewModel: ProjectIconViewModel? = null,
+    paneLayoutPreferencesViewModel: PaneLayoutPreferencesViewModel? = null,
     snapshot: HermesGatewaySnapshot,
     requestedSessionId: DurableSessionId? = null,
     requestedSessionRequestId: Long? = null,
@@ -170,11 +177,25 @@ internal fun HermesAppHost(
     val homeRefreshingFlow = connectionViewModel?.homeRefreshing
         ?: remember { MutableStateFlow(false) }
     val homeRefreshing by homeRefreshingFlow.collectAsStateWithLifecycle()
+    val persistedPaneProportionFlow = paneLayoutPreferencesViewModel?.projectSessionPaneProportion
+        ?: remember { MutableStateFlow<Float?>(null) }
+    val persistedPaneProportion by persistedPaneProportionFlow.collectAsStateWithLifecycle()
+    val persistedProjectDockStateFlow = paneLayoutPreferencesViewModel?.projectDockState
+        ?: remember { MutableStateFlow<ProjectDockState?>(null) }
+    val persistedProjectDockState by persistedProjectDockStateFlow.collectAsStateWithLifecycle()
 
     HermesApp(
         snapshot = snapshot,
         requestedSessionId = requestedSessionId,
         requestedSessionRequestId = requestedSessionRequestId,
+        persistedProjectDockState = persistedProjectDockState,
+        onProjectDockStateChanged = { state ->
+            paneLayoutPreferencesViewModel?.saveProjectDockState(state)
+        },
+        projectSessionPaneProportion = persistedPaneProportion,
+        onProjectSessionPaneProportionChanged = { proportion ->
+            paneLayoutPreferencesViewModel?.saveProjectSessionPaneProportion(proportion)
+        },
         onVisibleSessionChanged = onVisibleSessionChanged,
         serverSettingsState = serverSettingsState,
         onSaveServerOrigin = { origin -> viewModel.save(origin).await() },
@@ -188,6 +209,21 @@ internal fun HermesAppHost(
         onOpenProject = onOpenProject,
         onCreateProjectSession = onCreateProjectSession,
         onOpenSession = onOpenSession,
+        onLoadSessionInsights = { sessionId ->
+            connectionViewModel?.loadSessionInsights(sessionId)
+        },
+        onCompressSession = { sessionId, focusTopic ->
+            connectionViewModel?.compressSession(sessionId, focusTopic)
+        },
+        onUndoSession = { sessionId ->
+            connectionViewModel?.undoSession(sessionId)
+        },
+        onBranchSession = { sessionId, count, name ->
+            connectionViewModel?.branchSession(sessionId, count, name)
+        },
+        onRefreshScheduledJobs = {
+            connectionViewModel?.refreshScheduledJobs()
+        },
         isHomeRefreshing = homeRefreshing,
         onRefreshHome = { connectionViewModel?.refreshHomeData() },
         onRenameSession = { sessionId, title ->
@@ -212,6 +248,18 @@ internal fun HermesAppHost(
         onClarificationResponse = onClarificationResponse,
         onApprovalResponse = onApprovalResponse,
         onStopSession = onStopSession,
+        onSteerSession = { sessionId, text ->
+            connectionViewModel?.steerSession(sessionId, text)
+        },
+        onSetDelegationPaused = { sessionId, paused ->
+            connectionViewModel?.setDelegationPaused(sessionId, paused)
+        },
+        onSteerSubagent = { sessionId, subagentId, text ->
+            connectionViewModel?.steerSubagent(sessionId, subagentId, text)
+        },
+        onInterruptSubagent = { sessionId, subagentId ->
+            connectionViewModel?.interruptSubagent(sessionId, subagentId)
+        },
         onCreateSession = { connectionViewModel?.createNewSession() },
         onLoadHostDirectories = { path ->
             connectionViewModel?.let { viewModel ->

@@ -13,6 +13,7 @@ import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
+import com.unsupportedpastels.hermesandroid.gateway.DelegationPauseResult
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatConnector
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatEvent
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatResponse
@@ -25,6 +26,15 @@ import com.unsupportedpastels.hermesandroid.gateway.PromptSubmission
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
+import com.unsupportedpastels.hermesandroid.gateway.ContextBreakdownCategory
+import com.unsupportedpastels.hermesandroid.gateway.SessionBranchResult
+import com.unsupportedpastels.hermesandroid.gateway.SessionCompressResult
+import com.unsupportedpastels.hermesandroid.gateway.SessionContextBreakdown
+import com.unsupportedpastels.hermesandroid.gateway.SessionSteerResult
+import com.unsupportedpastels.hermesandroid.gateway.SessionUndoResult
+import com.unsupportedpastels.hermesandroid.gateway.SessionUsage
+import com.unsupportedpastels.hermesandroid.gateway.SubagentInterruptResult
+import com.unsupportedpastels.hermesandroid.gateway.SubagentSteerResult
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionResult
 import com.unsupportedpastels.hermesandroid.gateway.UnsupportedBlockingKind
@@ -650,11 +660,12 @@ class HermesChatIntegrationTest {
 
     private fun chatViewModel(
         session: HermesChatSession,
+        client: HermesConnectionClient = ChatConnectionClient(),
         attachmentReader: AttachmentByteReader =
             AttachmentByteReader { error("no attachment reads expected") },
     ) = HermesConnectionViewModel(
         settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
-        client = ChatConnectionClient(),
+        client = client,
         tokenStore = MemoryTokenStore(tokens),
         chatConnector = HermesChatConnector { _, _ -> session },
         nowEpochSeconds = { 1_900_000_000 },
@@ -1240,6 +1251,116 @@ class HermesChatIntegrationTest {
         assertEquals(RunInteractionLifecycle.Expired, chat.runState.approval?.lifecycle)
         assertTrue(viewModel.snapshots.value.activeRuntimes.none { it.runtimeSessionId == session.runtimeSessionId })
         assertFalse(session.closed)
+    }
+
+    @Test
+    fun steerControllerTargetsExactSendingRuntimeWithoutAppendingTranscriptMessage() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        viewModel.sendMessage(durableId, "Long-running prompt")
+        advanceUntilIdle()
+        val messagesBeforeSteer = viewModel.snapshots.value.chatSessions.getValue(durableId).messages
+
+        viewModel.steerSession(DurableSessionId("other"), "ignore this").join()
+        assertTrue(session.steerCalls.isEmpty())
+
+        viewModel.steerSession(durableId, "Focus on the failing test").join()
+
+        assertEquals(
+            listOf(session.runtimeSessionId to "Focus on the failing test"),
+            session.steerCalls,
+        )
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertTrue(chat.isSending)
+        assertEquals(messagesBeforeSteer, chat.messages)
+        assertEquals("Guidance queued for the active turn", chat.notice)
+        assertNull(chat.error)
+    }
+
+    @Test
+    fun sessionInsightsLoadForExactControlledRuntimeAndPublishUsageAndContext() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        viewModel.loadSessionInsights(durableId).join()
+
+        assertEquals(listOf(session.runtimeSessionId), session.usageCalls)
+        assertEquals(listOf(session.runtimeSessionId), session.contextCalls)
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertFalse(chat.insightsLoading)
+        assertEquals(42L, chat.sessionUsage?.totalTokens)
+        assertEquals(100L, chat.contextBreakdown?.maxTokens)
+        assertEquals("Conversation", chat.contextBreakdown?.categories?.single()?.name)
+        assertNull(chat.insightsError)
+    }
+
+    @Test
+    fun maintenanceActionsReplaceTranscriptRefreshUndoAndPublishBranchWithoutSharingParentTransport() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val client = ChatConnectionClient()
+        val viewModel = chatViewModel(session, client)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        viewModel.sendMessage(durableId, "Long-running prompt")
+        advanceUntilIdle()
+        session.emit(HermesChatEvent.MessageComplete(session.runtimeSessionId, "Done", "completed"))
+        advanceUntilIdle()
+
+        viewModel.compressSession(durableId, "tests").join()
+        var chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertEquals(listOf("Compressed summary"), chat.messages.map { it.text })
+        assertEquals("Context compressed", chat.notice)
+
+        val transcriptLoadsBeforeUndo = client.transcriptLoads
+        viewModel.undoSession(durableId).join()
+        chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertEquals(listOf("Earlier question", "Earlier answer"), chat.messages.map { it.text })
+        assertEquals(transcriptLoadsBeforeUndo + 1, client.transcriptLoads)
+
+        viewModel.branchSession(durableId, count = 1, name = "Test branch").join()
+        val branchId = DurableSessionId("stored-branch")
+        val snapshot = viewModel.snapshots.value
+        assertEquals(branchId, snapshot.lastBranchedSessionId)
+        assertTrue(snapshot.durableSessions.any { it.id == branchId && it.title == "Test branch" })
+        assertEquals(listOf("Branch question"), snapshot.chatSessions.getValue(branchId).messages.map { it.text })
+        assertFalse(snapshot.activeRuntimes.any { it.durableSessionId == branchId })
+        assertFalse(session.closed)
+    }
+
+    @Test
+    fun subagentControlsUseParentControllerAndUpdateProcessLocalStatus() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        viewModel.sendMessage(durableId, "Delegate work")
+        advanceUntilIdle()
+
+        viewModel.setDelegationPaused(durableId, true).join()
+        viewModel.steerSubagent(durableId, "child-1", "Focus on Android tests").join()
+        viewModel.interruptSubagent(durableId, "child-1").join()
+
+        assertEquals(listOf(true), session.pauseDelegationCalls)
+        assertEquals(
+            listOf(Triple(session.runtimeSessionId, "child-1", "Focus on Android tests")),
+            session.subagentSteerCalls,
+        )
+        assertEquals(listOf("child-1"), session.subagentInterruptCalls)
+        val status = viewModel.snapshots.value.delegationStatus
+        assertTrue(status.paused)
+        assertEquals("Subagent interrupted", status.notice)
+        assertNull(status.error)
     }
 
     @Test
@@ -2448,6 +2569,15 @@ private class ControllerChatSession(
     val clarificationCalls = mutableListOf<Pair<String, String>>()
     val approvalCalls = mutableListOf<Triple<RuntimeSessionId, String, Boolean>>()
     val interruptCalls = mutableListOf<RuntimeSessionId>()
+    val steerCalls = mutableListOf<Pair<RuntimeSessionId, String>>()
+    val usageCalls = mutableListOf<RuntimeSessionId>()
+    val contextCalls = mutableListOf<RuntimeSessionId>()
+    val compressCalls = mutableListOf<Pair<RuntimeSessionId, String?>>()
+    val undoCalls = mutableListOf<RuntimeSessionId>()
+    val branchCalls = mutableListOf<Triple<RuntimeSessionId, Int?, String?>>()
+    val pauseDelegationCalls = mutableListOf<Boolean>()
+    val subagentInterruptCalls = mutableListOf<String>()
+    val subagentSteerCalls = mutableListOf<Triple<RuntimeSessionId, String, String>>()
     var clarificationResponse = CompletableDeferred<HermesChatResponse>()
     var approvalResponse = CompletableDeferred<HermesChatResponse>()
     var interruptResponse = CompletableDeferred<HermesChatResponse>()
@@ -2507,6 +2637,84 @@ private class ControllerChatSession(
         } else {
             interruptResponse.await()
         }
+    }
+
+    override suspend fun steer(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+    ): SessionSteerResult {
+        steerCalls += runtimeSessionId to text
+        return SessionSteerResult(status = "queued", text = text)
+    }
+
+    override suspend fun loadSessionUsage(runtimeSessionId: RuntimeSessionId): SessionUsage {
+        usageCalls += runtimeSessionId
+        return SessionUsage(totalTokens = 42, contextUsedTokens = 42, contextMaxTokens = 100)
+    }
+
+    override suspend fun loadContextBreakdown(runtimeSessionId: RuntimeSessionId): SessionContextBreakdown {
+        contextCalls += runtimeSessionId
+        return SessionContextBreakdown(
+            categories = listOf(ContextBreakdownCategory("Conversation", tokens = 42)),
+            usedTokens = 42,
+            maxTokens = 100,
+            percent = 42.0,
+        )
+    }
+
+    override suspend fun compressSession(
+        runtimeSessionId: RuntimeSessionId,
+        focusTopic: String?,
+    ): SessionCompressResult {
+        compressCalls += runtimeSessionId to focusTopic
+        return SessionCompressResult(
+            status = "compressed",
+            messages = listOf(buildJsonObject {
+                put("role", "assistant")
+                put("text", "Compressed summary")
+            }),
+        )
+    }
+
+    override suspend fun undoSession(runtimeSessionId: RuntimeSessionId): SessionUndoResult {
+        undoCalls += runtimeSessionId
+        return SessionUndoResult(removed = 2)
+    }
+
+    override suspend fun branchSession(
+        runtimeSessionId: RuntimeSessionId,
+        count: Int?,
+        name: String?,
+    ): SessionBranchResult {
+        branchCalls += Triple(runtimeSessionId, count, name)
+        return SessionBranchResult(
+            runtimeSessionId = RuntimeSessionId("runtime-branch"),
+            durableSessionId = DurableSessionId("stored-branch"),
+            title = "Test branch",
+            messages = listOf(buildJsonObject {
+                put("role", "user")
+                put("text", "Branch question")
+            }),
+        )
+    }
+
+    override suspend fun pauseDelegation(paused: Boolean): DelegationPauseResult {
+        pauseDelegationCalls += paused
+        return DelegationPauseResult(paused)
+    }
+
+    override suspend fun interruptSubagent(subagentId: String): SubagentInterruptResult {
+        subagentInterruptCalls += subagentId
+        return SubagentInterruptResult(found = true, subagentId = subagentId)
+    }
+
+    override suspend fun steerSubagent(
+        runtimeSessionId: RuntimeSessionId,
+        subagentId: String,
+        text: String,
+    ): SubagentSteerResult {
+        subagentSteerCalls += Triple(runtimeSessionId, subagentId, text)
+        return SubagentSteerResult(status = "queued", text = text)
     }
 
     suspend fun emit(event: HermesChatEvent) {

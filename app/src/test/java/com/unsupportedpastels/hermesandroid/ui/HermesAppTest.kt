@@ -70,6 +70,7 @@ import com.unsupportedpastels.hermesandroid.navigation.ProjectRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import org.junit.Rule
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -900,27 +901,52 @@ class HermesAppTest {
     }
 
     @Test
-    fun activeProjectRowExposesSelectedSemantics() {
-        val projectId = ProjectId("project-1")
-        val project = ProjectSummary(projectId, "Project Alpha", "/workspace/alpha", 0, emptyList())
+    fun onlyProjectWithRunningSessionExposesSelectedSemantics() {
+        val idleProjectId = ProjectId("project-idle")
+        val workingProjectId = ProjectId("project-working")
+        val idleProject = ProjectSummary(idleProjectId, "Idle project", "/workspace/idle", 0, emptyList())
+        val workingProject = ProjectSummary(
+            workingProjectId,
+            "Working project",
+            "/workspace/working",
+            1,
+            emptyList(),
+        )
+        val workingSession = SessionSummary(
+            DurableSessionId("working-session"),
+            "Running task",
+            projectId = workingProjectId,
+        )
         val snapshot = connectedSnapshot.copy(
-            projects = listOf(project),
+            durableSessions = sessions + workingSession,
+            projects = listOf(idleProject, workingProject),
             projectState = ProjectLoadState.Loaded(
-                projects = listOf(project),
-                activeProjectId = projectId,
+                projects = listOf(idleProject, workingProject),
+                activeProjectId = idleProjectId,
             ),
-            activeProjectId = projectId,
+            activeProjectId = idleProjectId,
+            chatSessions = mapOf(
+                workingSession.id to ChatSessionSnapshot(isSending = true),
+            ),
         )
 
         composeRule.setContent {
             HermesAndroidTheme { HermesApp(snapshot = snapshot) }
         }
 
-        assertTrue(
-            composeRule.onNodeWithText("Project Alpha")
+        assertFalse(
+            composeRule.onNodeWithText("Idle project")
                 .fetchSemanticsNode()
                 .config[SemanticsProperties.Selected],
         )
+        assertTrue(
+            composeRule.onNodeWithText("Working project")
+                .fetchSemanticsNode()
+                .config[SemanticsProperties.Selected],
+        )
+        composeRule.onNodeWithContentDescription(
+            "Project Working project, active session running, 1 session",
+        ).assertIsDisplayed()
     }
 
     @Test
@@ -948,7 +974,7 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithContentDescription(
-            "Current project Hermes Android, 3 sessions, latest OAuth callback repair",
+            "Project Hermes Android, 3 sessions, latest OAuth callback repair",
         ).assertIsDisplayed()
     }
 
@@ -2188,6 +2214,46 @@ class HermesAppTest {
     }
 
     @Test
+    @Config(sdk = [35], qualifiers = "w1200dp-h800dp")
+    fun handledNotificationDoesNotReopenOldSessionWhenNewTaskChangesSessionList() {
+        val requestedSession = SessionSummary(
+            DurableSessionId("notification-session"),
+            "Notification session",
+        )
+        val newDraft = SessionSummary(
+            DurableSessionId("new-draft"),
+            "New task draft",
+            isLocalDraft = true,
+        )
+        var snapshot by mutableStateOf(
+            connectedSnapshot.copy(
+                authenticationState = AuthenticationState.Authenticated,
+                durableSessions = listOf(requestedSession),
+            ),
+        )
+        var openedSession: DurableSessionId? = null
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    requestedSessionId = requestedSession.id,
+                    requestedSessionRequestId = 1L,
+                    onCreateSession = {
+                        snapshot = snapshot.copy(durableSessions = listOf(newDraft, requestedSession))
+                        newDraft.id
+                    },
+                    onOpenSession = { openedSession = it },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("New task").performClick()
+
+        composeRule.runOnIdle { assertEquals(newDraft.id, openedSession) }
+    }
+
+    @Test
     fun validProjectDraftShowsAuthoritativeWorkspaceAndCanSend() {
         val projectId = ProjectId("project-1")
         val draft = SessionSummary(
@@ -2682,8 +2748,8 @@ class HermesAppTest {
     }
 
     @Test
-    @Config(sdk = [35], qualifiers = "w1200dp-h800dp")
-    fun selectedSessionMasterPaneCanCollapseAndRestore() {
+    @Config(sdk = [35], qualifiers = "w816dp-h700dp")
+    fun unfoldedWorkspaceGivesDetailMoreWidthAndExposesPaneResizeHandle() {
         val projectId = ProjectId("project-alpha")
         val sessionId = DurableSessionId("project-session")
         val project = ProjectSummary(projectId, "Project Alpha", "/workspace/alpha", 1, emptyList())
@@ -2707,58 +2773,48 @@ class HermesAppTest {
                 ),
             ),
         )
+        var savedPaneProportion: Float? = null
 
-        val restorationTester = StateRestorationTester(composeRule)
-        restorationTester.setContent {
+        composeRule.setContent {
             HermesAndroidTheme {
                 HermesApp(
                     snapshot = snapshot,
                     initialRoute = SessionDetailRoute(sessionId),
-                    initialProjectDockCollapsed = true,
+                    onProjectSessionPaneProportionChanged = { savedPaneProportion = it },
                 )
             }
         }
 
-        composeRule.onNodeWithContentDescription("Project sessions for Project Alpha").assertIsDisplayed()
-        val timelineBefore = composeRule.onNodeWithTag("Session timeline")
+        val masterBounds = composeRule
+            .onNodeWithContentDescription("Project sessions for Project Alpha")
             .fetchSemanticsNode()
             .boundsInRoot
-        val collapseAction = composeRule
-            .onNodeWithContentDescription("Collapse project sessions")
+        val detailBounds = composeRule.onNodeWithTag("Session timeline")
             .fetchSemanticsNode()
-            .config[SemanticsActions.OnClick]
-        composeRule.mainClock.autoAdvance = false
-        composeRule.runOnIdle { collapseAction.action?.invoke() }
-        composeRule.mainClock.advanceTimeBy(80)
+            .boundsInRoot
+
+        assertTrue("master=$masterBounds detail=$detailBounds", detailBounds.width > masterBounds.width)
+        composeRule.onNodeWithContentDescription("Collapse project sessions").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Show project sessions").assertDoesNotExist()
+        val resizeHandle = composeRule.onNodeWithTag("Project session pane resize handle")
+        resizeHandle.assertIsDisplayed()
+        resizeHandle.performTouchInput {
+            down(center)
+            repeat(10) {
+                moveBy(androidx.compose.ui.geometry.Offset(-8f, 0f), delayMillis = 16)
+            }
+            up()
+        }
         composeRule.waitForIdle()
-        val timelineMidTransition = composeRule.onNodeWithTag("Session timeline")
+        val resizedDetailBounds = composeRule.onNodeWithTag("Session timeline")
             .fetchSemanticsNode()
             .boundsInRoot
-        composeRule.mainClock.advanceTimeBy(1_000)
-        composeRule.waitForIdle()
-        val timelineAfter = composeRule.onNodeWithTag("Session timeline")
-            .fetchSemanticsNode()
-            .boundsInRoot
-        composeRule.mainClock.autoAdvance = true
-        composeRule.onNodeWithContentDescription("Project sessions for Project Alpha").assertDoesNotExist()
-        composeRule.onNodeWithContentDescription("Show project sessions").assertIsDisplayed()
-
-        val transitionBounds =
-            "before=$timelineBefore mid=$timelineMidTransition after=$timelineAfter"
-        assertTrue(transitionBounds, timelineMidTransition.left <= timelineBefore.left)
-        assertTrue(transitionBounds, timelineMidTransition.left >= timelineAfter.left)
-        assertTrue(transitionBounds, timelineMidTransition.width >= timelineBefore.width)
-        assertTrue(transitionBounds, timelineMidTransition.width <= timelineAfter.width)
-        assertTrue(timelineAfter.left < timelineBefore.left)
-        assertTrue(timelineAfter.width > timelineBefore.width)
-
-        restorationTester.emulateSavedInstanceStateRestore()
-        composeRule.onNodeWithContentDescription("Project sessions for Project Alpha").assertDoesNotExist()
-        composeRule.onNodeWithContentDescription("Show project sessions").assertIsDisplayed()
-
-        composeRule.onNodeWithContentDescription("Show project sessions").performClick()
-        composeRule.onNodeWithContentDescription("Project sessions for Project Alpha").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Collapse project sessions").assertIsDisplayed()
+        assertTrue(
+            "before=$detailBounds after=$resizedDetailBounds",
+            resizedDetailBounds.width > detailBounds.width,
+        )
+        composeRule.waitUntil(timeoutMillis = 2_000) { savedPaneProportion != null }
+        assertTrue(savedPaneProportion!! < DEFAULT_PROJECT_SESSION_PANE_PROPORTION)
     }
 
     @Test

@@ -7,7 +7,6 @@ import android.provider.OpenableColumns
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
@@ -20,8 +19,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -69,6 +70,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -80,6 +82,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.VerticalDragHandle
 import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
 import androidx.compose.material3.adaptive.layout.PaneExpansionStateKey
@@ -90,13 +93,12 @@ import androidx.compose.material3.adaptive.navigation3.rememberListDetailSceneSt
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -143,6 +145,7 @@ import com.unsupportedpastels.hermesandroid.app.RunToolState
 import com.unsupportedpastels.hermesandroid.app.UnsupportedBlockingInteraction
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.DelegatedSubagent
+import com.unsupportedpastels.hermesandroid.app.DelegationStatus
 import com.unsupportedpastels.hermesandroid.app.ProjectLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSessionLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSummary
@@ -160,6 +163,7 @@ import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
+import com.unsupportedpastels.hermesandroid.gateway.ContextBreakdownCategory
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryListing
 import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
@@ -176,6 +180,7 @@ import com.unsupportedpastels.hermesandroid.theme.LocalHermesSemanticColors
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import java.net.URI
+import java.util.Locale
 
 private val DraftsSaver = Saver<SnapshotStateMap<String, String>, ArrayList<String>>(
     save = { drafts ->
@@ -206,12 +211,6 @@ internal fun sessionStatusPulseAlphaAt(playTimeMillis: Long): Float {
     return 1f + (0.35f - 1f) * easedPhase
 }
 
-private enum class ProjectDockState {
-    Expanded,
-    Collapsed,
-    Hidden,
-}
-
 private const val PROJECT_DOCK_MIN_WIDTH_DP = 800
 
 @OptIn(ExperimentalMaterial3AdaptiveApi::class)
@@ -225,7 +224,10 @@ fun HermesApp(
     onVisibleSessionChanged: (DurableSessionId?) -> Unit = {},
     initialHomeSearchOpen: Boolean = false,
     initialProjectDockCollapsed: Boolean = false,
-    initialProjectSessionPaneCollapsed: Boolean = false,
+    persistedProjectDockState: ProjectDockState? = null,
+    onProjectDockStateChanged: (ProjectDockState) -> Unit = {},
+    projectSessionPaneProportion: Float? = DEFAULT_PROJECT_SESSION_PANE_PROPORTION,
+    onProjectSessionPaneProportionChanged: (Float) -> Unit = {},
     initialProjectCreatorOpen: Boolean = false,
     initialProjectCreatorListing: HostDirectoryListing? = null,
     serverSettingsState: ServerSettingsState = ServerSettingsState.Ready(null),
@@ -238,6 +240,11 @@ fun HermesApp(
     onSignIn: () -> Unit = {},
     onOpenProject: (ProjectId) -> Unit = {},
     onOpenSession: (DurableSessionId) -> Unit = {},
+    onLoadSessionInsights: (DurableSessionId) -> Unit = {},
+    onCompressSession: (DurableSessionId, String?) -> Unit = { _, _ -> },
+    onUndoSession: (DurableSessionId) -> Unit = {},
+    onBranchSession: (DurableSessionId, Int?, String?) -> Unit = { _, _, _ -> },
+    onRefreshScheduledJobs: () -> Unit = {},
     isHomeRefreshing: Boolean = false,
     onRefreshHome: () -> Unit = {},
     onRenameSession: suspend (DurableSessionId, String) -> Result<Unit> = { _, _ -> Result.success(Unit) },
@@ -250,6 +257,10 @@ fun HermesApp(
     onClarificationResponse: (DurableSessionId, String, String) -> Unit = { _, _, _ -> },
     onApprovalResponse: (DurableSessionId, String, Boolean) -> Unit = { _, _, _ -> },
     onStopSession: (DurableSessionId) -> Unit = {},
+    onSteerSession: (DurableSessionId, String) -> Unit = { _, _ -> },
+    onSetDelegationPaused: (DurableSessionId, Boolean) -> Unit = { _, _ -> },
+    onSteerSubagent: (DurableSessionId, String, String) -> Unit = { _, _, _ -> },
+    onInterruptSubagent: (DurableSessionId, String) -> Unit = { _, _ -> },
     onCreateSession: () -> DurableSessionId? = { null },
     onCreateProjectSession: (ProjectId) -> DurableSessionId? = { null },
     onLoadHostDirectories: suspend (String?) -> Result<HostDirectoryListing> = {
@@ -334,14 +345,11 @@ fun HermesApp(
             if (initialProjectDockCollapsed) ProjectDockState.Collapsed else ProjectDockState.Expanded,
         )
     }
-    var projectSessionPaneCollapseRequested by rememberSaveable {
-        mutableStateOf(initialProjectSessionPaneCollapsed)
+    LaunchedEffect(persistedProjectDockState) {
+        persistedProjectDockState?.let { projectDockState = it }
     }
-    var projectSessionPaneCollapsed by rememberSaveable {
-        mutableStateOf(initialProjectSessionPaneCollapsed)
-    }
-    var projectSessionPaneAnimating by remember { mutableStateOf(false) }
-    var expandedProjectSessionPaneWidth by rememberSaveable { mutableIntStateOf(0) }
+    var workspaceWidthPx by remember { mutableStateOf(0) }
+    var measuredProjectSessionPaneProportion by remember { mutableStateOf<Float?>(null) }
     var iconPickerProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var projectCreatorOpen by rememberSaveable { mutableStateOf(initialProjectCreatorOpen) }
     val windowAdaptiveInfo = currentWindowAdaptiveInfoV2()
@@ -350,31 +358,34 @@ fun HermesApp(
             WIDTH_DP_MEDIUM_LOWER_BOUND,
         )
     val supportsNavigationRail = LocalConfiguration.current.screenWidthDp >= PROJECT_DOCK_MIN_WIDTH_DP
-    val paneAnimationScope = rememberCoroutineScope()
-    val paneAnimationWidth = remember { Animatable(0f) }
-    val animatedPaneWidth = paneAnimationWidth.value
     val paneExpansionState = rememberPaneExpansionState(PaneExpansionStateKey.Default)
-    val isProjectSessionPaneCollapsed = supportsListDetail &&
-        projectSessionPaneCollapsed &&
-        backStack.lastOrNull() is SessionDetailRoute
-    val projectSessionPaneContentAlpha = when {
-        isProjectSessionPaneCollapsed -> 0f
-        projectSessionPaneAnimating && expandedProjectSessionPaneWidth > 0 -> {
-            val widthFraction = animatedPaneWidth / expandedProjectSessionPaneWidth
-            ((widthFraction - 0.55f) / 0.45f).coerceIn(0f, 1f)
+    LaunchedEffect(projectSessionPaneProportion, supportsListDetail) {
+        if (supportsListDetail && projectSessionPaneProportion != null) {
+            paneExpansionState.setFirstPaneProportion(
+                projectSessionPaneProportion.coerceIn(
+                    MIN_PROJECT_SESSION_PANE_PROPORTION,
+                    MAX_PROJECT_SESSION_PANE_PROPORTION,
+                ),
+            )
         }
-        else -> 1f
     }
-    SideEffect {
-        if (supportsListDetail && backStack.lastOrNull() is SessionDetailRoute) {
-            when {
-                isProjectSessionPaneCollapsed -> paneExpansionState.setFirstPaneWidth(0)
-                projectSessionPaneAnimating ->
-                    paneExpansionState.setFirstPaneWidth(animatedPaneWidth.toInt())
-                expandedProjectSessionPaneWidth > 0 ->
-                    paneExpansionState.setFirstPaneWidth(expandedProjectSessionPaneWidth)
-            }
+    LaunchedEffect(measuredProjectSessionPaneProportion, projectSessionPaneProportion) {
+        val measured = measuredProjectSessionPaneProportion ?: return@LaunchedEffect
+        val persisted = projectSessionPaneProportion ?: return@LaunchedEffect
+        if (kotlin.math.abs(measured - persisted) >= 0.005f) {
+            delay(400)
+            onProjectSessionPaneProportionChanged(measured)
         }
+    }
+    val recordProjectSessionPaneWidth = { width: Int ->
+        if (supportsListDetail && workspaceWidthPx > 0 && width > 0) {
+            measuredProjectSessionPaneProportion = (width.toFloat() / workspaceWidthPx)
+                .coerceIn(
+                    MIN_PROJECT_SESSION_PANE_PROPORTION,
+                    MAX_PROJECT_SESSION_PANE_PROPORTION,
+                )
+        }
+        Unit
     }
     val directive = remember(windowAdaptiveInfo, supportsListDetail) {
         calculatePaneScaffoldDirective(windowAdaptiveInfo)
@@ -385,27 +396,27 @@ fun HermesApp(
     }
     val listDetailStrategy = rememberListDetailSceneStrategy<NavKey>(
         directive = directive,
+        paneExpansionDragHandle = { state ->
+            val interactionSource = remember { MutableInteractionSource() }
+            VerticalDragHandle(
+                modifier = Modifier
+                    .testTag("Project session pane resize handle")
+                    .paneExpansionDraggable(
+                        state = state,
+                        minTouchTargetSize = LocalMinimumInteractiveComponentSize.current,
+                        interactionSource = interactionSource,
+                    ),
+                interactionSource = interactionSource,
+            )
+        },
         paneExpansionState = paneExpansionState,
     )
-    val resetProjectSessionPane = {
-        projectSessionPaneCollapseRequested = false
-        projectSessionPaneCollapsed = false
-        projectSessionPaneAnimating = true
-        paneAnimationScope.launch {
-            try {
-                paneAnimationWidth.snapTo(expandedProjectSessionPaneWidth.toFloat())
-            } finally {
-                projectSessionPaneAnimating = false
-            }
-        }
-        Unit
-    }
+
     val navigateBack = {
         if (backStack.size > 1) backStack.removeLastOrNull()
         Unit
     }
     val navigateToProject = { projectId: ProjectId ->
-        resetProjectSessionPane()
         while (backStack.size > 1 && backStack.lastOrNull() !is HomeRoute) {
             backStack.removeLastOrNull()
         }
@@ -421,20 +432,40 @@ fun HermesApp(
         backStack.add(SessionDetailRoute(sessionId))
         Unit
     }
+    var handledRequestedSessionKey by rememberSaveable { mutableStateOf<String?>(null) }
     LaunchedEffect(requestedSessionRequestId, requestedSessionId, sessions) {
         val sessionId = requestedSessionId
-        if (sessionId != null && sessions.any { it.id == sessionId }) {
+        val requestKey = requestedSessionRequestId
+            ?.let { "request:$it" }
+            ?: sessionId?.let { "session:${it.value}" }
+        if (
+            sessionId != null &&
+            requestKey != null &&
+            requestKey != handledRequestedSessionKey &&
+            sessions.any { it.id == sessionId }
+        ) {
+            handledRequestedSessionKey = requestKey
             navigateToSession(sessionId)
         }
     }
+    var handledBranchId by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(snapshot.lastBranchedSessionId, sessions) {
+        val branchId = snapshot.lastBranchedSessionId
+        if (
+            branchId != null &&
+            branchId.value != handledBranchId &&
+            sessions.any { it.id == branchId }
+        ) {
+            handledBranchId = branchId.value
+            navigateToSession(branchId)
+        }
+    }
     val openServerSettings = {
-        resetProjectSessionPane()
         while (backStack.size > 1) backStack.removeLastOrNull()
         backStack.add(ServerSettingsRoute)
         Unit
     }
     val navigateHome = {
-        resetProjectSessionPane()
         while (backStack.size > 1) backStack.removeLastOrNull()
         Unit
     }
@@ -442,7 +473,6 @@ fun HermesApp(
         if (observedServerOrigin != serverOrigin &&
             (backStack.lastOrNull() is SessionDetailRoute || backStack.lastOrNull() is ProjectRoute)
         ) {
-            resetProjectSessionPane()
             backStack.removeLastOrNull()
         }
         observedServerOrigin = serverOrigin
@@ -504,15 +534,25 @@ fun HermesApp(
                         if (newSessionId != null) navigateToSession(newSessionId)
                     },
                     onSettings = openServerSettings,
-                    onExpand = { projectDockState = ProjectDockState.Expanded },
-                    onCollapse = { projectDockState = ProjectDockState.Collapsed },
-                    onHide = { projectDockState = ProjectDockState.Hidden },
+                    onExpand = {
+                        projectDockState = ProjectDockState.Expanded
+                        onProjectDockStateChanged(ProjectDockState.Expanded)
+                    },
+                    onCollapse = {
+                        projectDockState = ProjectDockState.Collapsed
+                        onProjectDockStateChanged(ProjectDockState.Collapsed)
+                    },
+                    onHide = {
+                        projectDockState = ProjectDockState.Hidden
+                        onProjectDockStateChanged(ProjectDockState.Hidden)
+                    },
                 )
             }
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxSize(),
+                    .fillMaxSize()
+                    .onSizeChanged { workspaceWidthPx = it.width },
             ) {
                 NavDisplay(
         backStack = backStack,
@@ -523,11 +563,14 @@ fun HermesApp(
             entry<HomeRoute>(
                 metadata = ListDetailSceneStrategy.listPane(
                     detailPlaceholder = { SessionPlaceholder() },
-                ),
+                ) + ListDetailSceneStrategy.preferredPaneSize(width = 0.4f),
             ) {
                 SessionListScreen(
                     projects = projects,
                     sessions = recentSessions,
+                    modifier = Modifier.onSizeChanged {
+                        recordProjectSessionPaneWidth(it.width)
+                    },
                     projectState = snapshot.projectState,
                     snapshot = snapshot,
                     serverSettingsState = serverSettingsState,
@@ -554,13 +597,11 @@ fun HermesApp(
             entry<ProjectRoute>(
                 metadata = ListDetailSceneStrategy.listPane(
                     detailPlaceholder = { SessionPlaceholder() },
-                ),
+                ) + ListDetailSceneStrategy.preferredPaneSize(width = 0.4f),
             ) { route ->
                 val project = projects.firstOrNull { it.id == route.projectId }
                 if (project == null) {
                     MissingProjectScreen()
-                } else if (isProjectSessionPaneCollapsed) {
-                    Spacer(modifier = Modifier)
                 } else {
                     ProjectDetailScreen(
                         project = project,
@@ -571,44 +612,12 @@ fun HermesApp(
                             .filterValues { it }
                             .keys
                             .mapTo(mutableSetOf(), ::DurableSessionId),
-                        modifier = Modifier
-                            .alpha(projectSessionPaneContentAlpha)
-                            .onSizeChanged { size ->
-                                if (!projectSessionPaneAnimating &&
-                                    !projectSessionPaneCollapseRequested &&
-                                    !projectSessionPaneCollapsed &&
-                                    size.width > 0
-                                ) {
-                                    expandedProjectSessionPaneWidth = size.width
-                                }
-                            },
+                        modifier = Modifier.onSizeChanged {
+                            recordProjectSessionPaneWidth(it.width)
+                        },
                         showBack = !supportsListDetail,
                         showNewTaskAction = !supportsNavigationRail,
-                        showCollapseAction = supportsListDetail &&
-                            backStack.lastOrNull() is SessionDetailRoute &&
-                            !projectSessionPaneCollapseRequested,
                         onBack = navigateBack,
-                        onCollapse = {
-                            projectSessionPaneCollapseRequested = true
-                            projectSessionPaneAnimating = true
-                            paneAnimationScope.launch {
-                                try {
-                                    paneAnimationWidth.snapTo(expandedProjectSessionPaneWidth.toFloat())
-                                    paneAnimationWidth.animateTo(
-                                        targetValue = 0f,
-                                        animationSpec = tween(
-                                            durationMillis = 280,
-                                            easing = FastOutSlowInEasing,
-                                        ),
-                                    )
-                                    if (projectSessionPaneCollapseRequested) {
-                                        projectSessionPaneCollapsed = true
-                                    }
-                                } finally {
-                                    projectSessionPaneAnimating = false
-                                }
-                            }
-                        },
                         onSessionSelected = navigateToSession,
                         onNewTask = {
                             val newSessionId = onCreateProjectSession(project.id)
@@ -684,6 +693,20 @@ fun HermesApp(
                             onSlashCompletionRequested(session.id, "")
                             onOpenModelPicker(session.id)
                         },
+                        onLoadSessionInsights = { onLoadSessionInsights(session.id) },
+                        maintenanceAvailable = hasControllerRuntime,
+                        maintenanceEnabled = hasControllerRuntime &&
+                            !chat.isLoading &&
+                            !chat.isSending &&
+                            !chat.isStopping &&
+                            !chat.maintenanceLoading,
+                        onCompressSession = { focusTopic ->
+                            onCompressSession(session.id, focusTopic)
+                        },
+                        onUndoSession = { onUndoSession(session.id) },
+                        onBranchSession = { count, name ->
+                            onBranchSession(session.id, count, name)
+                        },
                         onClarificationResponse = { requestId, answer ->
                             onClarificationResponse(session.id, requestId, answer)
                         },
@@ -693,6 +716,20 @@ fun HermesApp(
                         showStop = chat.isSending && hasControllerRuntime,
                         stopping = chat.isStopping,
                         onStop = { onStopSession(session.id) },
+                        steeringAvailable = chat.isSending && hasControllerRuntime,
+                        onSteer = { guidance -> onSteerSession(session.id, guidance) },
+                        delegationStatus = snapshot.delegationStatus,
+                        delegationAvailable = hasControllerRuntime &&
+                            snapshot.delegationStatus.active.isNotEmpty(),
+                        onSetDelegationPaused = { paused ->
+                            onSetDelegationPaused(session.id, paused)
+                        },
+                        onSteerSubagent = { subagentId, text ->
+                            onSteerSubagent(session.id, subagentId, text)
+                        },
+                        onInterruptSubagent = { subagentId ->
+                            onInterruptSubagent(session.id, subagentId)
+                        },
                         slashCompletion = slashCompletions[session.id]?.takeIf {
                             it.composerText == drafts[draftKey].orEmpty()
                         },
@@ -722,37 +759,12 @@ fun HermesApp(
                     onSave = onSaveServerOrigin,
                     onLoadManagementSettings = onLoadManagementSettings,
                     onSetProfileDefaultModel = onSetProfileDefaultModel,
+                    onRefreshScheduledJobs = onRefreshScheduledJobs,
                     onLogout = onLogout,
                 )
             }
             },
                 )
-                if (isProjectSessionPaneCollapsed) {
-                    ProjectSessionsEdgeTab(
-                        modifier = Modifier
-                            .align(Alignment.CenterStart)
-                            .zIndex(1f),
-                        onShow = {
-                            projectSessionPaneCollapsed = false
-                            projectSessionPaneCollapseRequested = false
-                            projectSessionPaneAnimating = true
-                            paneAnimationScope.launch {
-                                try {
-                                    paneAnimationWidth.snapTo(0f)
-                                    paneAnimationWidth.animateTo(
-                                        targetValue = expandedProjectSessionPaneWidth.toFloat(),
-                                        animationSpec = tween(
-                                            durationMillis = 280,
-                                            easing = FastOutSlowInEasing,
-                                        ),
-                                    )
-                                } finally {
-                                    projectSessionPaneAnimating = false
-                                }
-                            }
-                        },
-                    )
-                }
             }
         }
         if (supportsNavigationRail && projectDockState == ProjectDockState.Hidden) {
@@ -760,7 +772,10 @@ fun HermesApp(
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .zIndex(1f),
-                onShow = { projectDockState = ProjectDockState.Collapsed },
+                onShow = {
+                    projectDockState = ProjectDockState.Collapsed
+                    onProjectDockStateChanged(ProjectDockState.Collapsed)
+                },
             )
         }
     }
@@ -1540,33 +1555,6 @@ private fun ProjectDockEdgeTab(
     }
 }
 
-@Composable
-private fun ProjectSessionsEdgeTab(
-    modifier: Modifier = Modifier,
-    onShow: () -> Unit,
-) {
-    Box(
-        modifier = modifier
-            .size(width = 48.dp, height = 72.dp)
-            .semantics { contentDescription = "Show project sessions" }
-            .clickable(onClick = onShow),
-    ) {
-        Surface(
-            shape = RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp),
-            color = MaterialTheme.colorScheme.primaryContainer,
-            modifier = Modifier
-                .size(width = 16.dp, height = 72.dp)
-                .align(Alignment.CenterStart),
-        ) {}
-        Text(
-            "›",
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.align(Alignment.CenterStart),
-        )
-    }
-}
-
 private fun projectDockInitial(label: String): String {
     val initials = label
         .trim()
@@ -1783,6 +1771,7 @@ private fun ModelPickerRow(
 private fun SessionListScreen(
     projects: List<ProjectSummary>,
     sessions: List<SessionSummary>,
+    modifier: Modifier = Modifier,
     projectState: ProjectLoadState,
     snapshot: HermesGatewaySnapshot,
     serverSettingsState: ServerSettingsState,
@@ -1837,6 +1826,7 @@ private fun SessionListScreen(
             )
     }
     Scaffold(
+        modifier = modifier,
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             Column {
@@ -1871,6 +1861,8 @@ private fun SessionListScreen(
                                 Text("·", style = MaterialTheme.typography.labelMedium)
                                 Text(
                                     context,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     color = contextColor,
                                     style = MaterialTheme.typography.labelMedium,
                                 )
@@ -2077,8 +2069,19 @@ private fun SessionListScreen(
                     }
                 }
                 if (visibleProjects.isNotEmpty() && projectState is ProjectLoadState.Loaded) {
-                    val activeProjectId = snapshot.activeProjectId
-                        ?: projectState.activeProjectId
+                    val sendingSessionIds = snapshot.chatSessions
+                        .filterValues(ChatSessionSnapshot::isSending)
+                        .keys
+                    val workingProjectIds = buildSet {
+                        snapshot.durableSessions
+                            .asSequence()
+                            .filter { it.id in sendingSessionIds }
+                            .mapNotNull(SessionSummary::projectId)
+                            .forEach(::add)
+                        snapshot.projectSessions.forEach { (projectId, sessions) ->
+                            if (sessions.any { it.id in sendingSessionIds }) add(projectId)
+                        }
+                    }
                     item(key = "projects-heading") {
                         Text(
                             "Projects",
@@ -2088,10 +2091,9 @@ private fun SessionListScreen(
                         )
                     }
                     items(visibleProjects, key = { "project:${it.id.value}" }) { project ->
-                        val isCurrent = project.id == activeProjectId
                         ProjectHomeRow(
                             project = project,
-                            current = isCurrent,
+                            working = project.id in workingProjectIds,
                             onClick = dropUnlessResumed { onProjectSelected(project.id) },
                         )
                     }
@@ -2243,14 +2245,15 @@ private fun RunningSubagentRow(subagent: DelegatedSubagent) {
 @Composable
 private fun ProjectHomeRow(
     project: ProjectSummary,
-    current: Boolean,
+    working: Boolean,
     onClick: () -> Unit,
 ) {
     val sessionLabel = if (project.sessionCount == 1) "1 session" else "${project.sessionCount} sessions"
     val latestTitle = project.previewSessions.firstOrNull()?.title
     val description = buildString {
-        append(if (current) "Current project " else "Project ")
+        append("Project ")
         append(project.label)
+        if (working) append(", active session running")
         append(", ")
         append(sessionLabel)
         if (latestTitle != null) {
@@ -2261,20 +2264,20 @@ private fun ProjectHomeRow(
     Surface(
         onClick = onClick,
         shape = MaterialTheme.shapes.large,
-        color = if (current) {
+        color = if (working) {
             MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f)
         } else {
             MaterialTheme.colorScheme.surfaceContainer
         },
-        border = if (current) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
-        tonalElevation = if (current) 1.dp else 0.dp,
+        border = if (working) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
+        tonalElevation = if (working) 1.dp else 0.dp,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
             .semantics(mergeDescendants = true) {
-                selected = current
+                selected = working
                 contentDescription = description
-                if (current) stateDescription = "Current project"
+                if (working) stateDescription = "Active session running"
             },
     ) {
         Column(
@@ -2289,7 +2292,7 @@ private fun ProjectHomeRow(
                 Text(
                     project.label,
                     style = MaterialTheme.typography.titleMedium,
-                    color = if (current) {
+                    color = if (working) {
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.onSurface
@@ -2402,9 +2405,7 @@ private fun ProjectDetailScreen(
     modifier: Modifier = Modifier,
     showBack: Boolean,
     showNewTaskAction: Boolean = true,
-    showCollapseAction: Boolean = false,
     onBack: () -> Unit,
-    onCollapse: () -> Unit = {},
     onSessionSelected: (DurableSessionId) -> Unit,
     onNewTask: () -> Unit,
 ) {
@@ -2437,16 +2438,6 @@ private fun ProjectDetailScreen(
                     }
                 },
                 actions = {
-                    if (showCollapseAction) {
-                        IconButton(
-                            onClick = dropUnlessResumed { onCollapse() },
-                            modifier = Modifier.semantics {
-                                contentDescription = "Collapse project sessions"
-                            },
-                        ) {
-                            Text("‹", style = MaterialTheme.typography.titleLarge)
-                        }
-                    }
                     if (showNewTaskAction && state is ProjectSessionLoadState.Loaded) {
                         TextButton(onClick = dropUnlessResumed { onNewTask() }) {
                             Text("New task")
@@ -2779,6 +2770,7 @@ internal fun ServerSettingsScreen(
     onSetProfileDefaultModel: suspend (ModelSelection, Boolean) -> ModelSwitchResult = { _, _ ->
         ModelSwitchResult(accepted = false)
     },
+    onRefreshScheduledJobs: () -> Unit = {},
     onLogout: suspend () -> Unit = {},
 ) {
     var value by rememberSaveable(serverOrigin?.value) {
@@ -2794,6 +2786,7 @@ internal fun ServerSettingsScreen(
     LaunchedEffect(serverOrigin, snapshot.authenticationState) {
         if (serverOrigin != null && snapshot.authenticationState == AuthenticationState.Authenticated) {
             onLoadManagementSettings(snapshot.selectedProfile)
+            onRefreshScheduledJobs()
         }
     }
     val parsedOrigin = remember(value) {
@@ -2957,6 +2950,11 @@ internal fun ServerSettingsScreen(
                 }
                 TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
                 snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                ScheduledJobsPanel(
+                    state = snapshot.scheduledJobsState,
+                    onRefresh = onRefreshScheduledJobs,
+                    modifier = Modifier.heightIn(max = 360.dp),
+                )
             }
         }
     }
@@ -2995,8 +2993,21 @@ private fun SessionDetailScreen(
     showStop: Boolean,
     stopping: Boolean,
     onStop: () -> Unit,
+    steeringAvailable: Boolean,
+    onSteer: (String) -> Unit,
+    delegationStatus: DelegationStatus,
+    delegationAvailable: Boolean,
+    onSetDelegationPaused: (Boolean) -> Unit,
+    onSteerSubagent: (String, String) -> Unit,
+    onInterruptSubagent: (String) -> Unit,
     slashCompletion: SlashCompletionState? = null,
     onSlashCompletionSelected: (SlashCompletionState, SlashCompletionItem) -> Unit = { _, _ -> },
+    onLoadSessionInsights: () -> Unit,
+    maintenanceAvailable: Boolean,
+    maintenanceEnabled: Boolean,
+    onCompressSession: (String?) -> Unit,
+    onUndoSession: () -> Unit,
+    onBranchSession: (Int?, String?) -> Unit,
     showBack: Boolean,
     onBack: () -> Unit,
     onLoadManagedImage: suspend (String) -> Result<ByteArray>,
@@ -3004,6 +3015,7 @@ private fun SessionDetailScreen(
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val semanticColors = LocalHermesSemanticColors.current
+    var showSessionInsights by remember(session.id) { mutableStateOf(false) }
     val workspacePath = validProjectWorkspacePath(session.workspacePath)
     val workspaceLabel = workspacePath ?: session.projectId?.let { "No workspace" }
     val projectDraftMissingWorkspace = session.isLocalDraft &&
@@ -3081,6 +3093,19 @@ private fun SessionDetailScreen(
                         TextButton(onClick = dropUnlessResumed { onBack() }) {
                             Text("Back")
                         }
+                    }
+                },
+                actions = {
+                    IconButton(
+                        onClick = {
+                            showSessionInsights = true
+                            if (maintenanceAvailable) onLoadSessionInsights()
+                        },
+                        modifier = Modifier.semantics {
+                            contentDescription = "Open session details"
+                        },
+                    ) {
+                        Icon(Icons.Outlined.Info, contentDescription = null)
                     }
                 },
             )
@@ -3230,6 +3255,14 @@ private fun SessionDetailScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+            if (delegationAvailable) {
+                DelegationControls(
+                    status = delegationStatus,
+                    onSetPaused = onSetDelegationPaused,
+                    onSteer = onSteerSubagent,
+                    onInterrupt = onInterruptSubagent,
+                )
+            }
             chat.billingNotice?.let { billing ->
                 Card(
                     modifier = Modifier
@@ -3279,6 +3312,8 @@ private fun SessionDetailScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+            val composerEnabled = (!chat.isSending || steeringAvailable) && !chat.isLoading
+            val attachmentsEnabled = canSend && composerEnabled && !steeringAvailable
             if (attachments.isNotEmpty()) {
                 Row(
                     modifier = Modifier
@@ -3290,7 +3325,7 @@ private fun SessionDetailScreen(
                         InputChip(
                             selected = true,
                             onClick = { onRemoveAttachment(attachment.id) },
-                            enabled = !chat.isSending && !chat.isLoading,
+                            enabled = attachmentsEnabled,
                             label = { Text(attachment.displayName, maxLines = 1) },
                             trailingIcon = { Text("×") },
                             modifier = Modifier.semantics {
@@ -3300,7 +3335,6 @@ private fun SessionDetailScreen(
                     }
                 }
             }
-            val composerEnabled = !chat.isSending && !chat.isLoading
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -3318,7 +3352,7 @@ private fun SessionDetailScreen(
                             attachmentError = null
                             attachmentPicker.launch(arrayOf("*/*"))
                         },
-                        enabled = canSend && composerEnabled,
+                        enabled = attachmentsEnabled,
                         modifier = Modifier
                             .size(44.dp)
                             .semantics { contentDescription = "Attach files" },
@@ -3362,6 +3396,27 @@ private fun SessionDetailScreen(
                         },
                     )
                     if (showStop) {
+                        if (steeringAvailable) {
+                            Button(
+                                enabled = !stopping && draft.isNotBlank(),
+                                onClick = {
+                                    val guidance = draft.trim()
+                                    if (guidance.isNotEmpty()) {
+                                        onSteer(guidance)
+                                        onDraftChanged("")
+                                    }
+                                },
+                                contentPadding = PaddingValues(horizontal = 14.dp),
+                                modifier = Modifier
+                                    .heightIn(min = 40.dp)
+                                    .semantics {
+                                        contentDescription = "Steer Hermes response"
+                                        stateDescription = if (stopping) "Steering unavailable while stopping" else "Ready to steer"
+                                    },
+                            ) {
+                                Text("Steer")
+                            }
+                        }
                         Button(
                             enabled = !stopping,
                             colors = ButtonDefaults.buttonColors(
@@ -3422,7 +3477,508 @@ private fun SessionDetailScreen(
             }
         }
     }
+    if (showSessionInsights) {
+        SessionInsightsSheet(
+            sessionTitle = session.title,
+            chat = chat,
+            maintenanceAvailable = maintenanceAvailable,
+            maintenanceEnabled = maintenanceEnabled,
+            onRefresh = onLoadSessionInsights,
+            onCompress = onCompressSession,
+            onUndo = onUndoSession,
+            onBranch = onBranchSession,
+            onDismiss = { showSessionInsights = false },
+        )
+    }
 }
+
+private const val MAX_SUBAGENT_GUIDANCE_LENGTH = 512
+
+@Composable
+private fun DelegationControls(
+    status: DelegationStatus,
+    onSetPaused: (Boolean) -> Unit,
+    onSteer: (String, String) -> Unit,
+    onInterrupt: (String) -> Unit,
+) {
+    var steeringSubagent by remember { mutableStateOf<DelegatedSubagent?>(null) }
+    var interruptingSubagentId by remember { mutableStateOf<String?>(null) }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = "Subagent controls" },
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Subagent controls", style = MaterialTheme.typography.titleMedium)
+            Button(
+                onClick = { onSetPaused(!status.paused) },
+                enabled = !status.actionLoading,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics {
+                        contentDescription = if (status.paused) {
+                            "Resume spawning"
+                        } else {
+                            "Pause spawning"
+                        }
+                    },
+            ) {
+                Text(if (status.paused) "Resume spawning" else "Pause spawning")
+            }
+            status.active.forEach { subagent ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            subagent.goal,
+                            style = MaterialTheme.typography.titleSmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            subagent.status,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { steeringSubagent = subagent },
+                                enabled = !status.actionLoading,
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Steer subagent ${subagent.subagentId}"
+                                },
+                                contentPadding = PaddingValues(horizontal = 14.dp),
+                            ) {
+                                Text("Steer")
+                            }
+                            Button(
+                                onClick = { interruptingSubagentId = subagent.subagentId },
+                                enabled = !status.actionLoading,
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Interrupt subagent ${subagent.subagentId}"
+                                },
+                                contentPadding = PaddingValues(horizontal = 14.dp),
+                            ) {
+                                Text("Interrupt")
+                            }
+                        }
+                    }
+                }
+            }
+            status.notice?.let { notice ->
+                Text(
+                    notice.take(180),
+                    color = MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            status.error?.let { error ->
+                Text(
+                    error.take(180),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+    steeringSubagent?.let { subagent ->
+        var guidance by remember(subagent.subagentId) { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { steeringSubagent = null },
+            title = { Text("Steer subagent") },
+            text = {
+                OutlinedTextField(
+                    value = guidance,
+                    onValueChange = { guidance = it.take(MAX_SUBAGENT_GUIDANCE_LENGTH) },
+                    label = { Text("Guidance") },
+                    supportingText = {
+                        Text("${guidance.length}/$MAX_SUBAGENT_GUIDANCE_LENGTH")
+                    },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Subagent guidance"
+                    },
+                    maxLines = 5,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val trimmed = guidance.trim()
+                        if (!status.actionLoading && trimmed.isNotEmpty()) {
+                            steeringSubagent = null
+                            onSteer(subagent.subagentId, trimmed)
+                        }
+                    },
+                    enabled = !status.actionLoading && guidance.isNotBlank(),
+                    modifier = Modifier.semantics {
+                        contentDescription = "Confirm steer"
+                    },
+                ) {
+                    Text("Steer")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { steeringSubagent = null }) { Text("Cancel") }
+            },
+        )
+    }
+    interruptingSubagentId?.let { subagentId ->
+        AlertDialog(
+            onDismissRequest = { interruptingSubagentId = null },
+            title = { Text("Interrupt subagent?") },
+            text = { Text("Stop the active process-local subagent?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (!status.actionLoading) {
+                            interruptingSubagentId = null
+                            onInterrupt(subagentId)
+                        }
+                    },
+                    enabled = !status.actionLoading,
+                    modifier = Modifier.semantics {
+                        contentDescription = "Confirm interrupt subagent $subagentId"
+                    },
+                ) {
+                    Text("Confirm interrupt")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { interruptingSubagentId = null }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+private enum class SessionMaintenanceAction {
+    Compress,
+    Undo,
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionInsightsSheet(
+    sessionTitle: String,
+    chat: ChatSessionSnapshot,
+    maintenanceAvailable: Boolean,
+    maintenanceEnabled: Boolean,
+    onRefresh: () -> Unit,
+    onCompress: (String?) -> Unit,
+    onUndo: () -> Unit,
+    onBranch: (Int?, String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var pendingAction by remember { mutableStateOf<SessionMaintenanceAction?>(null) }
+    var branchDialogOpen by remember { mutableStateOf(false) }
+    var branchName by remember(sessionTitle) { mutableStateOf("$sessionTitle branch") }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 720.dp)
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Session details", style = MaterialTheme.typography.headlineSmall)
+                TextButton(
+                    onClick = onRefresh,
+                    enabled = maintenanceAvailable && !chat.insightsLoading,
+                ) {
+                    Text("Refresh")
+                }
+            }
+            if (chat.insightsLoading) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Loading session details" },
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    Text("Loading session details…")
+                }
+            }
+            chat.insightsError?.takeIf { maintenanceAvailable }?.let { error ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Session details error" },
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    ),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text("Could not load session details", style = MaterialTheme.typography.titleSmall)
+                        Text(error.take(180))
+                    }
+                }
+            }
+            if (!chat.insightsLoading) {
+                SessionUsageCard(chat)
+                SessionContextCard(chat)
+            }
+            if (chat.maintenanceLoading ||
+                chat.maintenanceError != null ||
+                chat.notice != null
+            ) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("Maintenance", style = MaterialTheme.typography.titleSmall)
+                        if (chat.maintenanceLoading) {
+                            Text("Applying session maintenance…")
+                        }
+                        chat.maintenanceError?.let { error ->
+                            Text(
+                                error.take(180),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                        chat.notice?.let { notice ->
+                            Text(
+                                notice.take(180),
+                                color = MaterialTheme.colorScheme.tertiary,
+                            )
+                        }
+                    }
+                }
+            }
+            if (maintenanceAvailable) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("Session maintenance", style = MaterialTheme.typography.titleMedium)
+                        if (!maintenanceEnabled && !chat.maintenanceLoading) {
+                            Text(
+                                "Available when the session is idle",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Button(
+                            onClick = { pendingAction = SessionMaintenanceAction.Compress },
+                            enabled = maintenanceEnabled,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Compress")
+                        }
+                        Button(
+                            onClick = { pendingAction = SessionMaintenanceAction.Undo },
+                            enabled = maintenanceEnabled,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Undo")
+                        }
+                        Button(
+                            onClick = { branchDialogOpen = true },
+                            enabled = maintenanceEnabled,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Branch")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pendingAction?.let { action ->
+        val title = when (action) {
+            SessionMaintenanceAction.Compress -> "Compress session?"
+            SessionMaintenanceAction.Undo -> "Undo last turn?"
+        }
+        val confirmLabel = when (action) {
+            SessionMaintenanceAction.Compress -> "Confirm compression"
+            SessionMaintenanceAction.Undo -> "Confirm undo"
+        }
+        AlertDialog(
+            onDismissRequest = { pendingAction = null },
+            title = { Text(title) },
+            text = {
+                Text(
+                    when (action) {
+                        SessionMaintenanceAction.Compress -> "Compress this session context?"
+                        SessionMaintenanceAction.Undo -> "Remove the last user turn from this session?"
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingAction = null
+                        when (action) {
+                            SessionMaintenanceAction.Compress -> onCompress(null)
+                            SessionMaintenanceAction.Undo -> onUndo()
+                        }
+                    },
+                    enabled = maintenanceEnabled,
+                ) {
+                    Text(confirmLabel)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingAction = null }) { Text("Cancel") }
+            },
+        )
+    }
+    if (branchDialogOpen) {
+        AlertDialog(
+            onDismissRequest = { branchDialogOpen = false },
+            title = { Text("Branch session") },
+            text = {
+                OutlinedTextField(
+                    value = branchName,
+                    onValueChange = { branchName = it },
+                    label = { Text("Branch name") },
+                    singleLine = true,
+                    enabled = maintenanceEnabled,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val name = branchName.trim()
+                        if (maintenanceEnabled && name.isNotEmpty()) {
+                            branchDialogOpen = false
+                            onBranch(null, name)
+                        }
+                    },
+                    enabled = maintenanceEnabled && branchName.isNotBlank(),
+                ) {
+                    Text("Create branch")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { branchDialogOpen = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun SessionUsageCard(chat: ChatSessionSnapshot) {
+    val usage = chat.sessionUsage
+    val context = chat.contextBreakdown
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Token usage", style = MaterialTheme.typography.titleMedium)
+            SessionInsightMetric("Input tokens", formatSessionTokens(usage?.inputTokens))
+            SessionInsightMetric("Output tokens", formatSessionTokens(usage?.outputTokens))
+            SessionInsightMetric("Total tokens", formatSessionTokens(usage?.totalTokens))
+            Text("Context used", style = MaterialTheme.typography.labelLarge)
+            Text(
+                formatContextSummary(
+                    used = usage?.contextUsedTokens ?: context?.usedTokens,
+                    max = usage?.contextMaxTokens ?: context?.maxTokens,
+                    percent = usage?.contextPercent ?: context?.percent,
+                ),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Text(
+                "Model: ${chat.model?.takeIf(String::isNotBlank) ?: "Unknown"}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SessionContextCard(chat: ChatSessionSnapshot) {
+    val categories = chat.contextBreakdown?.categories.orEmpty()
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Context categories", style = MaterialTheme.typography.titleMedium)
+            if (categories.isEmpty()) {
+                Text(
+                    "No context categories reported",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                categories.forEach { category ->
+                    ContextCategoryRow(category)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContextCategoryRow(category: ContextBreakdownCategory) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(category.name, modifier = Modifier.weight(1f))
+        Text(
+            "${formatSessionTokens(category.tokens)} tokens",
+            color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.labelLarge,
+        )
+    }
+}
+
+@Composable
+private fun SessionInsightMetric(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label)
+        Text(value, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+private fun formatSessionTokens(value: Long?): String =
+    value?.let { String.format(Locale.US, "%,d", it) } ?: "—"
+
+private fun formatContextSummary(used: Long?, max: Long?, percent: Double?): String {
+    val tokenSummary = when {
+        used != null && max != null -> "${formatSessionTokens(used)} / ${formatSessionTokens(max)}"
+        used != null -> formatSessionTokens(used)
+        max != null -> "— / ${formatSessionTokens(max)}"
+        else -> "—"
+    }
+    return if (percent == null) tokenSummary else "$tokenSummary (${formatPercent(percent)}%)"
+}
+
+private fun formatPercent(value: Double): String =
+    if (value == value.toLong().toDouble()) value.toLong().toString()
+    else String.format(Locale.US, "%.1f", value)
 
 @Composable
 private fun RunStateContent(

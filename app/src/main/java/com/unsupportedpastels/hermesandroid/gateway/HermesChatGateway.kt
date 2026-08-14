@@ -433,6 +433,44 @@ interface HermesChatSession {
         text: String,
     ): PromptSubmission
 
+    /** Adds bounded steering text to the currently running turn. */
+    suspend fun steer(runtimeSessionId: RuntimeSessionId, text: String): SessionSteerResult =
+        throw HermesChatMethodNotFoundException("session.steer")
+
+    suspend fun loadSessionUsage(runtimeSessionId: RuntimeSessionId): SessionUsage =
+        throw HermesChatMethodNotFoundException("session.usage")
+
+    suspend fun loadContextBreakdown(runtimeSessionId: RuntimeSessionId): SessionContextBreakdown =
+        throw HermesChatMethodNotFoundException("session.context_breakdown")
+
+    suspend fun compressSession(runtimeSessionId: RuntimeSessionId, focusTopic: String? = null): SessionCompressResult =
+        throw HermesChatMethodNotFoundException("session.compress")
+
+    suspend fun undoSession(runtimeSessionId: RuntimeSessionId): SessionUndoResult =
+        throw HermesChatMethodNotFoundException("session.undo")
+
+    suspend fun branchSession(
+        runtimeSessionId: RuntimeSessionId,
+        count: Int? = null,
+        name: String? = null,
+    ): SessionBranchResult = throw HermesChatMethodNotFoundException("session.branch")
+
+    suspend fun pauseDelegation(paused: Boolean): DelegationPauseResult =
+        throw HermesChatMethodNotFoundException("delegation.pause")
+
+    suspend fun interruptSubagent(subagentId: String): SubagentInterruptResult =
+        throw HermesChatMethodNotFoundException("subagent.interrupt")
+
+    suspend fun steerSubagent(
+        runtimeSessionId: RuntimeSessionId,
+        subagentId: String,
+        text: String,
+    ): SubagentSteerResult = throw HermesChatMethodNotFoundException("subagent.steer")
+
+    /** Read-only monitor; include_disabled is intentionally true so paused jobs are visible. */
+    suspend fun loadScheduledJobs(): List<ScheduledJob> =
+        throw HermesChatMethodNotFoundException("cron.manage")
+
     suspend fun respondToClarification(
         requestId: String,
         answer: String,
@@ -669,6 +707,86 @@ class HermesChatConnection internal constructor(
         val status = result.stringValue("status")
             ?: throw HermesChatProtocolException("Prompt response was incomplete")
         return PromptSubmission(status)
+    }
+
+    override suspend fun steer(runtimeSessionId: RuntimeSessionId, text: String): SessionSteerResult {
+        val bounded = boundedRpcInput(text, HERMES_CHAT_MAX_EVENT_TEXT_CHARS, "steer text")
+        val result = request("session.steer", buildJsonObject {
+            put("session_id", boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"))
+            put("text", bounded)
+        })
+        val status = result.stringValue("status")
+            ?.takeIf { it == "queued" || it == "rejected" }
+            ?: throw HermesChatProtocolException("Steer response was incomplete")
+        return SessionSteerResult(status, result.stringValue("text")?.take(HERMES_CHAT_MAX_EVENT_TEXT_CHARS))
+    }
+
+    override suspend fun loadSessionUsage(runtimeSessionId: RuntimeSessionId): SessionUsage =
+        parseSessionUsage(request("session.usage", sessionParams(runtimeSessionId)))
+
+    override suspend fun loadContextBreakdown(runtimeSessionId: RuntimeSessionId): SessionContextBreakdown =
+        parseContextBreakdown(request("session.context_breakdown", sessionParams(runtimeSessionId)))
+
+    override suspend fun compressSession(runtimeSessionId: RuntimeSessionId, focusTopic: String?): SessionCompressResult =
+        parseCompressResult(request("session.compress", buildJsonObject {
+            put("session_id", boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"))
+            focusTopic?.trim()?.takeIf(String::isNotBlank)?.let {
+                put("focus_topic", it.take(HERMES_CHAT_MAX_EVENT_TEXT_CHARS))
+            }
+        }))
+
+    override suspend fun undoSession(runtimeSessionId: RuntimeSessionId): SessionUndoResult {
+        val result = request("session.undo", sessionParams(runtimeSessionId))
+        return SessionUndoResult(result.longValue("removed")?.coerceAtLeast(0)?.toInt()
+            ?: throw HermesChatProtocolException("Undo response was incomplete"))
+    }
+
+    override suspend fun branchSession(runtimeSessionId: RuntimeSessionId, count: Int?, name: String?): SessionBranchResult =
+        parseBranchResult(request("session.branch", buildJsonObject {
+            put("session_id", boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"))
+            count?.coerceIn(1, 500)?.let { put("count", it) }
+            name?.trim()?.takeIf(String::isNotBlank)?.let { put("name", it.take(512)) }
+        }))
+
+    override suspend fun pauseDelegation(paused: Boolean): DelegationPauseResult {
+        val result = request("delegation.pause", buildJsonObject { put("paused", paused) })
+        return DelegationPauseResult(
+            result.booleanValue("paused") ?: throw HermesChatProtocolException("Delegation pause response was incomplete"),
+        )
+    }
+
+    override suspend fun interruptSubagent(subagentId: String): SubagentInterruptResult {
+        val result = request("subagent.interrupt", buildJsonObject {
+            put("subagent_id", boundedRpcInput(subagentId, HERMES_CHAT_MAX_EVENT_ID_CHARS, "subagent ID"))
+        })
+        return SubagentInterruptResult(
+            found = result.booleanValue("found") ?: false,
+            subagentId = result.stringValue("subagent_id")?.take(HERMES_CHAT_MAX_EVENT_ID_CHARS),
+        )
+    }
+
+    override suspend fun steerSubagent(runtimeSessionId: RuntimeSessionId, subagentId: String, text: String): SubagentSteerResult {
+        val result = request("subagent.steer", buildJsonObject {
+            put("session_id", boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"))
+            put("subagent_id", boundedRpcInput(subagentId, HERMES_CHAT_MAX_EVENT_ID_CHARS, "subagent ID"))
+            put("text", boundedRpcInput(text, HERMES_CHAT_MAX_EVENT_TEXT_CHARS, "steer text"))
+        })
+        val status = result.stringValue("status")
+            ?.takeIf { it == "queued" || it == "rejected" }
+            ?: throw HermesChatProtocolException("Subagent steer response was incomplete")
+        return SubagentSteerResult(status, result.stringValue("text")?.take(HERMES_CHAT_MAX_EVENT_TEXT_CHARS))
+    }
+
+    override suspend fun loadScheduledJobs(): List<ScheduledJob> {
+        val result = request("cron.manage", buildJsonObject {
+            put("action", "list")
+            put("include_disabled", true)
+        })
+        return parseScheduledJobs(result)
+    }
+
+    private fun sessionParams(runtimeSessionId: RuntimeSessionId): JsonObject = buildJsonObject {
+        put("session_id", boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"))
     }
 
     override suspend fun respondToClarification(

@@ -54,6 +54,10 @@ import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
+import com.unsupportedpastels.hermesandroid.gateway.ScheduledJobsState
+import com.unsupportedpastels.hermesandroid.gateway.SessionBranchResult
+import com.unsupportedpastels.hermesandroid.gateway.SessionContextBreakdown
+import com.unsupportedpastels.hermesandroid.gateway.SessionUsage
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionResult
 import com.unsupportedpastels.hermesandroid.gateway.canonicalReasoningEffort
@@ -297,6 +301,8 @@ class HermesConnectionViewModel(
         mutableSlashCompletions.asStateFlow()
     private val slashCompletionJobs = mutableMapOf<DurableSessionId, Job>()
     private val slashCompletionGenerations = mutableMapOf<DurableSessionId, Long>()
+    private val sessionInsightsJobs = mutableMapOf<DurableSessionId, Job>()
+    private val sessionInsightsGenerations = mutableMapOf<DurableSessionId, Long>()
 
     private val mutableModelPickerState = MutableStateFlow<ModelPickerState>(ModelPickerState.Closed)
     val modelPickerState: StateFlow<ModelPickerState> = mutableModelPickerState.asStateFlow()
@@ -331,6 +337,9 @@ class HermesConnectionViewModel(
                 chatJobs.values.forEach(Job::cancel)
                 chatJobs.clear()
                 chatOperationGenerations.clear()
+                sessionInsightsJobs.values.forEach(Job::cancel)
+                sessionInsightsJobs.clear()
+                sessionInsightsGenerations.clear()
                 modelPickerGeneration += 1
                 modelPickerJob?.cancel()
                 modelPickerJob = null
@@ -1780,6 +1789,268 @@ class HermesConnectionViewModel(
         }
     }
 
+    /** Queues guidance for exactly this HAM-controlled session's active turn. */
+    fun steerSession(durableSessionId: DurableSessionId, text: String): Job {
+        val guidance = text.trim()
+        if (guidance.isEmpty()) {
+            return viewModelScope.launch {
+                updateChat(durableSessionId) {
+                    it.copy(error = "Guidance cannot be blank", notice = null)
+                }
+            }
+        }
+        val operation = beginSteerSession(durableSessionId)
+            ?: return viewModelScope.launch { }
+        return viewModelScope.launch {
+            try {
+                val result = operation.session.steer(operation.runtimeSessionId, guidance)
+                currentCoroutineContext().ensureActive()
+                if (result.status == "queued") {
+                    publishSteerSuccess(operation)
+                } else {
+                    publishSteerFailure(operation)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                publishSteerFailure(operation)
+            }
+        }
+    }
+
+    /** Loads read-only usage and context data for an existing controlled runtime. */
+    fun loadSessionInsights(durableSessionId: DurableSessionId): Job {
+        val requestGeneration = (sessionInsightsGenerations[durableSessionId] ?: 0L) + 1L
+        sessionInsightsGenerations[durableSessionId] = requestGeneration
+        sessionInsightsJobs.remove(durableSessionId)?.cancel()
+        val operation = beginSessionInsights(durableSessionId)
+        if (operation == null) {
+            return viewModelScope.launch {
+                updateChat(durableSessionId) {
+                    it.copy(
+                        insightsLoading = false,
+                        insightsError = "Session details require an active HAM runtime",
+                    )
+                }
+            }
+        }
+        updateChat(durableSessionId) {
+            it.copy(insightsLoading = true, insightsError = null)
+        }
+        val job = viewModelScope.launch {
+            try {
+                val usage = operation.session.loadSessionUsage(operation.runtimeSessionId)
+                val context = operation.session.loadContextBreakdown(operation.runtimeSessionId)
+                currentCoroutineContext().ensureActive()
+                publishSessionInsights(operation, requestGeneration, usage, context)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                publishSessionInsightsFailure(operation, requestGeneration)
+            }
+        }
+        sessionInsightsJobs[durableSessionId] = job
+        return job
+    }
+
+    fun compressSession(durableSessionId: DurableSessionId, focusTopic: String? = null): Job {
+        val operation = beginMaintenanceSession(durableSessionId)
+            ?: return unavailableMaintenanceJob(durableSessionId)
+        return viewModelScope.launch {
+            try {
+                val result = operation.session.compressSession(operation.runtimeSessionId, focusTopic)
+                currentCoroutineContext().ensureActive()
+                if (result.aborted || result.status != "compressed") {
+                    publishMaintenanceFailure(operation, "Compression was not applied")
+                } else {
+                    publishCompressedSession(operation, result.messages)
+                }
+            } catch (cancelled: CancellationException) {
+                clearMaintenanceIfCurrent(operation)
+                throw cancelled
+            } catch (_: Exception) {
+                publishMaintenanceFailure(operation, "Could not compress context")
+            }
+        }
+    }
+
+    fun undoSession(durableSessionId: DurableSessionId): Job {
+        val operation = beginMaintenanceSession(durableSessionId)
+            ?: return unavailableMaintenanceJob(durableSessionId)
+        return viewModelScope.launch {
+            try {
+                operation.session.undoSession(operation.runtimeSessionId)
+                val token = accessTokenForRequest(operation.origin, operation.originGeneration)
+                    ?: throw HermesConnectionException("Sign in is required")
+                val messages = client.loadTranscript(
+                    operation.origin,
+                    token,
+                    serverDurableId(durableSessionId),
+                )
+                currentCoroutineContext().ensureActive()
+                publishUndoneSession(operation, messages)
+            } catch (cancelled: CancellationException) {
+                clearMaintenanceIfCurrent(operation)
+                throw cancelled
+            } catch (_: Exception) {
+                publishMaintenanceFailure(operation, "Could not undo last turn")
+            }
+        }
+    }
+
+    fun branchSession(
+        durableSessionId: DurableSessionId,
+        count: Int? = null,
+        name: String? = null,
+    ): Job {
+        val operation = beginMaintenanceSession(durableSessionId)
+            ?: return unavailableMaintenanceJob(durableSessionId)
+        return viewModelScope.launch {
+            try {
+                val result = operation.session.branchSession(operation.runtimeSessionId, count, name)
+                currentCoroutineContext().ensureActive()
+                publishBranchedSession(operation, result)
+            } catch (cancelled: CancellationException) {
+                clearMaintenanceIfCurrent(operation)
+                throw cancelled
+            } catch (_: Exception) {
+                publishMaintenanceFailure(operation, "Could not branch session")
+            }
+        }
+    }
+
+    fun setDelegationPaused(durableSessionId: DurableSessionId, paused: Boolean): Job {
+        val operation = beginDelegationControl(durableSessionId)
+            ?: return unavailableDelegationJob()
+        return viewModelScope.launch {
+            try {
+                val result = operation.session.pauseDelegation(paused)
+                currentCoroutineContext().ensureActive()
+                publishDelegationSuccess(
+                    operation,
+                    notice = if (result.paused) "New delegation paused" else "New delegation resumed",
+                    paused = result.paused,
+                )
+            } catch (cancelled: CancellationException) {
+                clearDelegationLoadingIfCurrent(operation)
+                throw cancelled
+            } catch (_: Exception) {
+                publishDelegationFailure(operation, "Could not update delegation")
+            }
+        }
+    }
+
+    fun steerSubagent(
+        durableSessionId: DurableSessionId,
+        subagentId: String,
+        text: String,
+    ): Job {
+        if (subagentId.isBlank() || text.isBlank()) return unavailableDelegationJob("Subagent guidance is incomplete")
+        val operation = beginDelegationControl(durableSessionId)
+            ?: return unavailableDelegationJob()
+        return viewModelScope.launch {
+            try {
+                val result = operation.session.steerSubagent(
+                    operation.runtimeSessionId,
+                    subagentId.trim(),
+                    text.trim(),
+                )
+                currentCoroutineContext().ensureActive()
+                if (result.status == "queued") {
+                    publishDelegationSuccess(operation, "Guidance queued for subagent")
+                } else {
+                    publishDelegationFailure(operation, "Subagent guidance was rejected")
+                }
+            } catch (cancelled: CancellationException) {
+                clearDelegationLoadingIfCurrent(operation)
+                throw cancelled
+            } catch (_: Exception) {
+                publishDelegationFailure(operation, "Could not steer subagent")
+            }
+        }
+    }
+
+    fun interruptSubagent(durableSessionId: DurableSessionId, subagentId: String): Job {
+        if (subagentId.isBlank()) return unavailableDelegationJob("Subagent ID is required")
+        val operation = beginDelegationControl(durableSessionId)
+            ?: return unavailableDelegationJob()
+        return viewModelScope.launch {
+            try {
+                val result = operation.session.interruptSubagent(subagentId.trim())
+                currentCoroutineContext().ensureActive()
+                if (result.found) {
+                    publishDelegationSuccess(
+                        operation,
+                        notice = "Subagent interrupted",
+                        removeSubagentId = result.subagentId ?: subagentId.trim(),
+                    )
+                } else {
+                    publishDelegationFailure(operation, "Subagent is no longer active")
+                }
+            } catch (cancelled: CancellationException) {
+                clearDelegationLoadingIfCurrent(operation)
+                throw cancelled
+            } catch (_: Exception) {
+                publishDelegationFailure(operation, "Could not interrupt subagent")
+            }
+        }
+    }
+
+    private fun unavailableDelegationJob(
+        message: String = "Subagent controls require an active HAM runtime",
+    ): Job = viewModelScope.launch {
+        mutableSnapshots.value = mutableSnapshots.value.copy(
+            delegationStatus = mutableSnapshots.value.delegationStatus.copy(
+                actionLoading = false,
+                error = message,
+                notice = null,
+            ),
+        )
+    }
+
+    fun refreshScheduledJobs(): Job {
+        val origin = activeOrigin
+        val originGeneration = generation
+        if (origin == null || !isCurrentProjectLoad(origin, originGeneration)) {
+            return viewModelScope.launch {
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    scheduledJobsState = ScheduledJobsState.Error(
+                        "Scheduled jobs require an authenticated server",
+                    ),
+                )
+            }
+        }
+        mutableSnapshots.value = mutableSnapshots.value.copy(
+            scheduledJobsState = ScheduledJobsState.Loading,
+        )
+        return viewModelScope.launch {
+            val state = try {
+                ScheduledJobsState.Ready(
+                    withProjectMetadataSession(HermesChatSession::loadScheduledJobs),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: HermesChatMethodNotFoundException) {
+                ScheduledJobsState.Unsupported
+            } catch (_: Exception) {
+                ScheduledJobsState.Error("Could not load scheduled jobs")
+            }
+            currentCoroutineContext().ensureActive()
+            if (isCurrentProjectLoad(origin, originGeneration)) {
+                mutableSnapshots.value = mutableSnapshots.value.copy(scheduledJobsState = state)
+            }
+        }
+    }
+
+    private fun unavailableMaintenanceJob(durableSessionId: DurableSessionId): Job = viewModelScope.launch {
+        updateChat(durableSessionId) {
+            it.copy(
+                maintenanceLoading = false,
+                maintenanceError = "Session maintenance requires an idle HAM runtime",
+            )
+        }
+    }
+
     /**
      * Debounced live slash-command completion for the composer of [durableSessionId].
      * Non-slash text clears the menu without a request. Results publish only when the
@@ -2917,6 +3188,386 @@ class HermesConnectionViewModel(
             originGeneration = originGeneration,
             chatOperationGeneration = operationGeneration,
         )
+    }
+
+    private fun beginSteerSession(
+        durableSessionId: DurableSessionId,
+    ): ControllerOperation? = synchronized(controllerLock) {
+        val origin = activeOrigin ?: return@synchronized null
+        val controller = liveControllers[durableSessionId] ?: return@synchronized null
+        val operationGeneration = controller.operationGeneration
+        val originGeneration = generation
+        val snapshot = mutableSnapshots.value
+        val chat = snapshot.chatSessions[durableSessionId] ?: return@synchronized null
+        if (
+            !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+            !chat.isSending ||
+            chat.isStopping ||
+            snapshot.activeRuntimes.none {
+                it.runtimeSessionId == controller.runtimeSessionId &&
+                    it.durableSessionId == durableSessionId &&
+                    it.access == RuntimeAccess.Controller
+            }
+        ) return@synchronized null
+        ControllerOperation(
+            durableSessionId = durableSessionId,
+            session = controller.session,
+            runtimeSessionId = controller.runtimeSessionId,
+            origin = origin,
+            originGeneration = originGeneration,
+            chatOperationGeneration = operationGeneration,
+        )
+    }
+
+    private fun publishSteerSuccess(operation: ControllerOperation) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            if (!chat.isSending || chat.isStopping) return
+            mutableSnapshots.value = snapshot.copy(
+                chatSessions = snapshot.chatSessions + (
+                    operation.durableSessionId to chat.copy(
+                        error = null,
+                        notice = "Guidance queued for the active turn",
+                    )
+                    ),
+            )
+        }
+    }
+
+    private fun publishSteerFailure(operation: ControllerOperation) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            if (!chat.isSending || chat.isStopping) return
+            mutableSnapshots.value = snapshot.copy(
+                chatSessions = snapshot.chatSessions + (
+                    operation.durableSessionId to chat.copy(
+                        error = "Could not steer active turn",
+                        notice = null,
+                    )
+                    ),
+            )
+        }
+    }
+
+    private fun beginSessionInsights(
+        durableSessionId: DurableSessionId,
+    ): ControllerOperation? = synchronized(controllerLock) {
+        val origin = activeOrigin ?: return@synchronized null
+        val controller = liveControllers[durableSessionId] ?: return@synchronized null
+        val operationGeneration = controller.operationGeneration
+        val originGeneration = generation
+        val snapshot = mutableSnapshots.value
+        if (
+            snapshot.chatSessions[durableSessionId] == null ||
+            !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+            snapshot.activeRuntimes.none {
+                it.runtimeSessionId == controller.runtimeSessionId &&
+                    it.durableSessionId == durableSessionId &&
+                    it.access == RuntimeAccess.Controller
+            }
+        ) return@synchronized null
+        ControllerOperation(
+            durableSessionId = durableSessionId,
+            session = controller.session,
+            runtimeSessionId = controller.runtimeSessionId,
+            origin = origin,
+            originGeneration = originGeneration,
+            chatOperationGeneration = operationGeneration,
+        )
+    }
+
+    private fun publishSessionInsights(
+        operation: ControllerOperation,
+        requestGeneration: Long,
+        usage: SessionUsage,
+        context: SessionContextBreakdown,
+    ) {
+        synchronized(controllerLock) {
+            if (
+                sessionInsightsGenerations[operation.durableSessionId] != requestGeneration ||
+                !isCurrentControllerOperation(operation)
+            ) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            mutableSnapshots.value = snapshot.copy(
+                chatSessions = snapshot.chatSessions + (
+                    operation.durableSessionId to chat.copy(
+                        sessionUsage = usage,
+                        contextBreakdown = context,
+                        insightsLoading = false,
+                        insightsError = null,
+                    )
+                    ),
+            )
+        }
+    }
+
+    private fun publishSessionInsightsFailure(
+        operation: ControllerOperation,
+        requestGeneration: Long,
+    ) {
+        synchronized(controllerLock) {
+            if (
+                sessionInsightsGenerations[operation.durableSessionId] != requestGeneration ||
+                !isCurrentControllerOperation(operation)
+            ) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            mutableSnapshots.value = snapshot.copy(
+                chatSessions = snapshot.chatSessions + (
+                    operation.durableSessionId to chat.copy(
+                        insightsLoading = false,
+                        insightsError = "Could not load session details",
+                    )
+                    ),
+            )
+        }
+    }
+
+    private fun beginDelegationControl(
+        durableSessionId: DurableSessionId,
+    ): ControllerOperation? = synchronized(controllerLock) {
+        val origin = activeOrigin ?: return@synchronized null
+        val controller = liveControllers[durableSessionId] ?: return@synchronized null
+        val operationGeneration = controller.operationGeneration
+        val originGeneration = generation
+        val snapshot = mutableSnapshots.value
+        if (
+            snapshot.delegationStatus.actionLoading ||
+            !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+            snapshot.activeRuntimes.none {
+                it.runtimeSessionId == controller.runtimeSessionId &&
+                    it.durableSessionId == durableSessionId &&
+                    it.access == RuntimeAccess.Controller
+            }
+        ) return@synchronized null
+        mutableSnapshots.value = snapshot.copy(
+            delegationStatus = snapshot.delegationStatus.copy(
+                actionLoading = true,
+                error = null,
+                notice = null,
+            ),
+        )
+        ControllerOperation(
+            durableSessionId = durableSessionId,
+            session = controller.session,
+            runtimeSessionId = controller.runtimeSessionId,
+            origin = origin,
+            originGeneration = originGeneration,
+            chatOperationGeneration = operationGeneration,
+        )
+    }
+
+    private fun publishDelegationSuccess(
+        operation: ControllerOperation,
+        notice: String,
+        paused: Boolean? = null,
+        removeSubagentId: String? = null,
+    ) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            if (!snapshot.delegationStatus.actionLoading) return
+            mutableSnapshots.value = snapshot.copy(
+                delegationStatus = snapshot.delegationStatus.copy(
+                    active = removeSubagentId?.let { id ->
+                        snapshot.delegationStatus.active.filterNot { it.subagentId == id }
+                    } ?: snapshot.delegationStatus.active,
+                    paused = paused ?: snapshot.delegationStatus.paused,
+                    notice = notice,
+                    actionLoading = false,
+                    error = null,
+                ),
+            )
+        }
+    }
+
+    private fun publishDelegationFailure(operation: ControllerOperation, message: String) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            if (!snapshot.delegationStatus.actionLoading) return
+            mutableSnapshots.value = snapshot.copy(
+                delegationStatus = snapshot.delegationStatus.copy(
+                    notice = null,
+                    actionLoading = false,
+                    error = message.take(160),
+                ),
+            )
+        }
+    }
+
+    private fun clearDelegationLoadingIfCurrent(operation: ControllerOperation) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            if (!snapshot.delegationStatus.actionLoading) return
+            mutableSnapshots.value = snapshot.copy(
+                delegationStatus = snapshot.delegationStatus.copy(actionLoading = false),
+            )
+        }
+    }
+
+    private fun beginMaintenanceSession(
+        durableSessionId: DurableSessionId,
+    ): ControllerOperation? = synchronized(controllerLock) {
+        val origin = activeOrigin ?: return@synchronized null
+        val controller = liveControllers[durableSessionId] ?: return@synchronized null
+        val operationGeneration = controller.operationGeneration
+        val originGeneration = generation
+        val snapshot = mutableSnapshots.value
+        val chat = snapshot.chatSessions[durableSessionId] ?: return@synchronized null
+        if (
+            !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+            chat.isSending ||
+            chat.isStopping ||
+            chat.maintenanceLoading
+        ) return@synchronized null
+        mutableSnapshots.value = snapshot.copy(
+            chatSessions = snapshot.chatSessions + (
+                durableSessionId to chat.copy(
+                    maintenanceLoading = true,
+                    maintenanceError = null,
+                    notice = null,
+                )
+                ),
+        )
+        ControllerOperation(
+            durableSessionId = durableSessionId,
+            session = controller.session,
+            runtimeSessionId = controller.runtimeSessionId,
+            origin = origin,
+            originGeneration = originGeneration,
+            chatOperationGeneration = operationGeneration,
+        )
+    }
+
+    private fun publishCompressedSession(
+        operation: ControllerOperation,
+        rows: List<JsonObject>,
+    ) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            if (!chat.maintenanceLoading) return
+            mutableSnapshots.value = snapshot.copy(
+                chatSessions = snapshot.chatSessions + (
+                    operation.durableSessionId to chat.copy(
+                        messages = rows.mapNotNull(::chatMessageFromJson),
+                        maintenanceLoading = false,
+                        maintenanceError = null,
+                        notice = "Context compressed",
+                    )
+                    ),
+            )
+        }
+    }
+
+    private fun publishUndoneSession(
+        operation: ControllerOperation,
+        messages: List<ChatMessage>,
+    ) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            if (!chat.maintenanceLoading) return
+            mutableSnapshots.value = snapshot.copy(
+                chatSessions = snapshot.chatSessions + (
+                    operation.durableSessionId to chat.copy(
+                        messages = messages,
+                        maintenanceLoading = false,
+                        maintenanceError = null,
+                        notice = "Last turn undone",
+                    )
+                    ),
+            )
+        }
+    }
+
+    private fun publishBranchedSession(
+        operation: ControllerOperation,
+        result: SessionBranchResult,
+    ) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            val parentChat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            if (!parentChat.maintenanceLoading) return
+            val parentSummary = snapshot.durableSessions.firstOrNull { it.id == operation.durableSessionId }
+                ?: snapshot.projectSessions.values.asSequence().flatten()
+                    .firstOrNull { it.id == operation.durableSessionId }
+            val title = result.title?.takeIf(String::isNotBlank) ?: "Branched session"
+            val branchSummary = parentSummary?.copy(
+                id = result.durableSessionId,
+                title = title,
+                isLocalDraft = false,
+                messageCount = result.messages.size,
+            ) ?: SessionSummary(
+                id = result.durableSessionId,
+                title = title,
+                messageCount = result.messages.size,
+                profile = mutableSnapshots.value.selectedProfile,
+            )
+            val updatedProjectSessions = branchSummary.projectId?.let { projectId ->
+                snapshot.projectSessions + (
+                    projectId to (
+                        snapshot.projectSessions[projectId].orEmpty()
+                            .filterNot { it.id == branchSummary.id } + branchSummary
+                        )
+                    )
+            } ?: snapshot.projectSessions
+            mutableSnapshots.value = snapshot.copy(
+                durableSessions = snapshot.durableSessions.filterNot { it.id == branchSummary.id } + branchSummary,
+                projectSessions = updatedProjectSessions,
+                chatSessions = snapshot.chatSessions +
+                    (operation.durableSessionId to parentChat.copy(
+                        maintenanceLoading = false,
+                        maintenanceError = null,
+                        notice = "Session branched",
+                    )) +
+                    (result.durableSessionId to ChatSessionSnapshot(
+                        messages = result.messages.mapNotNull(::chatMessageFromJson),
+                    )),
+                lastBranchedSessionId = result.durableSessionId,
+            )
+        }
+    }
+
+    private fun publishMaintenanceFailure(operation: ControllerOperation, message: String) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            if (!chat.maintenanceLoading) return
+            mutableSnapshots.value = snapshot.copy(
+                chatSessions = snapshot.chatSessions + (
+                    operation.durableSessionId to chat.copy(
+                        maintenanceLoading = false,
+                        maintenanceError = message.take(160),
+                    )
+                    ),
+            )
+        }
+    }
+
+    private fun clearMaintenanceIfCurrent(operation: ControllerOperation) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            if (!chat.maintenanceLoading) return
+            mutableSnapshots.value = snapshot.copy(
+                chatSessions = snapshot.chatSessions + (
+                    operation.durableSessionId to chat.copy(maintenanceLoading = false)
+                    ),
+            )
+        }
     }
 
     private fun publishStopSuccess(operation: ControllerOperation) {
