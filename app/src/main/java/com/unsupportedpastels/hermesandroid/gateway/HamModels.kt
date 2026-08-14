@@ -85,15 +85,12 @@ sealed interface CronJobsState {
 }
 
 /**
- * Lifecycle controls forwarded to `cron.manage`. Enable/disable ride the
- * server's `resume`/`pause` actions; run/stop are forwarded verbatim and
- * surface a clear error on servers that do not accept them.
+ * Lifecycle controls forwarded to `cron.manage`, limited to the actions the
+ * gateway accepts: enable/disable ride the server's `resume`/`pause` verbs.
  */
 enum class CronJobAction(val wireValue: String, val failureVerb: String) {
     Enable("resume", "enable"),
     Disable("pause", "disable"),
-    Run("run", "run"),
-    Stop("stop", "stop"),
 }
 
 /** Parse only the bounded, display-safe subset of `cron.manage list`. */

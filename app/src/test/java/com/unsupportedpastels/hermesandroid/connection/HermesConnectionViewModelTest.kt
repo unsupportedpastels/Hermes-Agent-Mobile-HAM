@@ -1481,7 +1481,7 @@ class HermesConnectionViewModelTest {
         val metadata = object : HermesChatSession by delegate {
             override suspend fun loadCronJobs(): List<CronJob> = jobs
             override suspend fun manageCronJob(jobId: String, action: CronJobAction) {
-                if (action == CronJobAction.Stop) throw HermesChatProtocolException("unknown cron action: stop")
+                if (action == CronJobAction.Enable) throw HermesChatProtocolException("job not found")
                 managed += jobId to action
             }
         }
@@ -1506,11 +1506,11 @@ class HermesConnectionViewModelTest {
         assertEquals(null, viewModel.snapshots.value.cronJobActionError)
         assertEquals(CronJobsState.Ready(jobs), viewModel.snapshots.value.cronJobsState)
 
-        viewModel.manageCronJob("job-1", CronJobAction.Stop).join()
+        viewModel.manageCronJob("job-1", CronJobAction.Enable).join()
         advanceUntilIdle()
 
         assertEquals(null, viewModel.snapshots.value.cronJobActionJobId)
-        assertEquals("Could not stop the job", viewModel.snapshots.value.cronJobActionError)
+        assertEquals("Could not enable the job", viewModel.snapshots.value.cronJobActionError)
     }
 
     @Test

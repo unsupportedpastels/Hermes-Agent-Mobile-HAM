@@ -2,8 +2,6 @@ package com.unsupportedpastels.hermesandroid.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -27,7 +25,7 @@ import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
 
 /**
  * Displays the server's cron jobs with per-job lifecycle controls
- * (enable/disable, run now, stop).
+ * (enable/disable).
  *
  * Insets are intentionally owned by the caller so this surface can be placed in
  * compact or adaptive containers without applying system-bar padding twice.
@@ -112,7 +110,6 @@ fun CronJobsPanel(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CronJobCard(
     job: CronJob,
@@ -142,29 +139,12 @@ private fun CronJobCard(
             job.lastStatus.displayValue("Last status")
             job.nextRunAt.displayValue("Next run")
             job.lastRunAt.displayValue("Last run")
-            val actionsEnabled = actionJobId == null
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            val toggle = if (job.enabled == false) CronJobAction.Enable else CronJobAction.Disable
+            OutlinedButton(
+                enabled = actionJobId == null,
+                onClick = { onJobAction(job.jobId, toggle) },
             ) {
-                val toggle = if (job.enabled == false) CronJobAction.Enable else CronJobAction.Disable
-                OutlinedButton(
-                    enabled = actionsEnabled,
-                    onClick = { onJobAction(job.jobId, toggle) },
-                ) {
-                    Text(if (toggle == CronJobAction.Enable) "Enable" else "Disable")
-                }
-                OutlinedButton(
-                    enabled = actionsEnabled,
-                    onClick = { onJobAction(job.jobId, CronJobAction.Run) },
-                ) {
-                    Text("Run now")
-                }
-                OutlinedButton(
-                    enabled = actionsEnabled,
-                    onClick = { onJobAction(job.jobId, CronJobAction.Stop) },
-                ) {
-                    Text("Stop")
-                }
+                Text(if (toggle == CronJobAction.Enable) "Enable" else "Disable")
             }
             if (actionJobId == job.jobId) {
                 Text("Working…", style = MaterialTheme.typography.bodySmall)

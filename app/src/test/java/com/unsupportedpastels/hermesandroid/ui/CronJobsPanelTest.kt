@@ -87,22 +87,18 @@ class CronJobsPanelTest {
         // The enabled job offers Disable; the paused job offers Enable.
         composeRule.onNodeWithText("Disable").performScrollTo().performClick()
         composeRule.onNodeWithText("Enable").performScrollTo().performClick()
-        composeRule.onAllNodesWithText("Run now").assertCountEquals(2)
-        composeRule.onAllNodesWithText("Run now")[0].performScrollTo().performClick()
-        composeRule.onAllNodesWithText("Stop")[1].performScrollTo().performClick()
         composeRule.runOnIdle {
             assertEquals(
                 listOf(
                     "morning-brief" to CronJobAction.Disable,
                     "price-watch" to CronJobAction.Enable,
-                    "morning-brief" to CronJobAction.Run,
-                    "price-watch" to CronJobAction.Stop,
                 ),
                 actions,
             )
         }
 
-        listOf("Create", "Edit", "Delete").forEach { forbiddenLabel ->
+        // Nothing beyond the gateway's pause/resume support is offered.
+        listOf("Create", "Edit", "Delete", "Run now", "Stop").forEach { forbiddenLabel ->
             composeRule.onAllNodesWithText(forbiddenLabel, useUnmergedTree = true).assertCountEquals(0)
         }
     }
@@ -118,17 +114,15 @@ class CronJobsPanelTest {
                     state = CronJobsState.Ready(listOf(job)),
                     onRefresh = {},
                     actionJobId = "job-1",
-                    actionError = "Could not stop the job",
+                    actionError = "Could not disable the job",
                     onJobAction = { _, _ -> actionCount += 1 },
                 )
             }
         }
 
-        composeRule.onNodeWithText("Could not stop the job").assertIsDisplayed()
+        composeRule.onNodeWithText("Could not disable the job").assertIsDisplayed()
         composeRule.onNodeWithText("Working…").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Disable").performScrollTo().performClick()
-        composeRule.onNodeWithText("Run now").performScrollTo().performClick()
-        composeRule.onNodeWithText("Stop").performScrollTo().performClick()
         composeRule.runOnIdle { assertEquals(0, actionCount) }
     }
 

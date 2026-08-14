@@ -175,17 +175,15 @@ class HermesHamGatewayTest {
         val connection = newHamConnection(socket)
 
         connection.manageCronJob("job-1", CronJobAction.Enable)
-        connection.manageCronJob("job-1", CronJobAction.Disable)
-        connection.manageCronJob("job-2", CronJobAction.Run)
-        connection.manageCronJob("job-2", CronJobAction.Stop)
+        connection.manageCronJob("job-2", CronJobAction.Disable)
 
         val params = socket.sentFrames.map { Json.parseToJsonElement(it).jsonObject["params"]!!.jsonObject }
         assertEquals(
-            listOf("resume", "pause", "run", "stop"),
+            listOf("resume", "pause"),
             params.map { it["action"]!!.jsonPrimitive.content },
         )
         assertEquals(
-            listOf("job-1", "job-1", "job-2", "job-2"),
+            listOf("job-1", "job-2"),
             params.map { it["name"]!!.jsonPrimitive.content },
         )
         connection.close()
