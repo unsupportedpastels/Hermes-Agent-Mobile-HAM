@@ -2839,6 +2839,7 @@ internal fun ServerSettingsScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
@@ -2960,7 +2961,6 @@ internal fun ServerSettingsScreen(
                     actionJobId = snapshot.cronJobActionJobId,
                     actionError = snapshot.cronJobActionError,
                     onJobAction = onCronJobAction,
-                    modifier = Modifier.heightIn(max = 360.dp),
                 )
             }
         }

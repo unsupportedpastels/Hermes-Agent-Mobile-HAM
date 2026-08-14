@@ -1,6 +1,10 @@
 package com.unsupportedpastels.hermesandroid.ui
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
 
 import androidx.compose.ui.test.assertIsDisplayed
@@ -59,11 +63,14 @@ class CronJobsPanelTest {
 
         composeRule.setContent {
             MaterialTheme {
-                CronJobsPanel(
-                    state = state,
-                    onRefresh = { refreshCount += 1 },
-                    onJobAction = { jobId, action -> actions += jobId to action },
-                )
+                // The caller owns scrolling, like the settings screen does.
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    CronJobsPanel(
+                        state = state,
+                        onRefresh = { refreshCount += 1 },
+                        onJobAction = { jobId, action -> actions += jobId to action },
+                    )
+                }
             }
         }
 
@@ -110,13 +117,15 @@ class CronJobsPanelTest {
 
         composeRule.setContent {
             MaterialTheme {
-                CronJobsPanel(
-                    state = CronJobsState.Ready(listOf(job)),
-                    onRefresh = {},
-                    actionJobId = "job-1",
-                    actionError = "Could not disable the job",
-                    onJobAction = { _, _ -> actionCount += 1 },
-                )
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    CronJobsPanel(
+                        state = CronJobsState.Ready(listOf(job)),
+                        onRefresh = {},
+                        actionJobId = "job-1",
+                        actionError = "Could not disable the job",
+                        onJobAction = { _, _ -> actionCount += 1 },
+                    )
+                }
             }
         }
 

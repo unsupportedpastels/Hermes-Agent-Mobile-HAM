@@ -6,8 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -27,8 +25,8 @@ import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
  * Displays the server's cron jobs with per-job lifecycle controls
  * (enable/disable).
  *
- * Insets are intentionally owned by the caller so this surface can be placed in
- * compact or adaptive containers without applying system-bar padding twice.
+ * Scrolling and insets are intentionally owned by the caller so this surface
+ * can sit inside a scrollable settings page without nesting scroll containers.
  */
 @Composable
 fun CronJobsPanel(
@@ -43,7 +41,6 @@ fun CronJobsPanel(
         modifier = modifier
             .fillMaxWidth()
             .widthIn(max = 720.dp)
-            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
