@@ -108,6 +108,39 @@ private val imageAttachmentMarkerPattern = Regex(
 private const val MESSAGE_RENDER_CHUNK_CHARS = 4_000
 private const val MIN_EMBEDDED_PAYLOAD_CHARS = 512
 private val webUrlPrefixes = listOf("https://", "http://")
+private val pairedWebUrlDelimiters = listOf(
+    '(' to ')',
+    '[' to ']',
+    '{' to '}',
+    '<' to '>',
+)
+
+private fun trimBareWebUrlEnd(text: String, start: Int, scannedEnd: Int): Int {
+    val delimiterBalances = pairedWebUrlDelimiters.associate { (_, close) -> close to 0 }.toMutableMap()
+    for (index in start until scannedEnd) {
+        val character = text[index]
+        pairedWebUrlDelimiters.forEach { (open, close) ->
+            when (character) {
+                open -> delimiterBalances[close] = delimiterBalances.getValue(close) - 1
+                close -> delimiterBalances[close] = delimiterBalances.getValue(close) + 1
+            }
+        }
+    }
+
+    var end = scannedEnd
+    while (end > start) {
+        val trailing = text[end - 1]
+        when {
+            trailing in ".,;:!?\"'" -> end -= 1
+            delimiterBalances.getOrDefault(trailing, 0) > 0 -> {
+                delimiterBalances[trailing] = delimiterBalances.getValue(trailing) - 1
+                end -= 1
+            }
+            else -> return end
+        }
+    }
+    return end
+}
 
 private fun splitMarkdownTableRow(line: String): List<String>? {
     val trimmed = line.trim()
@@ -418,7 +451,7 @@ private fun parseMarkdownInlines(text: String, inherited: InlineState = InlineSt
         if (inherited.link == null && webUrlPrefix != null) {
             var end = index + webUrlPrefix.length
             while (end < text.length && !text[end].isWhitespace()) end += 1
-            while (end > index && text[end - 1] in ".,;:!?") end -= 1
+            end = trimBareWebUrlEnd(text, index, end)
             if (end > index + webUrlPrefix.length) {
                 flushPlain()
                 val url = text.substring(index, end)
