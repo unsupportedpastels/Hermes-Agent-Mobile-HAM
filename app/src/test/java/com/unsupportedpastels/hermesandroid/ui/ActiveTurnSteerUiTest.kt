@@ -72,7 +72,7 @@ class ActiveTurnSteerUiTest {
 
         composeRule.onNodeWithText("Stop").assertIsDisplayed()
         composeRule.onNodeWithText("Steer").assertIsDisplayed()
-        composeRule.onNodeWithText("Send").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Send message").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Attach files").assertIsNotEnabled()
         composeRule.onNodeWithText("Guidance queued for the active turn").assertIsDisplayed()
         composeRule.onNodeWithText("A later steer was rejected").assertIsDisplayed()

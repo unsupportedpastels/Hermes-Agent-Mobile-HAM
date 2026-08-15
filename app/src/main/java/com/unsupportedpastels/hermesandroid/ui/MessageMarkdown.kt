@@ -10,10 +10,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -249,6 +256,33 @@ internal fun compactEmbeddedPayloads(source: String): String {
 
 private fun Char.isBase64PayloadCharacter(): Boolean =
     isLetterOrDigit() || this == '+' || this == '/' || this == '=' || this == '-' || this == '_'
+
+/**
+ * Length of the prefix of a streaming message that is safe to render as markdown.
+ *
+ * The boundary is the last blank line outside a code fence: every block before it
+ * is finalized (its terminating blank line has arrived), while the tail may still
+ * contain unclosed fences, half-built tables, or unterminated inline markers and
+ * must render as plain text until more of the stream arrives.
+ */
+internal fun stableMarkdownPrefixLength(text: String): Int {
+    var stableEnd = 0
+    var inFence = false
+    var cursor = 0
+    while (cursor < text.length) {
+        val newline = text.indexOf('\n', cursor)
+        val lineEnd = if (newline < 0) text.length else newline
+        val line = text.substring(cursor, lineEnd)
+        if (line.trimStart().startsWith("```")) {
+            inFence = !inFence
+        } else if (!inFence && line.isBlank() && newline >= 0) {
+            stableEnd = newline + 1
+        }
+        if (newline < 0) break
+        cursor = newline + 1
+    }
+    return stableEnd
+}
 
 internal fun parseMessageMarkdown(source: String): List<MarkdownBlock> {
     if (source.isEmpty()) return emptyList()
@@ -781,31 +815,48 @@ private fun annotatedMarkdown(inlines: List<MarkdownInline>): AnnotatedString {
 
 @Composable
 private fun MarkdownCode(block: MarkdownCodeBlock) {
+    val clipboard = LocalClipboardManager.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(
                 MaterialTheme.colorScheme.surfaceVariant,
-                RoundedCornerShape(8.dp),
-            )
-            .padding(vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+                RoundedCornerShape(12.dp),
+            ),
     ) {
-        block.language?.let { language ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
-                text = language.uppercase(),
-                modifier = Modifier.padding(horizontal = 12.dp),
+                text = block.language?.lowercase() ?: "code",
+                modifier = Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            IconButton(
+                onClick = { clipboard.setText(AnnotatedString(block.code)) },
+                modifier = Modifier
+                    .size(32.dp)
+                    .semantics { contentDescription = "Copy code" },
+            ) {
+                Icon(
+                    Icons.Outlined.ContentCopy,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp),
+                .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
         ) {
             Text(
                 text = block.code,

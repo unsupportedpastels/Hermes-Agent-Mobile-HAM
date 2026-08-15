@@ -19,6 +19,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -46,6 +47,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.IntrinsicSize
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -62,12 +64,18 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -106,10 +114,16 @@ import androidx.compose.material3.adaptive.layout.rememberPaneExpansionState
 import androidx.compose.material3.adaptive.navigation3.ListDetailSceneStrategy
 import androidx.compose.material3.adaptive.navigation3.rememberListDetailSceneStrategy
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
@@ -141,6 +155,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalUriHandler
@@ -153,9 +169,11 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.dropUnlessResumed
 import androidx.navigation3.runtime.NavKey
@@ -202,6 +220,7 @@ import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
+import com.unsupportedpastels.hermesandroid.gateway.ValidReasoningEfforts
 import com.unsupportedpastels.hermesandroid.navigation.HomeRoute
 import com.unsupportedpastels.hermesandroid.navigation.ProjectRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
@@ -3239,6 +3258,14 @@ internal fun ServerSettingsScreen(
  * or the list has not laid out yet. Once the user scrolls up past the newest item, auto-follow
  * pauses until they return to the bottom.
  */
+/**
+ * Scroll offset that over-shoots the last item's height so the list clamps to
+ * its true end. Anchoring the last item's TOP to the viewport leaves the tail
+ * of anything taller than the screen (long replies, clarification pickers)
+ * hidden below the fold.
+ */
+private const val TranscriptEndScrollOffset = 1 shl 20
+
 internal fun isTranscriptPinnedToBottom(
     lastVisibleItemIndex: Int?,
     totalItemsCount: Int,
@@ -3285,6 +3312,9 @@ private fun SessionDetailScreen(
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val semanticColors = LocalHermesSemanticColors.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val transcriptScope = rememberCoroutineScope()
     var showSessionInsights by remember(session.id) { mutableStateOf(false) }
     val workspacePath = validProjectWorkspacePath(session.workspacePath)
     // Home-bucket sessions run in the server's default working directory; until
@@ -3327,9 +3357,29 @@ private fun SessionDetailScreen(
             )
         }
     }
-    LaunchedEffect(session.id) {
-        if (chat.messages.isNotEmpty() || hasRunStateContent) {
-            transcriptListState.scrollToItem(timelineLastIndex)
+    // Follow is an intent, not a position: only a user drag disengages it, and
+    // returning to the bottom re-engages it. Gating on instantaneous
+    // pinnedToBottom permanently broke follow whenever a burst of new items
+    // cancelled the catch-up animation and left the view one frame behind.
+    var followBottom by remember(session.id) { mutableStateOf(true) }
+    LaunchedEffect(transcriptListState) {
+        transcriptListState.interactionSource.interactions.collect { interaction ->
+            if (interaction is DragInteraction.Start) followBottom = false
+        }
+    }
+    LaunchedEffect(transcriptListState) {
+        snapshotFlow { pinnedToBottom }.collect { pinned ->
+            if (pinned) followBottom = true
+        }
+    }
+    // The transcript often arrives after the screen composes (async load on a
+    // fresh process), so the initial jump-to-end must wait for first content
+    // instead of firing once on open and silently doing nothing.
+    var initialScrollDone by remember(session.id) { mutableStateOf(false) }
+    LaunchedEffect(session.id, chat.messages.size, hasRunStateContent) {
+        if (!initialScrollDone && (chat.messages.isNotEmpty() || hasRunStateContent)) {
+            transcriptListState.scrollToItem(timelineLastIndex, TranscriptEndScrollOffset)
+            initialScrollDone = true
         }
     }
     var lastFollowedMessageCount by remember(session.id) { mutableStateOf(chat.messages.size) }
@@ -3339,19 +3389,34 @@ private fun SessionDetailScreen(
         chat.runState,
     ) {
         if (chat.messages.isEmpty() && !hasRunStateContent) return@LaunchedEffect
-        if (!pinnedToBottom) return@LaunchedEffect
+        if (!followBottom) return@LaunchedEffect
         if (chat.messages.size != lastFollowedMessageCount) {
             lastFollowedMessageCount = chat.messages.size
-            transcriptListState.animateScrollToItem(timelineLastIndex)
+            transcriptListState.animateScrollToItem(timelineLastIndex, TranscriptEndScrollOffset)
         } else {
-            transcriptListState.scrollToItem(timelineLastIndex)
+            transcriptListState.scrollToItem(timelineLastIndex, TranscriptEndScrollOffset)
         }
     }
+    // The context ring in the top bar needs usage data the gateway only returns
+    // on demand: load it when the session opens and refresh when a turn ends.
+    var wasSending by remember(session.id) { mutableStateOf(chat.isSending) }
+    LaunchedEffect(session.id, maintenanceAvailable) {
+        if (maintenanceAvailable) onLoadSessionInsights()
+    }
+    LaunchedEffect(chat.isSending) {
+        if (wasSending && !chat.isSending && maintenanceAvailable) onLoadSessionInsights()
+        wasSending = chat.isSending
+    }
+    // The draft clears optimistically at send time; this only restores it when
+    // the gateway rejects the message, so nothing typed is ever lost.
     LaunchedEffect(session.id, chat.messages.size, chat.isSending, chat.error) {
         val pending = pendingSend ?: return@LaunchedEffect
-        if (chat.messages.size > pending.second && !chat.isSending) {
-            if (chat.error == null && draft.trim() == pending.first) onDraftChanged("")
-            pendingSend = null
+        when {
+            chat.error != null -> {
+                if (draft.isBlank()) onDraftChanged(pending.first)
+                pendingSend = null
+            }
+            chat.messages.size > pending.second -> pendingSend = null
         }
     }
 
@@ -3359,60 +3424,23 @@ private fun SessionDetailScreen(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             TopAppBar(
+                expandedHeight = 48.dp,
                 title = {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(session.title)
-                        listOfNotNull(
-                            chat.provider?.takeIf(String::isNotBlank),
-                            chat.model?.takeIf(String::isNotBlank),
-                            chat.reasoningEffort
-                                ?.takeIf(String::isNotBlank)
-                                ?.let { "reasoning $it" },
-                        ).takeIf(List<String>::isNotEmpty)?.let { runtimeConfiguration ->
-                            Text(
-                                runtimeConfiguration.joinToString(" · "),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        workspaceLabel?.let { label ->
-                            Text(
-                                "Workspace: $label",
-                                color = if (workspacePath == null) {
-                                    MaterialTheme.colorScheme.tertiary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.semantics {
-                                    contentDescription = "Session workspace: $label"
-                                },
-                            )
-                        }
-                    }
+                    Text(
+                        session.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 },
                 navigationIcon = {
                     if (showBack) {
-                        TextButton(onClick = dropUnlessResumed { onBack() }) {
-                            Text("Back")
+                        IconButton(
+                            onClick = dropUnlessResumed { onBack() },
+                            modifier = Modifier.semantics { contentDescription = "Back" },
+                        ) {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
                         }
-                    }
-                },
-                actions = {
-                    IconButton(
-                        onClick = {
-                            showSessionInsights = true
-                            if (maintenanceAvailable) onLoadSessionInsights()
-                        },
-                        modifier = Modifier.semantics {
-                            contentDescription = "Open session details"
-                        },
-                    ) {
-                        Icon(Icons.Outlined.Info, contentDescription = null)
                     }
                 },
             )
@@ -3426,7 +3454,7 @@ private fun SessionDetailScreen(
                 .wrapContentWidth(Alignment.CenterHorizontally)
                 .widthIn(max = 840.dp)
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 10.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             if (projectDraftMissingWorkspace) {
@@ -3470,65 +3498,105 @@ private fun SessionDetailScreen(
                             key = { index, _ -> "message:$index" },
                         ) { messageIndex, message ->
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(
-                                    when (message.role) {
-                                        ChatMessageRole.User -> "You"
-                                        ChatMessageRole.Assistant -> "Hermes"
-                                        ChatMessageRole.System -> "System"
-                                        ChatMessageRole.Tool -> "Tool"
-                                    },
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
+                                if (message.role == ChatMessageRole.System) {
+                                    Text(
+                                        "System",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                                 message.reasoningText.takeIf { it.isNotBlank() }?.let { reasoning ->
                                     var showReasoning by rememberSaveable(session.id.value, messageIndex) {
                                         mutableStateOf(false)
                                     }
-                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        TextButton(
-                                            onClick = { showReasoning = !showReasoning },
-                                            modifier = Modifier.semantics {
-                                                contentDescription = if (showReasoning) {
-                                                    "Hide thinking"
-                                                } else {
-                                                    "Show thinking"
-                                                }
-                                            },
-                                        ) {
-                                            Text(
-                                                if (showReasoning) "Hide thinking" else "Show thinking",
-                                                style = MaterialTheme.typography.labelMedium,
-                                            )
-                                        }
-                                        if (showReasoning) {
-                                            Text(
-                                                reasoning,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                    }
+                                    ThinkingBlock(
+                                        reasoning = reasoning,
+                                        expanded = showReasoning,
+                                        onToggle = { showReasoning = !showReasoning },
+                                    )
                                 }
                                 val renderedText = message.text.ifEmpty {
                                     if (message.isStreaming) "…" else ""
                                 }
-                                if (message.role == ChatMessageRole.Assistant && message.isStreaming) {
-                                    // Streaming text renders as raw plain text: parsing
-                                    // partial markdown (unclosed code fences, stray bold
-                                    // markers, half-built tables) produces garbled output
-                                    // until message.complete finalizes the full text.
-                                    Text(
-                                        renderedText,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        modifier = Modifier.testTag("Streaming assistant text"),
-                                    )
-                                } else {
-                                    MarkdownMessage(
-                                        renderedText,
-                                        loadManagedImage = { path ->
-                                            onLoadManagedImage(path).getOrThrow()
-                                        },
-                                    )
+                                when {
+                                    message.role == ChatMessageRole.Tool -> {
+                                        var showToolMessage by rememberSaveable(session.id.value, messageIndex) {
+                                            mutableStateOf(false)
+                                        }
+                                        ToolMessageBlock(
+                                            text = renderedText,
+                                            expanded = showToolMessage,
+                                            onToggle = { showToolMessage = !showToolMessage },
+                                            loadManagedImage = { path ->
+                                                onLoadManagedImage(path).getOrThrow()
+                                            },
+                                        )
+                                    }
+                                    message.role == ChatMessageRole.User -> {
+                                        Box(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            contentAlignment = Alignment.TopEnd,
+                                        ) {
+                                            Surface(
+                                                shape = RoundedCornerShape(
+                                                    topStart = 18.dp,
+                                                    topEnd = 18.dp,
+                                                    bottomEnd = 4.dp,
+                                                    bottomStart = 18.dp,
+                                                ),
+                                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                modifier = Modifier
+                                                    .padding(start = 48.dp)
+                                                    .width(IntrinsicSize.Max),
+                                            ) {
+                                                MarkdownMessage(
+                                                    renderedText,
+                                                    modifier = Modifier.padding(
+                                                        horizontal = 14.dp,
+                                                        vertical = 10.dp,
+                                                    ),
+                                                    loadManagedImage = { path ->
+                                                        onLoadManagedImage(path).getOrThrow()
+                                                    },
+                                                )
+                                            }
+                                        }
+                                    }
+                                    message.role == ChatMessageRole.Assistant && message.isStreaming -> {
+                                        // Only the tail past the last finalized block renders as
+                                        // plain text: parsing partial markdown (unclosed code
+                                        // fences, stray bold markers, half-built tables) garbles
+                                        // output, but blocks terminated by a blank line are
+                                        // complete and safe to render.
+                                        val stableLength = remember(renderedText) {
+                                            stableMarkdownPrefixLength(renderedText)
+                                        }
+                                        if (stableLength > 0) {
+                                            MarkdownMessage(
+                                                renderedText.substring(0, stableLength),
+                                                loadManagedImage = { path ->
+                                                    onLoadManagedImage(path).getOrThrow()
+                                                },
+                                            )
+                                        }
+                                        val streamingTail = renderedText.substring(stableLength)
+                                        if (streamingTail.isNotEmpty()) {
+                                            Text(
+                                                streamingTail,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                modifier = Modifier.testTag("Streaming assistant text"),
+                                            )
+                                        }
+                                    }
+                                    else -> {
+                                        MarkdownMessage(
+                                            renderedText,
+                                            loadManagedImage = { path ->
+                                                onLoadManagedImage(path).getOrThrow()
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -3536,6 +3604,7 @@ private fun SessionDetailScreen(
                             item(key = "run-state") {
                                 RunStateContent(
                                     runState = chat.runState,
+                                    runActive = chat.isSending,
                                     durableSessionId = session.id,
                                     onClarificationResponse = onClarificationResponse,
                                     onApprovalResponse = onApprovalResponse,
@@ -3599,11 +3668,21 @@ private fun SessionDetailScreen(
                 }
             }
             if (chat.isSending) {
-                Text(
-                    "Hermes is responding…",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        "Hermes is responding…",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             if (slashCompletion != null && slashCompletion.items.isNotEmpty()) {
                 SlashCompletionMenu(
@@ -3663,7 +3742,7 @@ private fun SessionDetailScreen(
                             .size(44.dp)
                             .semantics { contentDescription = "Attach files" },
                     ) {
-                        Text("+", style = MaterialTheme.typography.headlineSmall)
+                        Icon(Icons.Outlined.Add, contentDescription = null)
                     }
                     BasicTextField(
                         value = draft,
@@ -3708,6 +3787,8 @@ private fun SessionDetailScreen(
                                 onClick = {
                                     val guidance = draft.trim()
                                     if (guidance.isNotEmpty()) {
+                                        keyboardController?.hide()
+                                        focusManager.clearFocus()
                                         onSteer(guidance)
                                         onDraftChanged("")
                                     }
@@ -3743,10 +3824,12 @@ private fun SessionDetailScreen(
                             Text(if (stopping) "Stopping…" else "Stop")
                         }
                     } else {
-                        Button(
+                        FilledIconButton(
                             onClick = {
                                 val message = draft.trim()
                                 val reasoningEffort = reasoningEffortCommand(message)
+                                keyboardController?.hide()
+                                focusManager.clearFocus()
                                 when {
                                     isModelPickerCommand(message) -> {
                                         pendingSend = null
@@ -3760,26 +3843,115 @@ private fun SessionDetailScreen(
                                     }
                                     else -> {
                                         pendingSend = message to chat.messages.size
+                                        onDraftChanged("")
                                         onSend(message)
+                                        followBottom = true
+                                        transcriptScope.launch {
+                                            transcriptListState.scrollToItem(
+                                                timelineLastIndex,
+                                                TranscriptEndScrollOffset,
+                                            )
+                                        }
                                     }
                                 }
                             },
                             enabled = canSend &&
                                 composerEnabled &&
                                 (draft.isNotBlank() || attachments.isNotEmpty()),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = semanticColors.active,
-                                contentColor = semanticColors.onActive,
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
                                 disabledContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
                                 disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
                             ),
-                            contentPadding = PaddingValues(horizontal = 14.dp),
-                            modifier = Modifier.heightIn(min = 40.dp),
+                            modifier = Modifier
+                                .size(40.dp)
+                                .semantics { contentDescription = "Send message" },
                         ) {
-                            Text("Send")
+                            Icon(Icons.Outlined.ArrowUpward, contentDescription = null)
                         }
                     }
                 }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                // The provider prefix ("openrouter/…") repeats what the details
+                // sheet already shows and dominates the strip; keep the model's
+                // own name and preserve its distinguishing tail when truncating.
+                val displayModel = chat.model
+                    ?.takeIf(String::isNotBlank)
+                    ?.substringAfterLast('/')
+                AssistChip(
+                    onClick = onOpenModelPicker,
+                    label = {
+                        Text(
+                            displayModel ?: "Model",
+                            maxLines = 1,
+                            overflow = TextOverflow.MiddleEllipsis,
+                        )
+                    },
+                    trailingIcon = {
+                        Icon(
+                            Icons.Outlined.ExpandMore,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    },
+                    modifier = Modifier
+                        .widthIn(max = 240.dp)
+                        .semantics { contentDescription = "Change session model" },
+                )
+                var reasoningMenuOpen by remember(session.id) { mutableStateOf(false) }
+                Box {
+                    AssistChip(
+                        onClick = { reasoningMenuOpen = true },
+                        label = {
+                            Text(chat.reasoningEffort?.takeIf(String::isNotBlank) ?: "Reasoning")
+                        },
+                        trailingIcon = {
+                            Icon(
+                                Icons.Outlined.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        },
+                        modifier = Modifier.semantics {
+                            contentDescription = "Change reasoning effort"
+                        },
+                    )
+                    DropdownMenu(
+                        expanded = reasoningMenuOpen,
+                        onDismissRequest = { reasoningMenuOpen = false },
+                    ) {
+                        ValidReasoningEfforts.forEach { effort ->
+                            DropdownMenuItem(
+                                text = { Text(effort) },
+                                onClick = {
+                                    reasoningMenuOpen = false
+                                    onReasoningSelected(effort)
+                                },
+                            )
+                        }
+                    }
+                }
+                }
+                SessionContextRing(
+                    percent = sessionContextPercent(chat),
+                    onClick = {
+                        showSessionInsights = true
+                        if (maintenanceAvailable) onLoadSessionInsights()
+                    },
+                )
             }
         }
     }
@@ -3787,6 +3959,8 @@ private fun SessionDetailScreen(
         SessionInsightsSheet(
             sessionTitle = session.title,
             chat = chat,
+            workspaceLabel = workspaceLabel,
+            provider = chat.provider,
             maintenanceAvailable = maintenanceAvailable,
             maintenanceEnabled = maintenanceEnabled,
             onRefresh = onLoadSessionInsights,
@@ -3976,6 +4150,8 @@ private enum class SessionMaintenanceAction {
 private fun SessionInsightsSheet(
     sessionTitle: String,
     chat: ChatSessionSnapshot,
+    workspaceLabel: String? = null,
+    provider: String? = null,
     maintenanceAvailable: Boolean,
     maintenanceEnabled: Boolean,
     onRefresh: () -> Unit,
@@ -4010,6 +4186,22 @@ private fun SessionInsightsSheet(
                     enabled = maintenanceAvailable && !chat.insightsLoading,
                 ) {
                     Text("Refresh")
+                }
+            }
+            listOfNotNull(
+                provider?.takeIf(String::isNotBlank)?.let { "Provider: $it" },
+                workspaceLabel?.let { "Workspace: $it" },
+            ).takeIf(List<String>::isNotEmpty)?.let { details ->
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    details.forEach { detail ->
+                        Text(
+                            detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
             if (chat.insightsLoading) {
@@ -4290,39 +4482,31 @@ private fun formatPercent(value: Double): String =
 @Composable
 private fun RunStateContent(
     runState: RunEventState,
+    runActive: Boolean,
     durableSessionId: DurableSessionId,
     onClarificationResponse: (String, String) -> Unit,
     onApprovalResponse: (String, Boolean) -> Unit,
 ) {
     if (!runState.hasVisibleContent()) return
     val runningTools = runState.tools.filter { it.state == RunToolState.Running }
-    val completedTools = runState.tools.filter { it.state == RunToolState.Completed }
-    var completedToolsExpanded by remember(durableSessionId.value) {
+    var toolsExpanded by remember(durableSessionId.value) {
         mutableStateOf(false)
     }
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        runState.status?.let { status -> RunStatusPill(status) }
-        runningTools.forEach { tool ->
-            key(tool.toolId) {
-                RunToolRowContent(tool)
-            }
+        // A stale status from a finished run reads as a stuck banner, so the
+        // amber pill only shows while the run is actually in flight.
+        if (runActive || runningTools.isNotEmpty()) {
+            runState.status?.let { status -> RunStatusPill(status) }
         }
-        if (completedTools.isNotEmpty()) {
-            CompletedToolsSummary(
-                count = completedTools.size,
-                expanded = completedToolsExpanded,
-                onToggle = { completedToolsExpanded = !completedToolsExpanded },
+        if (runState.tools.isNotEmpty()) {
+            ToolActivityGroup(
+                tools = runState.tools,
+                expanded = toolsExpanded,
+                onToggle = { toolsExpanded = !toolsExpanded },
             )
-            if (completedToolsExpanded) {
-                completedTools.forEach { tool ->
-                    key(tool.toolId) {
-                        RunToolRowContent(tool)
-                    }
-                }
-            }
         }
         runState.clarification?.let { clarification ->
             ClarificationCard(
@@ -4351,38 +4535,296 @@ private fun RunEventState.hasVisibleContent(): Boolean =
         approval != null ||
         unsupportedBlocking != null
 
+/**
+ * Verb bucket for a gateway tool name, or null for tools this client does not
+ * recognize. Buckets merge related names ("write_file" and "patch" are both
+ * edits) so the summary can read "edited 2 files" instead of listing each.
+ */
+private fun toolVerbBucket(name: String): String? = when (name.lowercase()) {
+    "read_file", "read", "cat" -> "read"
+    "write_file", "patch", "edit_file", "apply_patch", "edit", "write" -> "edit"
+    "shell", "terminal", "bash", "exec", "run_command" -> "command"
+    "web_search", "search_web" -> "web_search"
+    "web_fetch", "fetch", "http_get" -> "fetch"
+    "skill_view", "skill" -> "skill"
+    "list_files", "ls", "glob" -> "list"
+    "grep", "search_files", "search" -> "grep"
+    else -> null
+}
+
+private fun toolVerbPhrase(bucket: String, count: Int): String = when (bucket) {
+    "read" -> if (count == 1) "read a file" else "read $count files"
+    "edit" -> if (count == 1) "edited a file" else "edited $count files"
+    "command" -> if (count == 1) "ran a command" else "ran $count commands"
+    "web_search" -> if (count == 1) "searched the web" else "searched the web ×$count"
+    "fetch" -> if (count == 1) "fetched a page" else "fetched $count pages"
+    "skill" -> if (count == 1) "loaded a skill" else "loaded $count skills"
+    "list" -> if (count == 1) "listed files" else "listed files ×$count"
+    else -> if (count == 1) "searched files" else "searched files ×$count"
+}
+
+/**
+ * Claude-app style activity summary: known tools compress into verb phrases
+ * ("edited 2 files, ran a command"), unknown tool names fall back to counted
+ * raw names so a server-side rename degrades to less prose, never a lie.
+ * Running tools lead with "running <name>" so in-flight work stays visible.
+ */
+internal fun toolActivitySummary(
+    completedNames: List<String>,
+    runningNames: List<String> = emptyList(),
+): String {
+    val buckets = linkedMapOf<String, Int>()
+    val unknown = linkedMapOf<String, Int>()
+    completedNames.forEach { name ->
+        val bucket = toolVerbBucket(name)
+        if (bucket != null) {
+            buckets.merge(bucket, 1, Int::plus)
+        } else {
+            unknown.merge(name, 1, Int::plus)
+        }
+    }
+    val phrases = buildList {
+        runningNames.distinct().takeIf(List<String>::isNotEmpty)?.let { running ->
+            add("running ${running.joinToString(", ")}")
+        }
+        buckets.entries
+            .sortedByDescending(Map.Entry<String, Int>::value)
+            .forEach { add(toolVerbPhrase(it.key, it.value)) }
+        unknown.entries.forEach { (name, count) ->
+            add(if (count > 1) "$name ×$count" else name)
+        }
+    }
+    val visible = phrases.take(3)
+    val overflow = phrases.size - visible.size
+    return buildString {
+        append(visible.joinToString(", "))
+        if (overflow > 0) append(", +$overflow more")
+    }.replaceFirstChar { it.uppercase() }
+}
+
+/**
+ * One collapsible card wrapping all tool activity for the current run, in the
+ * style of Hermex's tool activity group: state icon, action count, a summary of
+ * unique tool names, and the per-tool rows only when expanded.
+ */
 @Composable
-private fun CompletedToolsSummary(
-    count: Int,
+private fun ToolActivityGroup(
+    tools: List<RunToolRow>,
     expanded: Boolean,
     onToggle: () -> Unit,
 ) {
-    val noun = if (count == 1) "tool" else "tools"
-    TextButton(
+    val semanticColors = LocalHermesSemanticColors.current
+    val anyRunning = tools.any { it.state == RunToolState.Running }
+    val noun = if (tools.size == 1) "action" else "actions"
+    val stateText = if (anyRunning) "running" else "completed"
+    val summary = toolActivitySummary(
+        completedNames = tools.filter { it.state == RunToolState.Completed }.map(RunToolRow::name),
+        runningNames = tools.filter { it.state == RunToolState.Running }.map(RunToolRow::name),
+    )
+    Surface(
         onClick = onToggle,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier
             .fillMaxWidth()
             .semantics(mergeDescendants = true) {
-                contentDescription = "$count completed $noun, ${if (expanded) "expanded" else "collapsed"}"
+                contentDescription =
+                    "${tools.size} $noun, $stateText, ${if (expanded) "expanded" else "collapsed"}"
                 stateDescription = if (expanded) "Expanded" else "Collapsed"
             },
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("✓", color = LocalHermesSemanticColors.current.completed)
-            Text(
-                "$count $noun completed",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.labelLarge,
-            )
-            Text(if (expanded) "Hide" else "Show")
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (anyRunning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = semanticColors.active,
+                    )
+                } else {
+                    Icon(
+                        Icons.Outlined.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = semanticColors.completed,
+                    )
+                }
+                Text(
+                    summary,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Icon(
+                    if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded) {
+                tools.forEachIndexed { index, tool ->
+                    key(tool.toolId) {
+                        if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        RunToolRowContent(tool)
+                    }
+                }
+            }
         }
     }
 }
 
+/**
+ * Historical tool-role transcript message collapsed into the same card style as
+ * the live tool activity group: a one-line preview, expanding to the full
+ * markdown content inline.
+ */
+@Composable
+private fun ToolMessageBlock(
+    text: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    loadManagedImage: (suspend (String) -> ByteArray)? = null,
+) {
+    val preview = remember(text) {
+        text.replace('\n', ' ').trim().take(80)
+    }
+    Surface(
+        onClick = onToggle,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics {
+                contentDescription = if (expanded) "Hide tool result" else "Show tool result"
+            },
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.Check,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = LocalHermesSemanticColors.current.completed,
+                )
+                Text(
+                    "Tool",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                if (!expanded) {
+                    Text(
+                        preview,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+                Icon(
+                    if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded) {
+                MarkdownMessage(
+                    text,
+                    loadManagedImage = loadManagedImage,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Collapsed thinking row in the style of Hermex's reasoning block: label plus a
+ * one-line preview of the reasoning, expanding to the full text inline.
+ */
+@Composable
+private fun ThinkingBlock(
+    reasoning: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    val preview = remember(reasoning) {
+        reasoning.replace('\n', ' ').trim().take(80)
+    }
+    Surface(
+        onClick = onToggle,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics {
+                contentDescription = if (expanded) "Hide thinking" else "Show thinking"
+            },
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.Psychology,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Thinking",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                if (!expanded) {
+                    Text(
+                        preview,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+                Icon(
+                    if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded) {
+                Text(
+                    reasoning,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ClarificationCard(
     durableSessionId: DurableSessionId,
@@ -4416,9 +4858,10 @@ private fun ClarificationCard(
                         Text("Send response")
                     }
                 } else if (interaction.multiSelect) {
-                    Row(
+                    FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         interaction.choices.forEach { choice ->
                             FilterChip(
@@ -4446,13 +4889,26 @@ private fun ClarificationCard(
                         Text("Send response")
                     }
                 } else {
-                    interaction.choices.forEach { choice ->
-                        Button(
-                            onClick = dropUnlessResumed {
-                                onResponse(interaction.requestId, choice)
-                            },
-                        ) {
-                            Text(choice)
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        interaction.choices.forEach { choice ->
+                            Surface(
+                                onClick = dropUnlessResumed {
+                                    onResponse(interaction.requestId, choice)
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    choice,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
                         }
                     }
                 }
@@ -4464,6 +4920,7 @@ private fun ClarificationCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ApprovalCard(
     durableSessionId: DurableSessionId,
@@ -4507,20 +4964,42 @@ private fun ApprovalCard(
                 },
                 style = MaterialTheme.typography.titleSmall,
             )
-            interaction.commandPreview?.takeIf(String::isNotBlank)?.let {
-                Text("Command preview: $it")
+            interaction.commandPreview?.takeIf(String::isNotBlank)?.let { command ->
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Command preview: $command" },
+                ) {
+                    Text(
+                        command,
+                        modifier = Modifier
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             interaction.descriptionPreview?.takeIf(String::isNotBlank)?.let {
-                Text("Description preview: $it")
+                Text(it, style = MaterialTheme.typography.bodyMedium)
             }
             if (interaction.lifecycle == RunInteractionLifecycle.Pending) {
-                interaction.choices.forEach { choice ->
-                    Button(
-                        onClick = dropUnlessResumed {
-                            onResponse(choice, false)
-                        },
-                    ) {
-                        Text(choice)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    interaction.choices.forEach { choice ->
+                        FilledTonalButton(
+                            onClick = dropUnlessResumed {
+                                onResponse(choice, false)
+                            },
+                        ) {
+                            Text(choice)
+                        }
                     }
                 }
             } else {
@@ -4546,27 +5025,82 @@ private fun UnsupportedBlockingCard(interaction: UnsupportedBlockingInteraction)
     }
 }
 
+private fun sessionContextPercent(chat: ChatSessionSnapshot): Double? {
+    chat.sessionUsage?.let { usage ->
+        usage.contextPercent?.let { return it }
+        val used = usage.contextUsedTokens
+        val max = usage.contextMaxTokens
+        if (used != null && max != null && max > 0) return used * 100.0 / max
+    }
+    return chat.contextBreakdown?.percent
+}
+
 @Composable
-private fun RunStatusPill(status: RunStatus) {
-    val semanticColors = LocalHermesSemanticColors.current
-    Surface(
-        shape = MaterialTheme.shapes.small,
-        color = semanticColors.active,
-        contentColor = semanticColors.onActive,
+private fun SessionContextRing(percent: Double?, onClick: () -> Unit) {
+    val fraction = percent?.let { (it / 100.0).toFloat().coerceIn(0f, 1f) }
+    val ringColor = when {
+        fraction == null -> MaterialTheme.colorScheme.onSurfaceVariant
+        fraction >= 0.9f -> MaterialTheme.colorScheme.error
+        fraction >= 0.75f -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.primary
+    }
+    IconButton(
+        onClick = onClick,
         modifier = Modifier
-            .fillMaxWidth()
+            .size(40.dp)
             .semantics {
-                contentDescription = "Current status: ${status.kind} — ${status.text}"
-                stateDescription = "Current"
+                contentDescription = "Open session details"
+                stateDescription = percent
+                    ?.let { "Context ${formatPercent(it)} percent used" }
+                    ?: "Context usage unknown"
             },
     ) {
+        Box(contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(
+                progress = { fraction ?: 0f },
+                modifier = Modifier.size(30.dp),
+                color = ringColor,
+                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                strokeWidth = 3.dp,
+            )
+            Text(
+                percent?.let { it.coerceIn(0.0, 99.0).toInt().toString() } ?: "–",
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+@Composable
+private fun RunStatusPill(status: RunStatus) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        modifier = Modifier.semantics {
+            contentDescription = "Current status: ${status.kind} — ${status.text}"
+            stateDescription = "Current"
+        },
+    ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
             Text(status.kind, style = MaterialTheme.typography.labelMedium)
-            Text(status.text, style = MaterialTheme.typography.bodySmall)
+            Text(
+                status.text,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -4574,15 +5108,25 @@ private fun RunStatusPill(status: RunStatus) {
 @Composable
 private fun RunToolRowContent(tool: RunToolRow) {
     val semanticColors = LocalHermesSemanticColors.current
-    val toolContext = tool.context?.takeIf(String::isNotBlank)?.let { ": $it" }.orEmpty()
-    val toolSummary = tool.summary?.takeIf(String::isNotBlank)?.let { ": $it" }.orEmpty()
+    val toolContext = tool.context?.takeIf(String::isNotBlank)
+    val toolSummary = tool.summary?.takeIf(String::isNotBlank)
     val description = when (tool.state) {
-        RunToolState.Running -> "Running tool ${tool.name}$toolContext"
-        RunToolState.Completed -> "Completed tool ${tool.name}$toolSummary"
+        RunToolState.Running -> "Running tool ${tool.name}${toolContext?.let { ": $it" }.orEmpty()}"
+        RunToolState.Completed -> "Completed tool ${tool.name}${toolSummary?.let { ": $it" }.orEmpty()}"
     }
+    val hasDetail = toolContext != null || toolSummary != null
+    var detailExpanded by rememberSaveable(tool.toolId) { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (hasDetail) {
+                    Modifier.clickable { detailExpanded = !detailExpanded }
+                } else {
+                    Modifier
+                },
+            )
+            .padding(vertical = 4.dp)
             .semantics {
                 contentDescription = description
                 stateDescription = tool.state.name
@@ -4593,31 +5137,52 @@ private fun RunToolRowContent(tool: RunToolRow) {
         when (tool.state) {
             RunToolState.Running -> CircularProgressIndicator(
                 modifier = Modifier
-                    .size(18.dp)
+                    .size(16.dp)
                     .semantics { contentDescription = "Running" },
                 color = semanticColors.active,
                 strokeWidth = 2.dp,
             )
-            RunToolState.Completed -> Text(
-                "✓",
-                modifier = Modifier.semantics { contentDescription = "Completed" },
-                color = semanticColors.completed,
-                style = MaterialTheme.typography.titleMedium,
+            RunToolState.Completed -> Icon(
+                Icons.Outlined.Check,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(16.dp)
+                    .semantics { contentDescription = "Completed" },
+                tint = semanticColors.completed,
             )
         }
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
             Text(tool.name, style = MaterialTheme.typography.bodyMedium)
-            tool.context?.takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            tool.summary?.takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            toolContext?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = if (detailExpanded) Int.MAX_VALUE else 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            toolSummary?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = if (detailExpanded) Int.MAX_VALUE else 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
-        Text(
-            tool.state.name,
-            color = when (tool.state) {
-                RunToolState.Running -> semanticColors.active
-                RunToolState.Completed -> semanticColors.completed
-            },
-            style = MaterialTheme.typography.labelMedium,
-        )
+        if (hasDetail) {
+            Icon(
+                if (detailExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

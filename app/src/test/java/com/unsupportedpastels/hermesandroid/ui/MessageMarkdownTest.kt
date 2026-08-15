@@ -9,6 +9,29 @@ import org.junit.Test
 
 class MessageMarkdownTest {
     @Test
+    fun stablePrefixEndsAtLastBlankLineOutsideCodeFence() {
+        val text = "First paragraph.\n\nSecond paragraph still stream"
+        assertEquals("First paragraph.\n\n".length, stableMarkdownPrefixLength(text))
+    }
+
+    @Test
+    fun stablePrefixIsZeroInsideUnclosedCodeFence() {
+        val text = "```python\nprint('partial')\n\n**unclosed"
+        assertEquals(0, stableMarkdownPrefixLength(text))
+    }
+
+    @Test
+    fun stablePrefixIgnoresBlankLinesInsideFenceButAdvancesAfterItCloses() {
+        val text = "Intro.\n\n```sh\nls\n\npwd\n```\n\ntail text"
+        assertEquals(text.length - "tail text".length, stableMarkdownPrefixLength(text))
+    }
+
+    @Test
+    fun stablePrefixIsZeroWithoutAnyBlankLine() {
+        assertEquals(0, stableMarkdownPrefixLength("single still-streaming paragraph"))
+    }
+
+    @Test
     fun parsesHttpsMediaDirectiveAsImageBlockInsteadOfRawText() {
         val url = "https://cdn.example/generated.png"
 

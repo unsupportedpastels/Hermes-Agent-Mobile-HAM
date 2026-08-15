@@ -219,7 +219,7 @@ data class ModelSwitchResult(
     val confirmationMessage: String? = null,
 )
 
-private val ValidReasoningEfforts = setOf(
+val ValidReasoningEfforts = setOf(
     "none",
     "minimal",
     "low",

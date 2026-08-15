@@ -151,7 +151,7 @@ class HermesAppTest {
         val composerAncestor = hasAnyAncestor(hasTestTag("Message composer"))
         composeRule.onNodeWithContentDescription("Attach files").assert(composerAncestor)
         composeRule.onNode(hasSetTextAction().and(composerAncestor)).assertIsDisplayed()
-        composeRule.onNodeWithText("Send").assert(composerAncestor)
+        composeRule.onNodeWithContentDescription("Send message").assert(composerAncestor)
     }
 
     @Test
@@ -178,7 +178,7 @@ class HermesAppTest {
 
         val composerAncestor = hasAnyAncestor(hasTestTag("Message composer"))
         composeRule.onNodeWithText("Stop").assert(composerAncestor)
-        composeRule.onNodeWithText("Send").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Send message").assertDoesNotExist()
     }
 
     @Test
@@ -240,7 +240,7 @@ class HermesAppTest {
         }
 
         composeRule.onNode(hasSetTextAction()).performTextInput("/model")
-        composeRule.onNodeWithText("Send").performClick()
+        composeRule.onNodeWithContentDescription("Send message").performClick()
 
         assertEquals(sessionId, opened)
         assertEquals(null, sent)
@@ -268,7 +268,7 @@ class HermesAppTest {
         }
 
         composeRule.onNode(hasSetTextAction()).performTextInput("/reasoning medium")
-        composeRule.onNodeWithText("Send").performClick()
+        composeRule.onNodeWithContentDescription("Send message").performClick()
 
         assertEquals(sessionId to "medium", selected)
         assertEquals(null, sent)
@@ -297,8 +297,8 @@ class HermesAppTest {
             }
         }
 
-        val runtimeLabel = "openai-codex · gpt-5.6-sol · reasoning medium"
-        composeRule.onNodeWithText(runtimeLabel).assertIsDisplayed()
+        composeRule.onNodeWithText("gpt-5.6-sol").assertIsDisplayed()
+        composeRule.onNodeWithText("medium").assertIsDisplayed()
 
         composeRule.runOnIdle {
             snapshot = snapshot.copy(
@@ -310,7 +310,8 @@ class HermesAppTest {
             )
         }
 
-        composeRule.onNodeWithText(runtimeLabel).assertIsDisplayed()
+        composeRule.onNodeWithText("gpt-5.6-sol").assertIsDisplayed()
+        composeRule.onNodeWithText("medium").assertIsDisplayed()
     }
 
     @Test
@@ -787,7 +788,7 @@ class HermesAppTest {
             .assertIsDisplayed()
 
         composeRule.onNodeWithText("Status session").performClick()
-        composeRule.onNodeWithText("Back").performClick()
+        composeRule.onNodeWithContentDescription("Back").performClick()
         composeRule.onAllNodesWithContentDescription("Status session completed; unread")
             .assertCountEquals(0)
     }
@@ -1038,9 +1039,9 @@ class HermesAppTest {
         composeRule.onNodeWithText("First session").performClick()
         composeRule.onNodeWithContentDescription("Current status: working — Gathering context")
             .assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("2 actions, running, collapsed").performClick()
         composeRule.onNodeWithContentDescription("Running tool read_file: src/main.kt")
             .assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("1 completed tool, collapsed").performClick()
         composeRule.onNodeWithContentDescription("Completed tool shell: Listed project files")
             .performScrollTo()
             .assertIsDisplayed()
@@ -1114,13 +1115,13 @@ class HermesAppTest {
         composeRule.onNodeWithText("First session").performClick()
         composeRule.onNodeWithText("working").assertIsDisplayed()
         composeRule.onNodeWithText("Gathering context").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("2 actions, running, collapsed").performClick()
         composeRule.onNodeWithText("read_file").assertIsDisplayed()
         composeRule.onNodeWithText("src/main.kt").assertIsDisplayed()
-        composeRule.onNodeWithText("Running").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("1 completed tool, collapsed").performClick()
+        composeRule.onNodeWithContentDescription("Running").assertIsDisplayed()
         composeRule.onNodeWithText("shell").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Listed project files").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Completed").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Completed").performScrollTo().assertIsDisplayed()
         composeRule.onAllNodesWithText("arguments").assertCountEquals(0)
         composeRule.onAllNodesWithText("results").assertCountEquals(0)
         composeRule.onAllNodesWithText("duration").assertCountEquals(0)
@@ -1170,14 +1171,14 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithContentDescription("2 completed tools, collapsed")
+        composeRule.onNodeWithContentDescription("2 actions, completed, collapsed")
             .assertIsDisplayed()
         composeRule.onAllNodesWithText("search_files").assertCountEquals(0)
         composeRule.onAllNodesWithText("read_file").assertCountEquals(0)
 
-        composeRule.onNodeWithContentDescription("2 completed tools, collapsed").performClick()
+        composeRule.onNodeWithContentDescription("2 actions, completed, collapsed").performClick()
 
-        composeRule.onNodeWithContentDescription("2 completed tools, expanded")
+        composeRule.onNodeWithContentDescription("2 actions, completed, expanded")
             .assertIsDisplayed()
         composeRule.onNodeWithContentDescription(
             "Completed tool search_files: Found the relevant plan section",
@@ -1226,13 +1227,13 @@ class HermesAppTest {
             .fetchSemanticsNode()
             .boundsInRoot
             .top
-        val completedSummaryTop = composeRule.onNodeWithContentDescription("1 completed tool, collapsed")
+        val completedSummaryTop = composeRule.onNodeWithContentDescription("1 action, completed, collapsed")
             .fetchSemanticsNode()
             .boundsInRoot
             .top
 
         assertTrue(transcriptTop < completedSummaryTop)
-        composeRule.onNodeWithContentDescription("1 completed tool, collapsed")
+        composeRule.onNodeWithContentDescription("1 action, completed, collapsed")
             .assert(hasAnyAncestor(hasTestTag("Session timeline")))
     }
 
@@ -1263,14 +1264,14 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithContentDescription("1 completed tool, collapsed").performClick()
+        composeRule.onNodeWithContentDescription("1 action, completed, collapsed").performClick()
         composeRule.onNodeWithContentDescription("Completed tool read_file: Read the file")
             .assertIsDisplayed()
 
         restorationTester.emulateSavedInstanceStateRestore()
 
-        composeRule.onNodeWithContentDescription("1 completed tool, collapsed").assertIsDisplayed()
-        composeRule.onAllNodesWithText("read_file").assertCountEquals(0)
+        composeRule.onNodeWithContentDescription("1 action, completed, collapsed").assertIsDisplayed()
+        composeRule.onAllNodesWithText("Read the file").assertCountEquals(0)
     }
 
     @Test
@@ -1410,7 +1411,7 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("First session").performClick()
-        composeRule.onNodeWithText("Description preview: Allow this action?").assertIsDisplayed()
+        composeRule.onNodeWithText("Allow this action?").assertIsDisplayed()
         composeRule.onNodeWithText("deny").performClick()
 
         assertEquals(Triple(sessionId, "deny", false), response)
@@ -1689,7 +1690,7 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithText("Show thinking").performClick()
+        composeRule.onNodeWithContentDescription("Show thinking").performClick()
         composeRule.onNodeWithText("Reasoning details").assertIsDisplayed()
         composeRule.runOnIdle {
             snapshot = snapshot.copy(
@@ -1708,7 +1709,7 @@ class HermesAppTest {
             )
         }
 
-        composeRule.onNodeWithText("Hide thinking").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Hide thinking").assertIsDisplayed()
         composeRule.onNodeWithText("Reasoning details grew").assertIsDisplayed()
     }
 
@@ -1739,13 +1740,13 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("Agent workspace").assertIsDisplayed()
         composeRule.onNodeWithText("First session").performClick()
-        composeRule.onNodeWithText("Back").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Back").assertIsDisplayed()
         composeRule.onNodeWithText("Earlier question").assertIsDisplayed()
         composeRule.onNodeWithText("Earlier answer").assertIsDisplayed()
         composeRule.waitForIdle()
         assertEquals(sessions.first().id, opened)
         composeRule.onNode(hasSetTextAction()).performTextInput("New question")
-        composeRule.onNodeWithText("Send").performClick()
+        composeRule.onNodeWithContentDescription("Send message").performClick()
         assertEquals(sessions.first().id to "New question", sent)
     }
 
@@ -1813,7 +1814,7 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("First session").performClick()
         composeRule.onNode(hasSetTextAction()).performTextInput("Accepted question")
-        composeRule.onNodeWithText("Send").performClick()
+        composeRule.onNodeWithContentDescription("Send message").performClick()
 
         val inputText = composeRule.onNode(
             SemanticsMatcher.keyIsDefined(SemanticsProperties.InputText),
@@ -1853,10 +1854,11 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("Initial workspace").assertIsDisplayed()
-        composeRule.onNodeWithText("Workspace: /workspace/alpha").assertIsDisplayed()
         composeRule.onNodeWithText("The selected workspace is ready.").assertIsDisplayed()
         composeRule.waitForIdle()
         assertEquals(session.id, opened)
+        composeRule.onNodeWithContentDescription("Open session details").performClick()
+        composeRule.onNodeWithText("Workspace: /workspace/alpha").assertIsDisplayed()
     }
 
     @Test
@@ -1918,12 +1920,12 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("First session").performClick()
-        composeRule.onNodeWithText("Send").performClick()
+        composeRule.onNodeWithContentDescription("Send message").performClick()
         assertEquals(sessionId to "", sent)
 
         composeRule.runOnIdle { isSending = true }
         composeRule.onNodeWithContentDescription("Attach files").assertIsNotEnabled()
-        composeRule.onNodeWithText("Send").assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("Send message").assertIsNotEnabled()
     }
 
     @Test
@@ -1955,7 +1957,7 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("First session").performClick()
         composeRule.onNode(hasSetTextAction()).performTextInput("Keep this draft")
-        composeRule.onNodeWithText("Send").performClick()
+        composeRule.onNodeWithContentDescription("Send message").performClick()
         composeRule.onNodeWithText("prompt rejected").assertIsDisplayed()
         val inputText = composeRule.onNode(hasSetTextAction())
             .fetchSemanticsNode().config[SemanticsProperties.InputText].text
@@ -2005,7 +2007,7 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("First session").performClick()
         composeRule.onNode(hasSetTextAction()).performTextInput("Question")
-        composeRule.onNodeWithText("Send").assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("Send message").assertIsNotEnabled()
     }
 
     @Test
@@ -2241,7 +2243,7 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("New task").performClick()
         composeRule.onNode(hasSetTextAction()).performTextInput("Unscoped task")
-        composeRule.onNodeWithText("Send").performClick()
+        composeRule.onNodeWithContentDescription("Send message").performClick()
 
         assertTrue(created)
         assertEquals(draft.id to "Unscoped task", sent)
@@ -2319,11 +2321,12 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("Project Alpha").performClick()
         composeRule.onNodeWithText("Valid task").performClick()
-        composeRule.onNodeWithText("Workspace: /workspace/alpha").assertIsDisplayed()
         composeRule.onNode(hasSetTextAction()).performTextInput("Start valid task")
-        composeRule.onNodeWithText("Send").performClick()
+        composeRule.onNodeWithContentDescription("Send message").performClick()
 
         assertEquals(draft.id to "Start valid task", sent)
+        composeRule.onNodeWithContentDescription("Open session details").performClick()
+        composeRule.onNodeWithText("Workspace: /workspace/alpha").assertIsDisplayed()
     }
 
     @Test
@@ -2355,7 +2358,7 @@ class HermesAppTest {
         composeRule.onNodeWithText("Needs workspace").performClick()
         composeRule.onNodeWithText("No workspace").assertIsDisplayed()
         composeRule.onNode(hasSetTextAction()).performTextInput("Keep editing")
-        composeRule.onNodeWithText("Send").assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("Send message").assertIsNotEnabled()
     }
 
     @Test
@@ -2505,7 +2508,7 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("Project Alpha").performClick()
         composeRule.onNodeWithText("Project session").performClick()
-        composeRule.onNodeWithText("Back").performClick()
+        composeRule.onNodeWithContentDescription("Back").performClick()
         composeRule.onAllNodesWithText("Project Alpha").assertCountEquals(2)
         composeRule.onNodeWithText("Back").performClick()
         composeRule.onNodeWithText("Recent Sessions").assertIsDisplayed()

@@ -84,8 +84,9 @@ class SessionInsightsUiTest {
             }
         }
 
+        // The top-bar context ring triggers one insights load when the chat opens.
         composeRule.runOnIdle {
-            assertEquals(emptyList<DurableSessionId>(), insightLoads)
+            assertEquals(listOf(sessionId), insightLoads)
         }
         composeRule.onNodeWithContentDescription("Open session details").performClick()
         composeRule.onNodeWithText("Session details").assertIsDisplayed()
@@ -103,7 +104,7 @@ class SessionInsightsUiTest {
         composeRule.onNodeWithText("Refresh").performClick()
 
         composeRule.runOnIdle {
-            assertEquals(listOf(sessionId, sessionId), insightLoads)
+            assertEquals(listOf(sessionId, sessionId, sessionId), insightLoads)
         }
     }
 
