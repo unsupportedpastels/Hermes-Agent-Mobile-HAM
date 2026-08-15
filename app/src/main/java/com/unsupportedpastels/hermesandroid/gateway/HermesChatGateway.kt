@@ -24,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
@@ -467,8 +468,11 @@ interface HermesChatSession {
         text: String,
     ): SubagentSteerResult = throw HermesChatMethodNotFoundException("subagent.steer")
 
-    /** Read-only monitor; include_disabled is intentionally true so paused jobs are visible. */
-    suspend fun loadScheduledJobs(): List<ScheduledJob> =
+    /** include_disabled is intentionally true so paused jobs are visible. */
+    suspend fun loadCronJobs(): List<CronJob> =
+        throw HermesChatMethodNotFoundException("cron.manage")
+
+    suspend fun manageCronJob(jobId: String, action: CronJobAction): Unit =
         throw HermesChatMethodNotFoundException("cron.manage")
 
     suspend fun respondToClarification(
@@ -616,7 +620,14 @@ class HermesChatConnection internal constructor(
     private val pendingRequestMethods = ConcurrentHashMap<Long, String>()
     private val interactionLock = Any()
     private val pendingApprovals = HashMap<String, ArrayDeque<PendingApproval>>()
-    private val eventChannel = Channel<HermesChatEvent>(capacity = MAX_EVENT_BUFFER)
+    // DROP_OLDEST: a slow Main-thread collector (fold/unfold recomposition jank
+    // during a fast delta stream) must degrade to lost intermediate deltas, not a
+    // torn-down connection. Terminal events arrive last, so they are the least
+    // likely to be dropped, and resume reconciliation restores authoritative state.
+    private val eventChannel = Channel<HermesChatEvent>(
+        capacity = MAX_EVENT_BUFFER,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     private val connectionJob = SupervisorJob(parentScope.coroutineContext[Job])
     private val connectionScope = CoroutineScope(parentScope.coroutineContext + connectionJob)
     private val readerJob: Job = connectionScope.launch { readLoop() }
@@ -777,12 +788,20 @@ class HermesChatConnection internal constructor(
         return SubagentSteerResult(status, result.stringValue("text")?.take(HERMES_CHAT_MAX_EVENT_TEXT_CHARS))
     }
 
-    override suspend fun loadScheduledJobs(): List<ScheduledJob> {
+    override suspend fun loadCronJobs(): List<CronJob> {
         val result = request("cron.manage", buildJsonObject {
             put("action", "list")
             put("include_disabled", true)
         })
-        return parseScheduledJobs(result)
+        return parseCronJobs(result)
+    }
+
+    override suspend fun manageCronJob(jobId: String, action: CronJobAction) {
+        // The gateway resolves jobs by ID or name through the `name` param.
+        request("cron.manage", buildJsonObject {
+            put("action", action.wireValue)
+            put("name", boundedRpcInput(jobId, HERMES_CHAT_MAX_EVENT_ID_CHARS, "cron job ID"))
+        })
     }
 
     private fun sessionParams(runtimeSessionId: RuntimeSessionId): JsonObject = buildJsonObject {
@@ -1097,6 +1116,10 @@ class HermesChatConnection internal constructor(
         val message = try {
             json.parseToJsonElement(frame).jsonObject
         } catch (error: Exception) {
+            // A syntactically malformed frame could be the only response to an
+            // outstanding RPC. Fail the connection so pending callers cannot wait
+            // forever; forward compatibility is handled by ignoring unknown,
+            // well-formed event types below.
             throw HermesChatProtocolException("Hermes chat frame was invalid", error)
         }
         if (message.stringValue("jsonrpc") != "2.0") return
@@ -1368,9 +1391,9 @@ class HermesChatConnection internal constructor(
 
             else -> null
         }
-        if (event != null && eventChannel.trySend(event).isFailure) {
-            throw HermesChatTransportException("Hermes chat event buffer exceeded")
-        }
+        // With DROP_OLDEST the send only fails once the channel is closed, which
+        // teardown already handles; a full buffer silently sheds the oldest event.
+        if (event != null) eventChannel.trySend(event)
     }
 
     private fun parseResumeResult(

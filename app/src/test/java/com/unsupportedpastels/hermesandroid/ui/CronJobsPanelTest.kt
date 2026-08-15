@@ -1,6 +1,10 @@
 package com.unsupportedpastels.hermesandroid.ui
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
 
 import androidx.compose.ui.test.assertIsDisplayed
@@ -11,8 +15,9 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.runtime.mutableStateOf
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJob
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJobsState
+import com.unsupportedpastels.hermesandroid.gateway.CronJob
+import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
+import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
@@ -24,16 +29,17 @@ import org.robolectric.annotation.Config
 
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [35])
-class ScheduledJobsPanelTest {
+class CronJobsPanelTest {
     @get:Rule
     val composeRule = createComposeRule()
 
     @Test
-    fun readyStateDisplaysEnabledAndPausedJobsAndOnlyRefreshIsActionable() {
+    fun readyStateDisplaysJobsAndDispatchesLifecycleActions() {
         var refreshCount = 0
-        val state = ScheduledJobsState.Ready(
+        val actions = mutableListOf<Pair<String, CronJobAction>>()
+        val state = CronJobsState.Ready(
             jobs = listOf(
-                ScheduledJob(
+                CronJob(
                     jobId = "morning-brief",
                     name = "Morning brief",
                     schedule = "0 8 * * *",
@@ -43,7 +49,7 @@ class ScheduledJobsPanelTest {
                     lastRunAt = "2026-08-14T08:00:00Z",
                     lastStatus = "success",
                 ),
-                ScheduledJob(
+                CronJob(
                     jobId = "price-watch",
                     name = "Price watch",
                     schedule = "every 2h",
@@ -57,14 +63,19 @@ class ScheduledJobsPanelTest {
 
         composeRule.setContent {
             MaterialTheme {
-                ScheduledJobsPanel(
-                    state = state,
-                    onRefresh = { refreshCount += 1 },
-                )
+                // The panel no longer scrolls internally; the caller owns scrolling, as
+                // ServerSettingsScreen does.
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    CronJobsPanel(
+                        state = state,
+                        onRefresh = { refreshCount += 1 },
+                        onJobAction = { jobId, action -> actions += jobId to action },
+                    )
+                }
             }
         }
 
-        composeRule.onNodeWithText("Scheduled jobs").assertIsDisplayed()
+        composeRule.onNodeWithText("Cron jobs").assertIsDisplayed()
         composeRule.onNodeWithText("Morning brief").assertIsDisplayed()
         composeRule.onNodeWithText("0 8 * * *").assertIsDisplayed()
         composeRule.onNodeWithText("Status: Enabled").assertIsDisplayed()
@@ -81,41 +92,80 @@ class ScheduledJobsPanelTest {
         composeRule.onNodeWithText("State: paused").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Last status: skipped").performScrollTo().assertIsDisplayed()
 
-        listOf("Create", "Edit", "Delete", "Enable", "Disable", "Toggle").forEach { forbiddenLabel ->
+        // The enabled job offers Disable; the paused job offers Enable.
+        composeRule.onNodeWithText("Disable").performScrollTo().performClick()
+        composeRule.onNodeWithText("Enable").performScrollTo().performClick()
+        composeRule.runOnIdle {
+            assertEquals(
+                listOf(
+                    "morning-brief" to CronJobAction.Disable,
+                    "price-watch" to CronJobAction.Enable,
+                ),
+                actions,
+            )
+        }
+
+        // Nothing beyond the gateway's pause/resume support is offered.
+        listOf("Create", "Edit", "Delete", "Run now", "Stop").forEach { forbiddenLabel ->
             composeRule.onAllNodesWithText(forbiddenLabel, useUnmergedTree = true).assertCountEquals(0)
         }
     }
 
     @Test
+    fun inFlightActionDisablesJobControlsAndSurfacesErrors() {
+        var actionCount = 0
+        val job = CronJob("job-1", "Nightly monitor", "0 2 * * *", enabled = true)
+
+        composeRule.setContent {
+            MaterialTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    CronJobsPanel(
+                        state = CronJobsState.Ready(listOf(job)),
+                        onRefresh = {},
+                        actionJobId = "job-1",
+                        actionError = "Could not disable the job",
+                        onJobAction = { _, _ -> actionCount += 1 },
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("Could not disable the job").assertIsDisplayed()
+        composeRule.onNodeWithText("Working…").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Disable").performScrollTo().performClick()
+        composeRule.runOnIdle { assertEquals(0, actionCount) }
+    }
+
+    @Test
     fun idleLoadingUnsupportedAndErrorStatesRemainRefreshableAndVisible() {
-        val state = mutableStateOf<ScheduledJobsState>(ScheduledJobsState.Idle)
+        val state = mutableStateOf<CronJobsState>(CronJobsState.Idle)
         var refreshCount = 0
 
         composeRule.setContent {
             MaterialTheme {
-                ScheduledJobsPanel(
+                CronJobsPanel(
                     state = state.value,
                     onRefresh = { refreshCount += 1 },
                 )
             }
         }
 
-        composeRule.onNodeWithText("No scheduled jobs loaded yet.").assertIsDisplayed()
+        composeRule.onNodeWithText("No cron jobs loaded yet.").assertIsDisplayed()
 
-        composeRule.runOnIdle { state.value = ScheduledJobsState.Loading }
-        composeRule.onNodeWithText("Loading scheduled jobs").assertIsDisplayed()
+        composeRule.runOnIdle { state.value = CronJobsState.Loading }
+        composeRule.onNodeWithText("Loading cron jobs").assertIsDisplayed()
 
-        composeRule.runOnIdle { state.value = ScheduledJobsState.Unsupported }
-        composeRule.onNodeWithText("Scheduled jobs are not supported by this server.").assertIsDisplayed()
+        composeRule.runOnIdle { state.value = CronJobsState.Unsupported }
+        composeRule.onNodeWithText("Cron jobs are not supported by this server.").assertIsDisplayed()
 
-        composeRule.runOnIdle { state.value = ScheduledJobsState.Error("Could not reach the server") }
+        composeRule.runOnIdle { state.value = CronJobsState.Error("Could not reach the server") }
         composeRule.onNodeWithText("Could not reach the server").assertIsDisplayed()
         composeRule.onNodeWithText("Refresh").performClick()
         composeRule.runOnIdle { assertEquals(1, refreshCount) }
     }
 
     @Test
-    fun authenticatedServerSettingsHostsReadOnlyMonitorAndRefreshes() {
+    fun authenticatedServerSettingsHostsCronJobsPanelAndRefreshes() {
         var refreshCount = 0
         composeRule.setContent {
             MaterialTheme {
@@ -123,14 +173,14 @@ class ScheduledJobsPanelTest {
                     serverOrigin = ServerOrigin.parse("https://hermes.example"),
                     snapshot = HermesGatewaySnapshot(
                         authenticationState = AuthenticationState.Authenticated,
-                        scheduledJobsState = ScheduledJobsState.Ready(
-                            listOf(ScheduledJob("job-1", "Nightly monitor", "0 2 * * *", enabled = false)),
+                        cronJobsState = CronJobsState.Ready(
+                            listOf(CronJob("job-1", "Nightly monitor", "0 2 * * *", enabled = false)),
                         ),
                     ),
                     showBack = true,
                     onBack = {},
                     onSave = { Result.success(Unit) },
-                    onRefreshScheduledJobs = { refreshCount += 1 },
+                    onRefreshCronJobs = { refreshCount += 1 },
                 )
             }
         }

@@ -155,12 +155,37 @@ class HermesHamGatewayTest {
         }
         val connection = newHamConnection(socket)
 
-        val jobs = connection.loadScheduledJobs()
+        val jobs = connection.loadCronJobs()
 
-        assertEquals(listOf("job-1", "job-2"), jobs.map(ScheduledJob::jobId))
+        assertEquals(listOf("job-1", "job-2"), jobs.map(CronJob::jobId))
         assertEquals("Nightly", jobs[0].name)
         assertEquals(512, jobs[1].name.length)
         assertEquals("123", jobs[1].nextRunAt)
+        connection.close()
+    }
+
+    @Test
+    fun cronManageMapsLifecycleActionsToServerVerbsWithJobName() = runTest {
+        val socket = HamSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            assertEquals("cron.manage", request["method"]!!.jsonPrimitive.content)
+            socket.offer("""{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{"success":true}}""")
+        }
+        val connection = newHamConnection(socket)
+
+        connection.manageCronJob("job-1", CronJobAction.Enable)
+        connection.manageCronJob("job-2", CronJobAction.Disable)
+
+        val params = socket.sentFrames.map { Json.parseToJsonElement(it).jsonObject["params"]!!.jsonObject }
+        assertEquals(
+            listOf("resume", "pause"),
+            params.map { it["action"]!!.jsonPrimitive.content },
+        )
+        assertEquals(
+            listOf("job-1", "job-2"),
+            params.map { it["name"]!!.jsonPrimitive.content },
+        )
         connection.close()
     }
 

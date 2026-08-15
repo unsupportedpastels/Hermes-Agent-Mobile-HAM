@@ -5,13 +5,9 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,7 +23,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -575,9 +573,15 @@ private fun utf16SafeEnd(text: String, requestedCharacters: Int): Int {
     return end
 }
 
+private val MarkdownTableCellMinWidth = 96.dp
+private val MarkdownTableCellMaxWidth = 240.dp
+
 @Composable
 private fun MarkdownTable(block: MarkdownTableBlock) {
     val scrollState = rememberScrollState()
+    val columnCount = maxOf(block.header.size, block.rows.maxOfOrNull { it.size } ?: 0)
+    if (columnCount == 0) return
+    val rows = listOf(block.header) + block.rows
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -587,68 +591,105 @@ private fun MarkdownTable(block: MarkdownTableBlock) {
                     "Markdown table, ${block.header.size} columns, ${block.rows.size} rows"
             },
     ) {
-        Column(
+        // Sizes each column to its widest cell (clamped) so columns stay aligned across rows
+        // while still adapting to content and font scale.
+        Layout(
+            content = {
+                rows.forEachIndexed { rowIndex, cells ->
+                    repeat(columnCount) { column ->
+                        MarkdownTableCellText(
+                            cell = cells.getOrNull(column),
+                            header = rowIndex == 0,
+                            alignment = block.alignments.getOrElse(column) {
+                                MarkdownTableAlignment.Start
+                            },
+                        )
+                    }
+                }
+            },
             modifier = Modifier.background(
                 MaterialTheme.colorScheme.outlineVariant,
                 RoundedCornerShape(8.dp),
             ),
-            verticalArrangement = Arrangement.spacedBy(1.dp),
-        ) {
-            MarkdownTableRow(
-                cells = block.header,
-                alignments = block.alignments,
-                header = true,
-            )
-            block.rows.forEach { row ->
-                MarkdownTableRow(
-                    cells = row,
-                    alignments = block.alignments,
-                    header = false,
+        ) { measurables, _ ->
+            val spacing = 1.dp.roundToPx()
+            val minCellWidth = MarkdownTableCellMinWidth.roundToPx()
+            val maxCellWidth = MarkdownTableCellMaxWidth.roundToPx()
+            val rowCount = rows.size
+            val columnWidths = IntArray(columnCount)
+            measurables.forEachIndexed { index, measurable ->
+                val column = index % columnCount
+                columnWidths[column] = maxOf(
+                    columnWidths[column],
+                    measurable.maxIntrinsicWidth(Constraints.Infinity)
+                        .coerceIn(minCellWidth, maxCellWidth),
                 )
+            }
+            val rowHeights = IntArray(rowCount)
+            measurables.forEachIndexed { index, measurable ->
+                val row = index / columnCount
+                rowHeights[row] = maxOf(
+                    rowHeights[row],
+                    measurable.minIntrinsicHeight(columnWidths[index % columnCount]),
+                )
+            }
+            val placeables = measurables.mapIndexed { index, measurable ->
+                measurable.measure(
+                    Constraints.fixed(
+                        columnWidths[index % columnCount],
+                        rowHeights[index / columnCount],
+                    ),
+                )
+            }
+            val tableWidth = columnWidths.sum() + spacing * (columnCount - 1)
+            val tableHeight = rowHeights.sum() + spacing * (rowCount - 1)
+            layout(tableWidth, tableHeight) {
+                var y = 0
+                var index = 0
+                repeat(rowCount) { row ->
+                    var x = 0
+                    repeat(columnCount) { column ->
+                        placeables[index].place(x, y)
+                        x += columnWidths[column] + spacing
+                        index++
+                    }
+                    y += rowHeights[row] + spacing
+                }
             }
         }
     }
 }
 
 @Composable
-private fun MarkdownTableRow(
-    cells: List<MarkdownTableCell>,
-    alignments: List<MarkdownTableAlignment>,
+private fun MarkdownTableCellText(
+    cell: MarkdownTableCell?,
     header: Boolean,
+    alignment: MarkdownTableAlignment,
 ) {
-    Row(
-        modifier = Modifier.height(IntrinsicSize.Min),
-        horizontalArrangement = Arrangement.spacedBy(1.dp),
-    ) {
-        cells.forEachIndexed { column, cell ->
-            Text(
-                text = annotatedMarkdown(cell.inlines),
-                modifier = Modifier
-                    .width(176.dp)
-                    .fillMaxHeight()
-                    .background(
-                        if (header) {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        } else {
-                            MaterialTheme.colorScheme.surface
-                        },
-                    )
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                color = if (header) {
-                    MaterialTheme.colorScheme.onSurfaceVariant
+    Text(
+        text = cell?.let { annotatedMarkdown(it.inlines) } ?: AnnotatedString(""),
+        modifier = Modifier
+            .background(
+                if (header) {
+                    MaterialTheme.colorScheme.surfaceVariant
                 } else {
-                    MaterialTheme.colorScheme.onSurface
-                },
-                fontWeight = if (header) FontWeight.SemiBold else null,
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = when (alignments.getOrElse(column) { MarkdownTableAlignment.Start }) {
-                    MarkdownTableAlignment.Start -> TextAlign.Start
-                    MarkdownTableAlignment.Center -> TextAlign.Center
-                    MarkdownTableAlignment.End -> TextAlign.End
+                    MaterialTheme.colorScheme.surface
                 },
             )
-        }
-    }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        color = if (header) {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        } else {
+            MaterialTheme.colorScheme.onSurface
+        },
+        fontWeight = if (header) FontWeight.SemiBold else null,
+        style = MaterialTheme.typography.bodyMedium,
+        textAlign = when (alignment) {
+            MarkdownTableAlignment.Start -> TextAlign.Start
+            MarkdownTableAlignment.Center -> TextAlign.Center
+            MarkdownTableAlignment.End -> TextAlign.End
+        },
+    )
 }
 
 @Composable

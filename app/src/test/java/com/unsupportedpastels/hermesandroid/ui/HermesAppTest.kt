@@ -25,6 +25,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeRight
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.text.LinkAnnotation
@@ -91,6 +92,21 @@ class HermesAppTest {
         connectionState = ConnectionState.Connected,
         durableSessions = sessions,
     )
+
+    @Test
+    fun completedSwipeOpensDeleteConfirmationAfterPointerRelease() {
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(snapshot = connectedSnapshot)
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performTouchInput {
+            swipeRight(durationMillis = 300)
+        }
+
+        composeRule.onNodeWithText("Delete session?").assertIsDisplayed()
+    }
 
     @Test
     fun homeShowsOnlyAuthoritativeRunningSubagents() {

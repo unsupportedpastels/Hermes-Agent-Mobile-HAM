@@ -49,13 +49,13 @@ class HermesTurnNotificationServiceTest {
         })
         waitForNotificationText("Hermes is working in 2 sessions")
 
-        context.startService(Intent(context, HermesTurnNotificationService::class.java).apply {
-            action = HermesTurnNotificationService.ACTION_COMPLETE
-            putExtra(HermesTurnNotificationService.EXTRA_SESSION_ID, "session-a")
-            putExtra(HermesTurnNotificationService.EXTRA_TITLE, "Session A")
-            putExtra(HermesTurnNotificationService.EXTRA_TEXT, "# Result\n\n**First session finished.**\nAll checks pass.")
-            putExtra(HermesTurnNotificationService.EXTRA_STATUS, "complete")
-        })
+        SessionNotificationPoster.postCompletion(
+            context,
+            DurableSessionId("session-a"),
+            title = "Session A",
+            text = "# Result\n\n**First session finished.**\nAll checks pass.",
+            status = "complete",
+        )
         waitForNotificationText("First session finished.")
         context.unbindService(connection)
     }

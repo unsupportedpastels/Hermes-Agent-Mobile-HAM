@@ -18,11 +18,14 @@ import com.unsupportedpastels.hermesandroid.app.ProjectSessionsResult
 import com.unsupportedpastels.hermesandroid.app.ProjectTreeResult
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJob
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJobsState
+import com.unsupportedpastels.hermesandroid.gateway.CronJob
+import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
+import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
+import com.unsupportedpastels.hermesandroid.gateway.HermesChatProtocolException
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.DelegatedSubagent
 import com.unsupportedpastels.hermesandroid.app.DelegationStatus
+import com.unsupportedpastels.hermesandroid.app.NO_PROJECT_BUCKET_ID
 import com.unsupportedpastels.hermesandroid.app.ProjectId
 import com.unsupportedpastels.hermesandroid.app.ProjectLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSessionLoadState
@@ -549,6 +552,53 @@ class HermesConnectionViewModelTest {
 
         assertEquals(0, chatConnections)
         assertEquals("No workspace", viewModel.snapshots.value.chatSessions.getValue(draftId).error)
+    }
+
+    @Test
+    fun homeBucketDraftSendsWithoutWorkspaceUsingServerDefaultCwd() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        // The gateway's synthetic no-project bucket ("Home") has no path by design;
+        // drafts in it are created without a cwd and the server applies its default.
+        val projectId = ProjectId(NO_PROJECT_BUCKET_ID)
+        val metadata = MetadataOnlyProjectSession(
+            ProjectTreeResult(
+                projects = listOf(ProjectSummary(projectId, "Home", null, 0, emptyList())),
+            ),
+        )
+        val chatSession = RecordingProjectDraftChatSession()
+        val client = AuthenticatingHermesConnectionClient()
+        var chatConnections = 0
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+            chatConnector = HermesChatConnector { _, _ ->
+                chatConnections += 1
+                chatSession
+            },
+            projectConnector = HermesChatConnector { _, _ -> metadata },
+        )
+
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        val draftId = viewModel.createProjectSession(projectId, "Home task")
+        assertEquals(null, viewModel.snapshots.value.chatSessions[draftId]?.error)
+
+        viewModel.openSession(draftId)
+        viewModel.sendMessage(draftId, "Start at home")
+        advanceUntilIdle()
+
+        assertEquals(1, chatConnections)
+        assertEquals(1, chatSession.createCalls)
+        assertEquals(null, chatSession.createdWorkspacePath)
+        assertEquals(draftId, chatSession.createdForDurableId)
+        assertEquals("Start at home", chatSession.submittedText)
+        assertEquals(null, viewModel.snapshots.value.chatSessions.getValue(draftId).error)
     }
 
     @Test
@@ -1436,18 +1486,18 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
-    fun refreshScheduledJobsPublishesEnabledAndPausedJobsReadOnly() = runTest(dispatcher) {
+    fun refreshCronJobsPublishesEnabledAndPausedJobsReadOnly() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val expected = listOf(
-            ScheduledJob("job-enabled", "Daily brief", "0 8 * * *", enabled = true),
-            ScheduledJob("job-paused", "Price watch", "every 2h", enabled = false),
+            CronJob("job-enabled", "Daily brief", "0 8 * * *", enabled = true),
+            CronJob("job-paused", "Price watch", "every 2h", enabled = false),
         )
         val delegate = MetadataOnlyProjectSession.fromTreeAndSessions(
             ProjectTreeResult(emptyList()),
             CompletableDeferred(),
         )
         val metadata = object : HermesChatSession by delegate {
-            override suspend fun loadScheduledJobs(): List<ScheduledJob> = expected
+            override suspend fun loadCronJobs(): List<CronJob> = expected
         }
         val client = AuthenticatingHermesConnectionClient()
         val viewModel = HermesConnectionViewModel(
@@ -1462,9 +1512,53 @@ class HermesConnectionViewModelTest {
         client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
         advanceUntilIdle()
 
-        viewModel.refreshScheduledJobs().join()
+        viewModel.refreshCronJobs().join()
 
-        assertEquals(ScheduledJobsState.Ready(expected), viewModel.snapshots.value.scheduledJobsState)
+        assertEquals(CronJobsState.Ready(expected), viewModel.snapshots.value.cronJobsState)
+    }
+
+    @Test
+    fun manageCronJobRunsActionThenReloadsJobsAndSurfacesFailures() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val managed = mutableListOf<Pair<String, CronJobAction>>()
+        val jobs = listOf(CronJob("job-1", "Daily brief", "0 8 * * *", enabled = true))
+        val delegate = MetadataOnlyProjectSession.fromTreeAndSessions(
+            ProjectTreeResult(emptyList()),
+            CompletableDeferred(),
+        )
+        val metadata = object : HermesChatSession by delegate {
+            override suspend fun loadCronJobs(): List<CronJob> = jobs
+            override suspend fun manageCronJob(jobId: String, action: CronJobAction) {
+                if (action == CronJobAction.Enable) throw HermesChatProtocolException("job not found")
+                managed += jobId to action
+            }
+        }
+        val client = AuthenticatingHermesConnectionClient()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = FixedTokenStore(),
+            projectConnector = HermesChatConnector { _, _ -> metadata },
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        viewModel.manageCronJob("job-1", CronJobAction.Disable).join()
+        advanceUntilIdle()
+
+        assertEquals(listOf("job-1" to CronJobAction.Disable), managed)
+        assertEquals(null, viewModel.snapshots.value.cronJobActionJobId)
+        assertEquals(null, viewModel.snapshots.value.cronJobActionError)
+        assertEquals(CronJobsState.Ready(jobs), viewModel.snapshots.value.cronJobsState)
+
+        viewModel.manageCronJob("job-1", CronJobAction.Enable).join()
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.snapshots.value.cronJobActionJobId)
+        assertEquals("Could not enable the job", viewModel.snapshots.value.cronJobActionError)
     }
 
     @Test
@@ -1689,6 +1783,95 @@ class HermesConnectionViewModelTest {
             as ProjectSessionLoadState.Loaded
         assertEquals("Session", loaded.sessions.single().title)
         assertEquals(projectId, loaded.sessions.single().projectId)
+    }
+
+    @Test
+    fun concurrentOperationsShareOneTokenRefreshAndNeverBurnRotatedRefreshToken() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val projectId = ProjectId("project-1")
+        var now = 1_900_000_000L
+        var storedTokens = NativeTokenSet(
+            accessToken = "initial-access",
+            refreshToken = "opaque-refresh",
+            expiresAt = 2_000_000_000L,
+            provider = "nous",
+            userId = "user",
+        )
+        val tokenStore = object : NativeTokenStore {
+            override suspend fun load(serverOrigin: ServerOrigin) = storedTokens
+            override suspend fun save(serverOrigin: ServerOrigin, tokens: NativeTokenSet) {
+                storedTokens = tokens
+            }
+            override suspend fun clear(serverOrigin: ServerOrigin) = Unit
+        }
+        // Rotation semantics: each refresh token is single-use; presenting a burned one fails.
+        var currentRefreshToken = "opaque-refresh"
+        var refreshCalls = 0
+        val refreshGate = CompletableDeferred<Unit>()
+        val refreshClient = object : NativeRefreshClient {
+            override suspend fun refresh(
+                serverOrigin: ServerOrigin,
+                refreshToken: String,
+                provider: String,
+            ): NativeTokenSet {
+                refreshCalls += 1
+                if (refreshToken != currentRefreshToken) throw NativeRefreshExpiredException()
+                refreshGate.await()
+                currentRefreshToken = "rotated-refresh"
+                return storedTokens.copy(
+                    accessToken = "refreshed-access",
+                    refreshToken = currentRefreshToken,
+                    expiresAt = 2_100_000_000L,
+                )
+            }
+        }
+        val tree = ProjectTreeResult(
+            projects = listOf(ProjectSummary(projectId, "App", "/workspace/app", 1, emptyList())),
+        )
+        val projectSessions = ProjectSessionsResult(
+            project = tree.projects.single(),
+            sessions = listOf(SessionSummary(DurableSessionId("stored-1"), "Session")),
+        )
+        val client = AuthenticatingHermesConnectionClient()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = tokenStore,
+            refreshClient = refreshClient,
+            projectConnector = HermesChatConnector { _, _ ->
+                object : HermesChatSession by MetadataOnlyProjectSession.fromTreeAndSessions(
+                    tree,
+                    CompletableDeferred(projectSessions),
+                ) {
+                    override suspend fun loadCronJobs(): List<CronJob> = emptyList()
+                }
+            },
+            nowEpochSeconds = { now },
+        )
+
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        now = 2_000_000_000L
+        val openJob = viewModel.openProject(projectId)
+        runCurrent()
+        val jobsJob = viewModel.refreshCronJobs()
+        runCurrent()
+
+        assertEquals(1, refreshCalls)
+        refreshGate.complete(Unit)
+        advanceUntilIdle()
+        openJob.join()
+        jobsJob.join()
+
+        assertEquals(1, refreshCalls)
+        assertEquals(AuthenticationState.Authenticated, viewModel.snapshots.value.authenticationState)
+        assertEquals("refreshed-access", storedTokens.accessToken)
+        assertEquals("rotated-refresh", storedTokens.refreshToken)
     }
 
     @Test

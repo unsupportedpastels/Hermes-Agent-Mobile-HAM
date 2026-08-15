@@ -6,38 +6,41 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJob
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJobsState
+import com.unsupportedpastels.hermesandroid.gateway.CronJob
+import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
+import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
 
 /**
- * Displays the server's scheduled jobs without exposing lifecycle controls.
+ * Displays the server's cron jobs with per-job lifecycle controls
+ * (enable/disable).
  *
- * Insets are intentionally owned by the caller so this surface can be placed in
- * compact or adaptive containers without applying system-bar padding twice.
+ * Scrolling and insets are intentionally owned by the caller so this surface
+ * can sit inside a scrollable settings page without nesting scroll containers.
  */
 @Composable
-fun ScheduledJobsPanel(
-    state: ScheduledJobsState,
+fun CronJobsPanel(
+    state: CronJobsState,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
+    actionJobId: String? = null,
+    actionError: String? = null,
+    onJobAction: (String, CronJobAction) -> Unit = { _, _ -> },
 ) {
     Column(
         modifier = modifier
             .fillMaxWidth()
             .widthIn(max = 720.dp)
-            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -47,44 +50,55 @@ fun ScheduledJobsPanel(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "Scheduled jobs",
+                text = "Cron jobs",
                 style = MaterialTheme.typography.titleLarge,
             )
             Button(
                 onClick = onRefresh,
-                enabled = state !is ScheduledJobsState.Loading,
+                enabled = state !is CronJobsState.Loading,
             ) {
                 Text("Refresh")
             }
         }
 
-        when (state) {
-            ScheduledJobsState.Idle ->
-                Text("No scheduled jobs loaded yet.")
+        actionError?.let { message ->
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
 
-            ScheduledJobsState.Loading -> {
+        when (state) {
+            CronJobsState.Idle ->
+                Text("No cron jobs loaded yet.")
+
+            CronJobsState.Loading -> {
                 CircularProgressIndicator(
                     modifier = Modifier.align(Alignment.CenterHorizontally),
                 )
-                Text("Loading scheduled jobs")
+                Text("Loading cron jobs")
             }
 
-            is ScheduledJobsState.Ready -> {
+            is CronJobsState.Ready -> {
                 if (state.jobs.isEmpty()) {
-                    Text("No scheduled jobs found.")
+                    Text("No cron jobs found.")
                 } else {
                     state.jobs.forEach { job ->
-                        ScheduledJobCard(job)
+                        CronJobCard(
+                            job = job,
+                            actionJobId = actionJobId,
+                            onJobAction = onJobAction,
+                        )
                     }
                 }
             }
 
-            ScheduledJobsState.Unsupported ->
-                Text("Scheduled jobs are not supported by this server.")
+            CronJobsState.Unsupported ->
+                Text("Cron jobs are not supported by this server.")
 
-            is ScheduledJobsState.Error -> {
+            is CronJobsState.Error -> {
                 Text(
-                    text = "Could not load scheduled jobs.",
+                    text = "Could not load cron jobs.",
                     color = MaterialTheme.colorScheme.error,
                 )
                 Text(state.message)
@@ -94,7 +108,11 @@ fun ScheduledJobsPanel(
 }
 
 @Composable
-private fun ScheduledJobCard(job: ScheduledJob) {
+private fun CronJobCard(
+    job: CronJob,
+    actionJobId: String?,
+    onJobAction: (String, CronJobAction) -> Unit,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -118,11 +136,21 @@ private fun ScheduledJobCard(job: ScheduledJob) {
             job.lastStatus.displayValue("Last status")
             job.nextRunAt.displayValue("Next run")
             job.lastRunAt.displayValue("Last run")
+            val toggle = if (job.enabled == false) CronJobAction.Enable else CronJobAction.Disable
+            OutlinedButton(
+                enabled = actionJobId == null,
+                onClick = { onJobAction(job.jobId, toggle) },
+            ) {
+                Text(if (toggle == CronJobAction.Enable) "Enable" else "Disable")
+            }
+            if (actionJobId == job.jobId) {
+                Text("Working…", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
 
-private fun ScheduledJob.displayStatus(): String = when (enabled) {
+private fun CronJob.displayStatus(): String = when (enabled) {
     true -> "Enabled"
     false -> "Paused"
     null -> state?.takeIf(String::isNotBlank)

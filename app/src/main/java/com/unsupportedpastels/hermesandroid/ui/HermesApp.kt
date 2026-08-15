@@ -20,6 +20,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -34,11 +36,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -47,6 +54,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -77,14 +85,21 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.VerticalDragHandle
 import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
+import androidx.compose.material3.adaptive.currentWindowSize
 import androidx.compose.material3.adaptive.layout.PaneExpansionStateKey
 import androidx.compose.material3.adaptive.layout.calculatePaneScaffoldDirective
 import androidx.compose.material3.adaptive.layout.rememberPaneExpansionState
@@ -92,9 +107,11 @@ import androidx.compose.material3.adaptive.navigation3.ListDetailSceneStrategy
 import androidx.compose.material3.adaptive.navigation3.rememberListDetailSceneStrategy
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CreateNewFolder
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -103,17 +120,29 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.testTag
@@ -152,6 +181,7 @@ import com.unsupportedpastels.hermesandroid.app.ProjectSummary
 import com.unsupportedpastels.hermesandroid.app.ProjectId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.app.validHostFolderName
+import com.unsupportedpastels.hermesandroid.app.isNoProjectBucket
 import com.unsupportedpastels.hermesandroid.app.validProjectWorkspacePath
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentPolicy
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
@@ -164,6 +194,7 @@ import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.ContextBreakdownCategory
+import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryListing
 import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
@@ -179,6 +210,7 @@ import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.theme.LocalHermesSemanticColors
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
 import java.util.Locale
 
@@ -200,6 +232,13 @@ private var SemanticsPropertyReceiver.sessionStatusPulseAlpha by SessionStatusPu
 
 private const val SESSION_STATUS_PULSE_MILLIS = 900
 
+/**
+ * Minimum window width for the project dock rail. Sits between the M3 medium and expanded
+ * breakpoints so unfolded foldables (~820dp windows) keep the dock. Compared against the current
+ * window, not the device screen, so split-screen windows below this width hide the dock.
+ */
+private const val PROJECT_DOCK_MIN_WIDTH_DP = 800
+
 internal fun sessionStatusPulseAlphaAt(playTimeMillis: Long): Float {
     val boundedTime = playTimeMillis.coerceAtLeast(0L) % (SESSION_STATUS_PULSE_MILLIS * 2L)
     val phase = if (boundedTime <= SESSION_STATUS_PULSE_MILLIS) {
@@ -211,7 +250,6 @@ internal fun sessionStatusPulseAlphaAt(playTimeMillis: Long): Float {
     return 1f + (0.35f - 1f) * easedPhase
 }
 
-private const val PROJECT_DOCK_MIN_WIDTH_DP = 800
 
 @OptIn(ExperimentalMaterial3AdaptiveApi::class)
 @Composable
@@ -244,7 +282,8 @@ fun HermesApp(
     onCompressSession: (DurableSessionId, String?) -> Unit = { _, _ -> },
     onUndoSession: (DurableSessionId) -> Unit = {},
     onBranchSession: (DurableSessionId, Int?, String?) -> Unit = { _, _, _ -> },
-    onRefreshScheduledJobs: () -> Unit = {},
+    onRefreshCronJobs: () -> Unit = {},
+    onCronJobAction: (String, CronJobAction) -> Unit = { _, _ -> },
     isHomeRefreshing: Boolean = false,
     onRefreshHome: () -> Unit = {},
     onRenameSession: suspend (DurableSessionId, String) -> Result<Unit> = { _, _ -> Result.success(Unit) },
@@ -357,7 +396,8 @@ fun HermesApp(
         windowAdaptiveInfo.windowSizeClass.isWidthAtLeastBreakpoint(
             WIDTH_DP_MEDIUM_LOWER_BOUND,
         )
-    val supportsNavigationRail = LocalConfiguration.current.screenWidthDp >= PROJECT_DOCK_MIN_WIDTH_DP
+    val windowWidthDp = with(LocalDensity.current) { currentWindowSize().width.toDp() }
+    val supportsNavigationRail = windowWidthDp >= PROJECT_DOCK_MIN_WIDTH_DP.dp
     val paneExpansionState = rememberPaneExpansionState(PaneExpansionStateKey.Default)
     LaunchedEffect(projectSessionPaneProportion, supportsListDetail) {
         if (supportsListDetail && projectSessionPaneProportion != null) {
@@ -623,6 +663,7 @@ fun HermesApp(
                             val newSessionId = onCreateProjectSession(project.id)
                             if (newSessionId != null) navigateToSession(newSessionId)
                         },
+                        onDeleteSession = onDeleteSession,
                     )
                 }
             }
@@ -640,6 +681,7 @@ fun HermesApp(
                     }
                     val projectDraftMissingWorkspace = session.isLocalDraft &&
                         session.projectId != null &&
+                        !isNoProjectBucket(session.projectId) &&
                         validProjectWorkspacePath(session.workspacePath) == null
                     val latestUserMessageIndex = chat.messages
                         .indexOfLast { it.role == ChatMessageRole.User }
@@ -759,7 +801,8 @@ fun HermesApp(
                     onSave = onSaveServerOrigin,
                     onLoadManagementSettings = onLoadManagementSettings,
                     onSetProfileDefaultModel = onSetProfileDefaultModel,
-                    onRefreshScheduledJobs = onRefreshScheduledJobs,
+                    onRefreshCronJobs = onRefreshCronJobs,
+                    onCronJobAction = onCronJobAction,
                     onLogout = onLogout,
                 )
             }
@@ -861,6 +904,7 @@ private fun ProjectCreationSheet(
                     .fillMaxHeight()
                     .align(Alignment.Center)
                     .navigationBarsPadding()
+                    .imePadding()
                     .padding(horizontal = 20.dp, vertical = 8.dp)
                     .testTag("Create project sheet"),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1401,6 +1445,7 @@ private fun ProjectIconPickerSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -1586,6 +1631,8 @@ private fun ModelPickerSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -1801,6 +1848,7 @@ private fun SessionListScreen(
     var editingSession by remember { mutableStateOf<SessionSummary?>(null) }
     var deletingSession by remember { mutableStateOf<SessionSummary?>(null) }
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
     val sessionActionScope = rememberCoroutineScope()
     val pinnedOnly = searchQuery.contains("is:pinned", ignoreCase = true)
     val archivedOnly = searchQuery.contains("is:archived", ignoreCase = true)
@@ -1943,6 +1991,7 @@ private fun SessionListScreen(
                 }
             }
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             if (showDockOwnedActions && canStartNewChat) {
                 ExtendedFloatingActionButton(
@@ -2029,9 +2078,47 @@ private fun SessionListScreen(
                 }
             }
         } else {
+            val homeListState = rememberLazyListState()
+            var userHasScrolled by remember { mutableStateOf(false) }
+            val homeScrollObserver = remember {
+                object : NestedScrollConnection {
+                    override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                        if (isUserInitiatedHomeScroll(available, source)) userHasScrolled = true
+                        return Offset.Zero
+                    }
+                }
+            }
+            // Sections load in asynchronously above the initial anchor (projects arrive
+            // after "Recent Sessions"), and keyed LazyColumn items keep the viewport
+            // anchored to the old first item — so pin to the top until the user scrolls.
+            LaunchedEffect(homeListState) {
+                snapshotFlow {
+                    homeListState.firstVisibleItemIndex to homeListState.firstVisibleItemScrollOffset
+                }.collect { (index, offset) ->
+                    val decision = decideHomeListPinning(
+                        userHasScrolled = userHasScrolled,
+                        firstVisibleItemIndex = index,
+                        firstVisibleItemScrollOffset = offset,
+                    )
+                    userHasScrolled = decision.userHasScrolled
+                    if (decision.pinToTop) {
+                        homeListState.scrollToItem(0)
+                    }
+                }
+            }
+            val layoutDirection = LocalLayoutDirection.current
+            val fabClearance = if (showDockOwnedActions && canStartNewChat) 96.dp else 0.dp
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = innerPadding,
+                state = homeListState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .nestedScroll(homeScrollObserver),
+                contentPadding = PaddingValues(
+                    start = innerPadding.calculateStartPadding(layoutDirection),
+                    top = innerPadding.calculateTopPadding(),
+                    end = innerPadding.calculateEndPadding(layoutDirection),
+                    bottom = innerPadding.calculateBottomPadding() + fabClearance,
+                ),
             ) {
                 if (snapshot.delegationStatus.active.isNotEmpty()) {
                     item(key = "running-subagents-heading") {
@@ -2121,18 +2208,19 @@ private fun SessionListScreen(
                         .toSet()
                     items(visibleSessions, key = { "session:${it.id.value}" }) { session ->
                         val isCurrent = session.id in activeControllerSessionIds
-                        RecentSessionHomeRow(
-                            session = session,
-                            current = isCurrent,
-                            onClick = dropUnlessResumed { onSessionSelected(session.id) },
-                            onRename = { editingSession = session },
-                            onPin = { sessionActionScope.launch { onSetSessionPinned(session.id, !session.pinned) } },
-                            onArchive = { sessionActionScope.launch { onSetSessionArchived(session.id, !session.archived) } },
-                            onDelete = { deletingSession = session },
-                        )
-                    }
-                    item(key = "home-bottom-clearance") {
-                        Box(modifier = Modifier.size(104.dp))
+                        SwipeSessionRow(
+                            onDeleteRequest = { deletingSession = session },
+                        ) {
+                            RecentSessionHomeRow(
+                                session = session,
+                                current = isCurrent,
+                                onClick = dropUnlessResumed { onSessionSelected(session.id) },
+                                onRename = { editingSession = session },
+                                onPin = { sessionActionScope.launch { onSetSessionPinned(session.id, !session.pinned) } },
+                                onArchive = { sessionActionScope.launch { onSetSessionArchived(session.id, !session.archived) } },
+                                onDelete = { deletingSession = session },
+                            )
+                        }
                     }
                 }
             }
@@ -2192,17 +2280,150 @@ private fun SessionListScreen(
             dismissButton = { TextButton(onClick = { deletingSession = null }) { Text("Cancel") } },
         )
     }
-    pendingDelete?.let { session ->
-        Snackbar(
-            action = { TextButton(onClick = { pendingDelete = null }) { Text("Undo") } },
-            modifier = Modifier.padding(16.dp),
-        ) { Text("${session.title} will be deleted") }
-        LaunchedEffect(session.id) {
-            delay(5_000)
-            if (pendingDelete?.id == session.id) {
-                onDeleteSession(session.id)
-                pendingDelete = null
+    LaunchedEffect(pendingDelete?.id) {
+        val session = pendingDelete ?: return@LaunchedEffect
+        val result = withTimeoutOrNull(5_000) {
+            snackbarHostState.showSnackbar(
+                message = "${session.title} will be deleted",
+                actionLabel = "Undo",
+                duration = SnackbarDuration.Indefinite,
+            )
+        }
+        if (result == SnackbarResult.ActionPerformed) {
+            pendingDelete = null
+        } else if (pendingDelete?.id == session.id) {
+            onDeleteSession(session.id)
+            pendingDelete = null
+        }
+    }
+}
+
+@Composable
+private fun SwipeSessionRow(
+    onDeleteRequest: () -> Unit,
+    backgroundPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+    backgroundShape: Shape = MaterialTheme.shapes.medium,
+    content: @Composable () -> Unit,
+) {
+    // The state's confirmValueChange lambda is captured once at creation, so
+    // route the callback through rememberUpdatedState to avoid stale captures
+    // when the row recomposes with a fresh SessionSummary.
+    val currentDeleteRequest by rememberUpdatedState(onDeleteRequest)
+    // Resizing the list pane can make swipe anchors coincide and request a
+    // dismissal without input. Track a real pointer transition through the
+    // post-release settlement phase instead of requiring the pointer to remain
+    // pressed while confirmValueChange runs.
+    var pointerPressed by remember { mutableStateOf(false) }
+    var gestureSettlingToDelete by remember { mutableStateOf(false) }
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    val requestDelete = shouldRequestSwipeDelete(
+                        pointerPressed = pointerPressed,
+                        gestureSettlingToDelete = gestureSettlingToDelete,
+                    )
+                    gestureSettlingToDelete = false
+                    if (requestDelete) currentDeleteRequest()
+                    false
+                }
+                SwipeToDismissBoxValue.EndToStart -> false
+                SwipeToDismissBoxValue.Settled -> true
             }
+        },
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromEndToStart = false,
+        backgroundContent = {
+            if (dismissState.dismissDirection == SwipeToDismissBoxValue.StartToEnd) {
+                SwipeActionBackground(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    icon = Icons.Outlined.Delete,
+                    label = "Delete",
+                    alignment = Alignment.CenterStart,
+                    padding = backgroundPadding,
+                    shape = backgroundShape,
+                )
+            }
+        },
+    ) {
+        Box(
+            modifier = Modifier.pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    pointerPressed = true
+                    gestureSettlingToDelete = false
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.changes.none { it.pressed }) break
+                        }
+                    } finally {
+                        pointerPressed = false
+                        gestureSettlingToDelete =
+                            dismissState.targetValue == SwipeToDismissBoxValue.StartToEnd
+                    }
+                }
+            },
+        ) {
+            content()
+        }
+    }
+}
+
+internal data class HomeListPinDecision(
+    val userHasScrolled: Boolean,
+    val pinToTop: Boolean,
+)
+
+internal fun decideHomeListPinning(
+    userHasScrolled: Boolean,
+    firstVisibleItemIndex: Int,
+    firstVisibleItemScrollOffset: Int,
+): HomeListPinDecision {
+    return HomeListPinDecision(
+        userHasScrolled = userHasScrolled,
+        pinToTop = !userHasScrolled &&
+            (firstVisibleItemIndex > 0 || firstVisibleItemScrollOffset > 0),
+    )
+}
+
+internal fun isUserInitiatedHomeScroll(
+    available: Offset,
+    source: NestedScrollSource,
+): Boolean = source == NestedScrollSource.UserInput && available != Offset.Zero
+
+internal fun shouldRequestSwipeDelete(
+    pointerPressed: Boolean,
+    gestureSettlingToDelete: Boolean,
+): Boolean = pointerPressed || gestureSettlingToDelete
+
+@Composable
+private fun SwipeActionBackground(
+    color: androidx.compose.ui.graphics.Color,
+    contentColor: androidx.compose.ui.graphics.Color,
+    icon: ImageVector,
+    label: String,
+    alignment: Alignment,
+    padding: PaddingValues,
+    shape: Shape,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .background(color, shape)
+            .padding(horizontal = 20.dp),
+        contentAlignment = alignment,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, contentDescription = null, tint = contentColor)
+            Text(label, color = contentColor, style = MaterialTheme.typography.labelLarge)
         }
     }
 }
@@ -2408,8 +2629,11 @@ private fun ProjectDetailScreen(
     onBack: () -> Unit,
     onSessionSelected: (DurableSessionId) -> Unit,
     onNewTask: () -> Unit,
+    onDeleteSession: suspend (DurableSessionId) -> Result<Unit>,
 ) {
     val semanticColors = LocalHermesSemanticColors.current
+    var deletingSession by remember { mutableStateOf<SessionSummary?>(null) }
+    val sessionActionScope = rememberCoroutineScope()
     val loadedSessions = when (state) {
         is ProjectSessionLoadState.Loaded ->
             if (sessions.isEmpty()) state.sessions else sessions
@@ -2550,15 +2774,23 @@ private fun ProjectDetailScreen(
                             items(loadedSessions, key = { it.id.value }) { session ->
                                 val isWorking = session.id in workingSessionIds
                                 val isUnreadComplete = !isWorking && session.id in unreadCompletedSessionIds
-                                SessionInboxRow(
-                                    session = session,
-                                    projectLabel = project.label,
-                                    isWorking = isWorking,
-                                    isUnreadComplete = isUnreadComplete,
-                                    activeColor = semanticColors.active,
-                                    completedColor = semanticColors.completed,
-                                    onClick = { onSessionSelected(session.id) },
-                                )
+                                SwipeSessionRow(
+                                    onDeleteRequest = { deletingSession = session },
+                                    backgroundPadding = PaddingValues(0.dp),
+                                    backgroundShape = RectangleShape,
+                                ) {
+                                    Surface(color = MaterialTheme.colorScheme.surface) {
+                                        SessionInboxRow(
+                                            session = session,
+                                            projectLabel = project.label,
+                                            isWorking = isWorking,
+                                            isUnreadComplete = isUnreadComplete,
+                                            activeColor = semanticColors.active,
+                                            completedColor = semanticColors.completed,
+                                            onClick = { onSessionSelected(session.id) },
+                                        )
+                                    }
+                                }
                                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                             }
                         }
@@ -2566,6 +2798,20 @@ private fun ProjectDetailScreen(
                 }
             }
         }
+    }
+    deletingSession?.let { session ->
+        AlertDialog(
+            onDismissRequest = { deletingSession = null },
+            title = { Text("Delete session?") },
+            text = { Text("This permanently deletes ${session.title} from Hermes Serve.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    sessionActionScope.launch { onDeleteSession(session.id) }
+                    deletingSession = null
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { deletingSession = null }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -2758,7 +3004,7 @@ private fun MissingProjectScreen() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun ServerSettingsScreen(
     serverOrigin: ServerOrigin?,
@@ -2770,7 +3016,8 @@ internal fun ServerSettingsScreen(
     onSetProfileDefaultModel: suspend (ModelSelection, Boolean) -> ModelSwitchResult = { _, _ ->
         ModelSwitchResult(accepted = false)
     },
-    onRefreshScheduledJobs: () -> Unit = {},
+    onRefreshCronJobs: () -> Unit = {},
+    onCronJobAction: (String, CronJobAction) -> Unit = { _, _ -> },
     onLogout: suspend () -> Unit = {},
 ) {
     var value by rememberSaveable(serverOrigin?.value) {
@@ -2786,7 +3033,7 @@ internal fun ServerSettingsScreen(
     LaunchedEffect(serverOrigin, snapshot.authenticationState) {
         if (serverOrigin != null && snapshot.authenticationState == AuthenticationState.Authenticated) {
             onLoadManagementSettings(snapshot.selectedProfile)
-            onRefreshScheduledJobs()
+            onRefreshCronJobs()
         }
     }
     val parsedOrigin = remember(value) {
@@ -2830,131 +3077,144 @@ internal fun ServerSettingsScreen(
             )
         },
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .consumeWindowInsets(innerPadding)
-                .padding(horizontal = 24.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .consumeWindowInsets(innerPadding),
         ) {
-            Text(
-                "Enter the public HTTPS origin of your unchanged Hermes Serve instance.",
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            OutlinedTextField(
-                value = value,
-                onValueChange = {
-                    value = it
-                    saveError = null
-                },
-                label = { Text("Server origin") },
-                supportingText = {
-                    Text(
-                        validationMessage
-                            ?: "HTTPS origin only — no path, credentials, query, or ticket.",
-                    )
-                },
-                isError = validationMessage != null,
-                enabled = !isSaving,
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            saveError?.let { message ->
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .verticalScroll(rememberScrollState())
+                    .imePadding()
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
                 Text(
-                    message,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
+                    "Enter the public HTTPS origin of your unchanged Hermes Serve instance.",
+                    style = MaterialTheme.typography.bodyLarge,
                 )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    enabled = parsedOrigin != null && !isSaving,
-                    onClick = {
-                        val origin = parsedOrigin ?: return@Button
-                        coroutineScope.launch {
-                            isSaving = true
-                            saveError = null
-                            val result = onSave(origin)
-                            isSaving = false
-                            if (result.isSuccess) {
-                                onBack()
-                            } else {
-                                saveError = "Could not save server. Try again."
-                            }
-                        }
-                    },
-                ) {
-                    Text(if (isSaving) "Saving…" else "Save")
-                }
-                TextButton(
-                    enabled = !isSaving,
-                    onClick = dropUnlessResumed { onBack() },
-                ) {
-                    Text("Cancel")
-                }
-            }
-            if (snapshot.authenticationState == AuthenticationState.Authenticated) {
-                HorizontalDivider()
-                Text("Connection", style = MaterialTheme.typography.titleMedium)
-                Text("Hermes ${snapshot.serverVersion ?: "unknown"} · Authenticated")
-                if (snapshot.profiles.isNotEmpty()) {
-                    Text("Profile", style = MaterialTheme.typography.labelLarge)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        snapshot.profiles.forEach { profile ->
-                            FilterChip(
-                                selected = profile == snapshot.selectedProfile,
-                                onClick = { onLoadManagementSettings(profile) },
-                                label = { Text(profile) },
-                            )
-                        }
-                    }
-                }
-                Text("Default model for new chats", style = MaterialTheme.typography.titleMedium)
-                snapshot.defaultModelOptions?.current?.let { current ->
-                    Text("${current.provider} / ${current.model}")
-                }
                 OutlinedTextField(
-                    value = modelQuery,
-                    onValueChange = { modelQuery = it.take(128) },
-                    label = { Text("Search profile models") },
+                    value = value,
+                    onValueChange = {
+                        value = it
+                        saveError = null
+                    },
+                    label = { Text("Server origin") },
+                    supportingText = {
+                        Text(
+                            validationMessage
+                                ?: "HTTPS origin only — no path, credentials, query, or ticket.",
+                        )
+                    },
+                    isError = validationMessage != null,
+                    enabled = !isSaving,
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                snapshot.defaultModelOptions?.providers.orEmpty().forEach { provider ->
-                    provider.models
-                        .filter { modelQuery.isBlank() || it.contains(modelQuery.trim(), ignoreCase = true) }
-                        .take(8)
-                        .forEach { model ->
-                            val selection = ModelSelection(provider.slug, model)
-                            FilterChip(
-                                selected = pendingDefault == selection,
-                                onClick = { pendingDefault = selection },
-                                label = { Text("${provider.name} · $model") },
-                            )
-                        }
+                saveError?.let { message ->
+                    Text(
+                        message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
-                pendingDefault?.let { selection ->
-                    Button(onClick = {
-                        coroutineScope.launch {
-                            val result = onSetProfileDefaultModel(selection, false)
-                            if (result.confirmationRequired) {
-                                pendingExpensive = selection
-                                expensiveMessage = result.confirmationMessage
-                            } else if (result.accepted) {
-                                pendingDefault = null
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        enabled = parsedOrigin != null && !isSaving,
+                        onClick = {
+                            val origin = parsedOrigin ?: return@Button
+                            coroutineScope.launch {
+                                isSaving = true
+                                saveError = null
+                                val result = onSave(origin)
+                                isSaving = false
+                                if (result.isSuccess) {
+                                    onBack()
+                                } else {
+                                    saveError = "Could not save server. Try again."
+                                }
+                            }
+                        },
+                    ) {
+                        Text(if (isSaving) "Saving…" else "Save")
+                    }
+                    TextButton(
+                        enabled = !isSaving,
+                        onClick = dropUnlessResumed { onBack() },
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+                if (snapshot.authenticationState == AuthenticationState.Authenticated) {
+                    HorizontalDivider()
+                    Text("Connection", style = MaterialTheme.typography.titleMedium)
+                    Text("Hermes ${snapshot.serverVersion ?: "unknown"} · Authenticated")
+                    if (snapshot.profiles.isNotEmpty()) {
+                        Text("Profile", style = MaterialTheme.typography.labelLarge)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            snapshot.profiles.forEach { profile ->
+                                FilterChip(
+                                    selected = profile == snapshot.selectedProfile,
+                                    onClick = { onLoadManagementSettings(profile) },
+                                    label = { Text(profile) },
+                                )
                             }
                         }
-                    }) { Text("Set default") }
+                    }
+                    Text("Default model for new chats", style = MaterialTheme.typography.titleMedium)
+                    snapshot.defaultModelOptions?.current?.let { current ->
+                        Text("${current.provider} / ${current.model}")
+                    }
+                    OutlinedTextField(
+                        value = modelQuery,
+                        onValueChange = { modelQuery = it.take(128) },
+                        label = { Text("Search profile models") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        snapshot.defaultModelOptions?.providers.orEmpty().forEach { provider ->
+                            provider.models
+                                .filter { modelQuery.isBlank() || it.contains(modelQuery.trim(), ignoreCase = true) }
+                                .take(8)
+                                .forEach { model ->
+                                    val selection = ModelSelection(provider.slug, model)
+                                    FilterChip(
+                                        selected = pendingDefault == selection,
+                                        onClick = { pendingDefault = selection },
+                                        label = { Text("${provider.name} · $model") },
+                                    )
+                                }
+                        }
+                    }
+                    pendingDefault?.let { selection ->
+                        Button(onClick = {
+                            coroutineScope.launch {
+                                val result = onSetProfileDefaultModel(selection, false)
+                                if (result.confirmationRequired) {
+                                    pendingExpensive = selection
+                                    expensiveMessage = result.confirmationMessage
+                                } else if (result.accepted) {
+                                    pendingDefault = null
+                                }
+                            }
+                        }) { Text("Set default") }
+                    }
+                    TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
+                    snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    CronJobsPanel(
+                        state = snapshot.cronJobsState,
+                        onRefresh = onRefreshCronJobs,
+                        actionJobId = snapshot.cronJobActionJobId,
+                        actionError = snapshot.cronJobActionError,
+                        onJobAction = onCronJobAction,
+                    )
                 }
-                TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
-                snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                ScheduledJobsPanel(
-                    state = snapshot.scheduledJobsState,
-                    onRefresh = onRefreshScheduledJobs,
-                    modifier = Modifier.heightIn(max = 360.dp),
-                )
             }
         }
     }
@@ -2973,6 +3233,16 @@ internal fun ServerSettingsScreen(
         )
     }
 }
+
+/**
+ * True when the transcript should keep following new content: the newest item is still visible,
+ * or the list has not laid out yet. Once the user scrolls up past the newest item, auto-follow
+ * pauses until they return to the bottom.
+ */
+internal fun isTranscriptPinnedToBottom(
+    lastVisibleItemIndex: Int?,
+    totalItemsCount: Int,
+): Boolean = lastVisibleItemIndex == null || lastVisibleItemIndex >= totalItemsCount - 1
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -3017,9 +3287,14 @@ private fun SessionDetailScreen(
     val semanticColors = LocalHermesSemanticColors.current
     var showSessionInsights by remember(session.id) { mutableStateOf(false) }
     val workspacePath = validProjectWorkspacePath(session.workspacePath)
-    val workspaceLabel = workspacePath ?: session.projectId?.let { "No workspace" }
+    // Home-bucket sessions run in the server's default working directory; until
+    // the server reports the actual cwd there is no path to show, and "No
+    // workspace" would wrongly suggest the draft cannot start.
+    val workspaceLabel = workspacePath
+        ?: session.projectId?.takeUnless(::isNoProjectBucket)?.let { "No workspace" }
     val projectDraftMissingWorkspace = session.isLocalDraft &&
         session.projectId != null &&
+        !isNoProjectBucket(session.projectId) &&
         workspacePath == null
     var attachmentError by remember(session.id) { mutableStateOf<String?>(null) }
     var pendingSend by remember(session.id) { mutableStateOf<Pair<String, Int>?>(null) }
@@ -3043,13 +3318,32 @@ private fun SessionDetailScreen(
     val transcriptListState = rememberLazyListState(
         initialFirstVisibleItemIndex = timelineLastIndex,
     )
+    val pinnedToBottom by remember(transcriptListState) {
+        derivedStateOf {
+            val layoutInfo = transcriptListState.layoutInfo
+            isTranscriptPinnedToBottom(
+                lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index,
+                totalItemsCount = layoutInfo.totalItemsCount,
+            )
+        }
+    }
+    LaunchedEffect(session.id) {
+        if (chat.messages.isNotEmpty() || hasRunStateContent) {
+            transcriptListState.scrollToItem(timelineLastIndex)
+        }
+    }
+    var lastFollowedMessageCount by remember(session.id) { mutableStateOf(chat.messages.size) }
     LaunchedEffect(
-        session.id,
         chat.messages.size,
         chat.messages.lastOrNull()?.text?.length,
         chat.runState,
     ) {
-        if (chat.messages.isNotEmpty() || hasRunStateContent) {
+        if (chat.messages.isEmpty() && !hasRunStateContent) return@LaunchedEffect
+        if (!pinnedToBottom) return@LaunchedEffect
+        if (chat.messages.size != lastFollowedMessageCount) {
+            lastFollowedMessageCount = chat.messages.size
+            transcriptListState.animateScrollToItem(timelineLastIndex)
+        } else {
             transcriptListState.scrollToItem(timelineLastIndex)
         }
     }
@@ -3068,9 +3362,6 @@ private fun SessionDetailScreen(
                 title = {
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(session.title)
-                        workspaceLabel?.let { label ->
-                            Text(label, style = MaterialTheme.typography.labelSmall)
-                        }
                         listOfNotNull(
                             chat.provider?.takeIf(String::isNotBlank),
                             chat.model?.takeIf(String::isNotBlank),
@@ -3084,6 +3375,22 @@ private fun SessionDetailScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        workspaceLabel?.let { label ->
+                            Text(
+                                "Workspace: $label",
+                                color = if (workspacePath == null) {
+                                    MaterialTheme.colorScheme.tertiary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Session workspace: $label"
+                                },
                             )
                         }
                     }
@@ -3116,20 +3423,19 @@ private fun SessionDetailScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding)
+                .wrapContentWidth(Alignment.CenterHorizontally)
+                .widthIn(max = 840.dp)
+                .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            workspaceLabel?.let { label ->
+            if (projectDraftMissingWorkspace) {
                 Text(
-                    "Workspace: $label",
-                    color = if (workspacePath == null) {
-                        MaterialTheme.colorScheme.tertiary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    "No workspace",
+                    color = MaterialTheme.colorScheme.tertiary,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.semantics {
-                        contentDescription = "Session workspace: $label"
+                        contentDescription = "Session workspace: No workspace"
                     },
                 )
             }
@@ -3689,6 +3995,7 @@ private fun SessionInsightsSheet(
                 .heightIn(max = 720.dp)
                 .verticalScroll(rememberScrollState())
                 .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {

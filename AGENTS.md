@@ -26,7 +26,9 @@ Released Hermes compatibility is conservative: observe durable/live metadata wit
 
 ## Development workflow
 
-Use strict RED -> GREEN -> REFACTOR. Every behavior change starts with a meaningful failing test. Keep reducers, protocol parsing, reconciliation, and policy decisions platform-independent where practical and test them locally.
+Use proportionate RED -> GREEN -> REFACTOR. Reproducible bug fixes and testable behavior changes should start with a focused regression test that fails for the expected reason, especially for reducers, protocol parsing, reconciliation, authentication/security, lifecycle/concurrency, and policy decisions. Keep those decisions platform-independent where practical and test them locally.
+
+Do not manufacture failing tests for documentation, `.gitignore`, configuration, generated code, dependency-only changes, exploratory spikes, purely visual work, or behavior that can only be meaningfully exercised on a device. Use the most relevant evidence instead: existing tests before and after a refactor, builds and validators for configuration, screenshot and interaction checks for UI, or device/integration verification for platform behavior. State which verification strategy was used and do not claim strict TDD when RED was not observed.
 
 Required gates for changed Android code:
 

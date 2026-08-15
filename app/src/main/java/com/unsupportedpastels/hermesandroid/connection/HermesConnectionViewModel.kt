@@ -16,6 +16,7 @@ import com.unsupportedpastels.hermesandroid.app.RunEventState
 import com.unsupportedpastels.hermesandroid.app.RunInteractionLifecycle
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.app.reconcileProjectSession
+import com.unsupportedpastels.hermesandroid.app.isNoProjectBucket
 import com.unsupportedpastels.hermesandroid.app.validProjectWorkspacePath
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentAddResult
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentByteReader
@@ -54,7 +55,8 @@ import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
-import com.unsupportedpastels.hermesandroid.gateway.ScheduledJobsState
+import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
+import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
 import com.unsupportedpastels.hermesandroid.gateway.SessionBranchResult
 import com.unsupportedpastels.hermesandroid.gateway.SessionContextBreakdown
 import com.unsupportedpastels.hermesandroid.gateway.SessionUsage
@@ -80,6 +82,8 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
@@ -267,6 +271,11 @@ class HermesConnectionViewModel(
 
     private var activeOrigin: ServerOrigin? = null
     private var activeTokens: ActiveTokenRecord? = null
+
+    // Serializes token refresh: concurrent callers that all observe an expired access
+    // token must not each spend the same single-use rotated refresh token, and a stale
+    // refresh result must never overwrite a newer persisted token set.
+    private val tokenRefreshMutex = Mutex()
     private var generation = 0L
     private var connectionJob: Job? = null
     private var projectLoadJob: Job? = null
@@ -284,6 +293,7 @@ class HermesConnectionViewModel(
     private val chatOperationGenerations = mutableMapOf<DurableSessionId, Long>()
     private val liveControllers = mutableMapOf<DurableSessionId, LiveChatController>()
     private val activeTurnIds = mutableSetOf<DurableSessionId>()
+    private var lastPublishedActiveTurnCount = 0
     // Selected-session compatibility state. Live event ownership is held by
     // [liveControllers], so changing the visible session does not close peers.
     private var chatJob: Job? = null
@@ -1372,7 +1382,7 @@ class HermesConnectionViewModel(
         val projectSessions = listOf(draft) +
             snapshot.projectSessions[projectId].orEmpty().filterNot { it.id == draftId }
         val existingChat = snapshot.chatSessions[draftId]
-        val chatSessions = if (workspacePath == null) {
+        val chatSessions = if (workspacePath == null && !isNoProjectBucket(projectId)) {
             snapshot.chatSessions + (
                 draftId to (existingChat ?: ChatSessionSnapshot()).copy(error = "No workspace")
                 )
@@ -1543,6 +1553,7 @@ class HermesConnectionViewModel(
         val draft = localDraftSession(durableSessionId)
         if (
             draft?.projectId != null &&
+            !isNoProjectBucket(draft.projectId) &&
             validProjectWorkspacePath(draft.workspacePath) == null
         ) {
             updateChat(durableSessionId) {
@@ -1613,11 +1624,7 @@ class HermesConnectionViewModel(
                 session.submitPrompt(runtimeId, submittedText)
                 // Only count the turn once the prompt was accepted; a rejected or failed
                 // submission must not leave a phantom active turn (foreground service).
-                notifications.turnStarted(
-                    durableSessionId,
-                    sessionTitle(durableSessionId),
-                    activeTurnIds.apply { add(durableSessionId) }.size,
-                )
+                markTurnActive(durableSessionId)
                 markDraftPersisted(
                     durableSessionId,
                     origin,
@@ -2010,36 +2017,79 @@ class HermesConnectionViewModel(
         )
     }
 
-    fun refreshScheduledJobs(): Job {
+    fun refreshCronJobs(): Job {
         val origin = activeOrigin
         val originGeneration = generation
         if (origin == null || !isCurrentProjectLoad(origin, originGeneration)) {
             return viewModelScope.launch {
                 mutableSnapshots.value = mutableSnapshots.value.copy(
-                    scheduledJobsState = ScheduledJobsState.Error(
-                        "Scheduled jobs require an authenticated server",
+                    cronJobsState = CronJobsState.Error(
+                        "Cron jobs require an authenticated server",
                     ),
                 )
             }
         }
         mutableSnapshots.value = mutableSnapshots.value.copy(
-            scheduledJobsState = ScheduledJobsState.Loading,
+            cronJobsState = CronJobsState.Loading,
         )
         return viewModelScope.launch {
             val state = try {
-                ScheduledJobsState.Ready(
-                    withProjectMetadataSession(HermesChatSession::loadScheduledJobs),
+                CronJobsState.Ready(
+                    withProjectMetadataSession(HermesChatSession::loadCronJobs),
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: HermesChatMethodNotFoundException) {
-                ScheduledJobsState.Unsupported
+                CronJobsState.Unsupported
             } catch (_: Exception) {
-                ScheduledJobsState.Error("Could not load scheduled jobs")
+                CronJobsState.Error("Could not load cron jobs")
             }
             currentCoroutineContext().ensureActive()
             if (isCurrentProjectLoad(origin, originGeneration)) {
-                mutableSnapshots.value = mutableSnapshots.value.copy(scheduledJobsState = state)
+                mutableSnapshots.value = mutableSnapshots.value.copy(cronJobsState = state)
+            }
+        }
+    }
+
+    /**
+     * Runs one lifecycle action against a cron job, then reloads the list so the
+     * panel reflects the server's post-action state rather than an optimistic guess.
+     */
+    fun manageCronJob(jobId: String, action: CronJobAction): Job {
+        val origin = activeOrigin
+        val originGeneration = generation
+        if (origin == null || !isCurrentProjectLoad(origin, originGeneration)) {
+            return viewModelScope.launch {
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    cronJobActionError = "Cron jobs require an authenticated server",
+                )
+            }
+        }
+        mutableSnapshots.value = mutableSnapshots.value.copy(
+            cronJobActionJobId = jobId,
+            cronJobActionError = null,
+        )
+        return viewModelScope.launch {
+            val error = try {
+                withProjectMetadataSession { session -> session.manageCronJob(jobId, action) }
+                null
+            } catch (cancelled: CancellationException) {
+                if (isCurrentProjectLoad(origin, originGeneration)) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(cronJobActionJobId = null)
+                }
+                throw cancelled
+            } catch (_: HermesChatMethodNotFoundException) {
+                "Cron job controls are not supported by this server"
+            } catch (_: Exception) {
+                "Could not ${action.failureVerb} the job"
+            }
+            currentCoroutineContext().ensureActive()
+            if (isCurrentProjectLoad(origin, originGeneration)) {
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    cronJobActionJobId = null,
+                    cronJobActionError = error,
+                )
+                if (error == null) refreshCronJobs()
             }
         }
     }
@@ -2426,6 +2476,11 @@ class HermesConnectionViewModel(
             chatOperationGeneration = operationGeneration
             chatRecoveryState = liveControllers[durableSessionId]?.recoveryState
             publishActiveRuntime(durableSessionId, resumed.runtimeSessionId)
+            // A turn already running on the server (started by another client or before
+            // an app restart) is an active turn from this client's perspective too: it
+            // needs the foreground service so background completion/approval events can
+            // be delivered without crashing and the working notification stays truthful.
+            if (resumed.running) markTurnActive(durableSessionId)
             collectEvents(
                 session,
                 durableSessionId,
@@ -2695,8 +2750,6 @@ class HermesConnectionViewModel(
                             event.text.orEmpty(),
                             event.status,
                         )
-                        activeTurnIds.remove(durableSessionId)
-                        notifications.activeCountChanged(activeTurnIds.size)
                         // The controller remains connected after a normal completion, so the
                         // runtime marker is retained (maintenance stays available while idle).
                         // It is removed when the controller is detached (error, stop, or
@@ -2717,8 +2770,6 @@ class HermesConnectionViewModel(
                                 runState = it.runState.reduce(event),
                             )
                         }
-                        activeTurnIds.remove(durableSessionId)
-                        notifications.activeCountChanged(activeTurnIds.size)
                         removeActiveRuntime(runtimeSessionId)
                         detachController(durableSessionId, session, closeSession = true)
                     }
@@ -2873,6 +2924,7 @@ class HermesConnectionViewModel(
                     chatOperationGeneration = operationGeneration
                     chatRecoveryState = recoveryAttempt.state
                     publishActiveRuntime(durableSessionId, resumed.runtimeSessionId)
+                    markTurnActive(durableSessionId)
                     finishChatRecovery(recoveryAttempt)
                     collectEvents(
                         candidate,
@@ -3868,6 +3920,34 @@ class HermesConnectionViewModel(
         mutableSnapshots.value = snapshot.copy(
             chatSessions = snapshot.chatSessions + (durableSessionId to transform(current)),
         )
+        syncActiveTurnNotifications()
+    }
+
+    /**
+     * Reconciles the accepted-turn set against authoritative `isSending` state and
+     * republishes the foreground-service count when it changed. Turns are added only
+     * explicitly ([markTurnActive]) once the server accepted the prompt or reported
+     * the turn running; removal is derived here so that every termination path
+     * (completion, error, stop, recovery give-up, `running = false` resume) releases
+     * the ongoing "Hermes is working" notification.
+     */
+    private fun syncActiveTurnNotifications() {
+        val chatSessions = mutableSnapshots.value.chatSessions
+        activeTurnIds.retainAll { chatSessions[it]?.isSending == true }
+        if (activeTurnIds.size != lastPublishedActiveTurnCount) {
+            lastPublishedActiveTurnCount = activeTurnIds.size
+            notifications.activeCountChanged(activeTurnIds.size)
+        }
+    }
+
+    private fun markTurnActive(durableSessionId: DurableSessionId) {
+        if (!activeTurnIds.add(durableSessionId)) return
+        lastPublishedActiveTurnCount = activeTurnIds.size
+        notifications.turnStarted(
+            durableSessionId,
+            sessionTitle(durableSessionId),
+            activeTurnIds.size,
+        )
     }
 
     private suspend fun accessTokenForRequest(
@@ -3878,6 +3958,20 @@ class HermesConnectionViewModel(
         if (generation != expectedGeneration || activeOrigin != origin) {
             throw CancellationException("Server origin was replaced")
         }
+        return tokenRefreshMutex.withLock {
+            refreshAndPublishTokensLocked(origin, expectedGeneration)
+        }
+    }
+
+    private suspend fun refreshAndPublishTokensLocked(
+        origin: ServerOrigin,
+        expectedGeneration: Long,
+    ): String? {
+        if (generation != expectedGeneration || activeOrigin != origin) {
+            throw CancellationException("Server origin was replaced")
+        }
+        // Re-read under the lock: a concurrent caller may have already refreshed and
+        // published a newer token set while this caller was waiting.
         val active = activeTokens
             ?.takeIf { it.origin == origin && it.generation == expectedGeneration }
             ?: return null
@@ -3971,7 +4065,7 @@ class HermesConnectionViewModel(
         liveControllers.remove(durableSessionId)
         chatOperationGenerations.remove(durableSessionId)
         chatJobs.remove(durableSessionId)
-        notifications.activeCountChanged(activeTurnIds.size)
+        syncActiveTurnNotifications()
         if (activeChatSession === expectedSession) {
             activeChatSession = null
             activeChatDurableId = null
@@ -3996,6 +4090,7 @@ class HermesConnectionViewModel(
             closeChatSessionNonCancellably(controller.session)
         }
         activeTurnIds.clear()
+        lastPublishedActiveTurnCount = 0
         notifications.activeCountChanged(0)
         activeChatSession = null
         activeChatDurableId = null
@@ -4013,6 +4108,10 @@ class HermesConnectionViewModel(
         liveControllers.clear()
         chatOperationGenerations.clear()
         activeTurnIds.clear()
+        lastPublishedActiveTurnCount = 0
+        // The ViewModel is the only owner of the foreground service; without this the
+        // ongoing notification survives the task being swiped away.
+        notifications.activeCountChanged(0)
         val metadataSession = detachProjectMetadataSession()
         viewModelScope.launch {
             closeChatSessionNonCancellably(metadataSession)
