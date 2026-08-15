@@ -1844,7 +1844,7 @@ class HermesConnectionViewModelTest {
                     tree,
                     CompletableDeferred(projectSessions),
                 ) {
-                    override suspend fun loadScheduledJobs(): List<ScheduledJob> = emptyList()
+                    override suspend fun loadCronJobs(): List<CronJob> = emptyList()
                 }
             },
             nowEpochSeconds = { now },
@@ -1859,7 +1859,7 @@ class HermesConnectionViewModelTest {
         now = 2_000_000_000L
         val openJob = viewModel.openProject(projectId)
         runCurrent()
-        val jobsJob = viewModel.refreshScheduledJobs()
+        val jobsJob = viewModel.refreshCronJobs()
         runCurrent()
 
         assertEquals(1, refreshCalls)

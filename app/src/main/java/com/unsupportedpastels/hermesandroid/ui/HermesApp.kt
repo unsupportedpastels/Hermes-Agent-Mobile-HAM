@@ -3379,6 +3379,16 @@ private fun SessionDetailScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (projectDraftMissingWorkspace) {
+                Text(
+                    "No workspace",
+                    color = MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.semantics {
+                        contentDescription = "Session workspace: No workspace"
+                    },
+                )
+            }
             when {
                 chat.isLoading && chat.messages.isEmpty() -> {
                     Box(
