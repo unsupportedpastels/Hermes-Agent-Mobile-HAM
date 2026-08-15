@@ -8,7 +8,7 @@
 
 ## What HAM does
 
-- Connects to an unchanged, officially compatible `hermes serve` backend.
+- Connects to an unchanged, officially compatible Hermes Agent backend supplied by `hermes dashboard` or headless `hermes serve`.
 - Browses projects and sessions, creates local drafts, and starts a remote runtime only when you send the first prompt.
 - Streams replies, tool activity, reasoning, approvals, clarifications, managed images, and remote attachments.
 - Supports native Nous OAuth with system-browser PKCE, origin-scoped encrypted credentials, refresh, and reconnect/reconciliation.
@@ -37,11 +37,13 @@ HAM is a client, not an agent host. Install and configure Hermes Agent on a mach
 For a remote phone connection, keep Hermes bound to loopback and publish only a public HTTPS hostname through a named [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/). Do not expose port 9119 directly to the internet.
 
 1. Configure Hermes Agent and public-host authentication. For a publicly reachable host, use an OAuth provider (Nous Portal is the documented option), not a shared password. Follow the current [Hermes remote-backend documentation](https://hermes-agent.nousresearch.com/docs/user-guide/desktop#connecting-to-a-remote-backend).
-2. Start the recommended headless backend on the host and keep it supervised by your service manager:
+2. Start the recommended Dashboard backend on the host and keep it supervised by your service manager:
 
    ```bash
-   hermes serve --host 127.0.0.1 --port 9119
+   hermes dashboard --host 127.0.0.1 --port 9119 --no-open
    ```
+
+   This supplies the backend HAM needs and also keeps the web dashboard available when you want it. Omit `--no-open` when starting it interactively and you want Hermes to open the dashboard in a local browser.
 
 3. In Cloudflare, create a **named Tunnel** on that host and add a published application:
    - **Public hostname:** a hostname you control, such as `hermes.example.com`
@@ -60,7 +62,7 @@ For a remote phone connection, keep Hermes bound to loopback and publish only a 
 
 Cloudflare terminates public TLS while the tunnel carries traffic back to the loopback-only Hermes server. See Cloudflare's [published-application routing](https://developers.cloudflare.com/tunnel/routing/) and [configuration-file](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/configure-tunnels/local-management/configuration-file/) guides for current setup details.
 
-`hermes dashboard --no-open` can also supply the same backend when you want the web dashboard available on the host. It and `hermes serve` default to the same port, so run one or the other—not both on port 9119. The separate `hermes gateway` service runs messaging platforms such as Telegram or Discord; it does not replace the backend required by HAM.
+`hermes serve` is the headless alternative for hosts that only need native/remote clients and do not need the web dashboard. It and `hermes dashboard` default to the same port, so run one or the other—not both on port 9119. The separate `hermes gateway` service runs messaging platforms such as Telegram or Discord; it does not replace the backend required by HAM.
 
 ### Private access through Tailscale
 
@@ -70,9 +72,9 @@ Tailscale is appropriate for private Tailnet-only access; use the Cloudflare plu
 
 ### Keeping it available and troubleshooting
 
-The Hermes backend is long-running: if it stops, HAM cannot connect. Run `hermes serve` or `hermes dashboard --no-open` under a service manager or other process supervisor. The messaging gateway, if you use Telegram, Discord, Slack, or another channel, is a separate long-running process. See the official [`hermes serve` CLI reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands#hermes-serve), [dashboard reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands#hermes-dashboard), and [messaging guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/) for current commands.
+The Hermes backend is long-running: if it stops, HAM cannot connect. Run the recommended `hermes dashboard --no-open`, or headless `hermes serve`, under a service manager or other process supervisor. The messaging gateway, if you use Telegram, Discord, Slack, or another channel, is a separate long-running process. See the official [dashboard reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands#hermes-dashboard), [`hermes serve` CLI reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands#hermes-serve), and [messaging guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/) for current commands.
 
-1. On the host, confirm the backend is running with `hermes serve --status` or `hermes dashboard --status`, matching the command you started.
+1. On the host, confirm the backend is running with `hermes dashboard --status` or `hermes serve --status`, matching the command you started.
 2. Confirm the public host responds before opening HAM: `curl -fsS https://hermes.example.com/api/status`.
 3. If it fails, inspect the named tunnel's connector state, public-hostname/DNS mapping, and TLS certificate in Cloudflare; then confirm the tunnel still targets `http://localhost:9119`.
 4. For Tailscale, confirm the phone is connected to the same Tailnet and use the exact HTTPS address from `tailscale serve status`.
