@@ -19,7 +19,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -79,6 +82,9 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -92,6 +98,7 @@ import androidx.compose.material3.adaptive.navigation3.ListDetailSceneStrategy
 import androidx.compose.material3.adaptive.navigation3.rememberListDetailSceneStrategy
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CreateNewFolder
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.runtime.Composable
@@ -103,14 +110,21 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -626,6 +640,7 @@ fun HermesApp(
                             val newSessionId = onCreateProjectSession(project.id)
                             if (newSessionId != null) navigateToSession(newSessionId)
                         },
+                        onDeleteSession = onDeleteSession,
                     )
                 }
             }
@@ -2034,7 +2049,27 @@ private fun SessionListScreen(
                 }
             }
         } else {
+            val homeListState = rememberLazyListState()
+            var userHasScrolled by remember { mutableStateOf(false) }
+            LaunchedEffect(homeListState) {
+                homeListState.interactionSource.interactions.collect { interaction ->
+                    if (interaction is DragInteraction.Start) userHasScrolled = true
+                }
+            }
+            // Sections load in asynchronously above the initial anchor (projects arrive
+            // after "Recent Sessions"), and keyed LazyColumn items keep the viewport
+            // anchored to the old first item — so pin to the top until the user scrolls.
+            LaunchedEffect(homeListState) {
+                snapshotFlow {
+                    homeListState.firstVisibleItemIndex to homeListState.firstVisibleItemScrollOffset
+                }.collect { (index, offset) ->
+                    if (!userHasScrolled && (index > 0 || offset > 0)) {
+                        homeListState.scrollToItem(0)
+                    }
+                }
+            }
             LazyColumn(
+                state = homeListState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = innerPadding,
             ) {
@@ -2126,15 +2161,19 @@ private fun SessionListScreen(
                         .toSet()
                     items(visibleSessions, key = { "session:${it.id.value}" }) { session ->
                         val isCurrent = session.id in activeControllerSessionIds
-                        RecentSessionHomeRow(
-                            session = session,
-                            current = isCurrent,
-                            onClick = dropUnlessResumed { onSessionSelected(session.id) },
-                            onRename = { editingSession = session },
-                            onPin = { sessionActionScope.launch { onSetSessionPinned(session.id, !session.pinned) } },
-                            onArchive = { sessionActionScope.launch { onSetSessionArchived(session.id, !session.archived) } },
-                            onDelete = { deletingSession = session },
-                        )
+                        SwipeSessionRow(
+                            onDeleteRequest = { deletingSession = session },
+                        ) {
+                            RecentSessionHomeRow(
+                                session = session,
+                                current = isCurrent,
+                                onClick = dropUnlessResumed { onSessionSelected(session.id) },
+                                onRename = { editingSession = session },
+                                onPin = { sessionActionScope.launch { onSetSessionPinned(session.id, !session.pinned) } },
+                                onArchive = { sessionActionScope.launch { onSetSessionArchived(session.id, !session.archived) } },
+                                onDelete = { deletingSession = session },
+                            )
+                        }
                     }
                     item(key = "home-bottom-clearance") {
                         Box(modifier = Modifier.size(104.dp))
@@ -2208,6 +2247,100 @@ private fun SessionListScreen(
                 onDeleteSession(session.id)
                 pendingDelete = null
             }
+        }
+    }
+}
+
+@Composable
+private fun SwipeSessionRow(
+    onDeleteRequest: () -> Unit,
+    backgroundPadding: PaddingValues = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+    backgroundShape: Shape = MaterialTheme.shapes.medium,
+    content: @Composable () -> Unit,
+) {
+    // The state's confirmValueChange lambda is captured once at creation, so
+    // route the callback through rememberUpdatedState to avoid stale captures
+    // when the row recomposes with a fresh SessionSummary.
+    val currentDeleteRequest by rememberUpdatedState(onDeleteRequest)
+    // Resizing the list pane (or collapsing it with the pane slider) shrinks
+    // this box until its swipe anchors coincide, which makes the state resolve
+    // to StartToEnd with no gesture on the row. Only honor the dismiss while a
+    // pointer is actually down on the row itself.
+    var touchActive by remember { mutableStateOf(false) }
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    if (touchActive) currentDeleteRequest()
+                    false
+                }
+                SwipeToDismissBoxValue.EndToStart -> false
+                SwipeToDismissBoxValue.Settled -> true
+            }
+        },
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromEndToStart = false,
+        backgroundContent = {
+            if (dismissState.dismissDirection == SwipeToDismissBoxValue.StartToEnd) {
+                SwipeActionBackground(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    icon = Icons.Outlined.Delete,
+                    label = "Delete",
+                    alignment = Alignment.CenterStart,
+                    padding = backgroundPadding,
+                    shape = backgroundShape,
+                )
+            }
+        },
+    ) {
+        Box(
+            modifier = Modifier.pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    touchActive = true
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.changes.none { it.pressed }) break
+                        }
+                    } finally {
+                        touchActive = false
+                    }
+                }
+            },
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SwipeActionBackground(
+    color: androidx.compose.ui.graphics.Color,
+    contentColor: androidx.compose.ui.graphics.Color,
+    icon: ImageVector,
+    label: String,
+    alignment: Alignment,
+    padding: PaddingValues,
+    shape: Shape,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .background(color, shape)
+            .padding(horizontal = 20.dp),
+        contentAlignment = alignment,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, contentDescription = null, tint = contentColor)
+            Text(label, color = contentColor, style = MaterialTheme.typography.labelLarge)
         }
     }
 }
@@ -2413,8 +2546,11 @@ private fun ProjectDetailScreen(
     onBack: () -> Unit,
     onSessionSelected: (DurableSessionId) -> Unit,
     onNewTask: () -> Unit,
+    onDeleteSession: suspend (DurableSessionId) -> Result<Unit>,
 ) {
     val semanticColors = LocalHermesSemanticColors.current
+    var deletingSession by remember { mutableStateOf<SessionSummary?>(null) }
+    val sessionActionScope = rememberCoroutineScope()
     val loadedSessions = when (state) {
         is ProjectSessionLoadState.Loaded ->
             if (sessions.isEmpty()) state.sessions else sessions
@@ -2555,15 +2691,23 @@ private fun ProjectDetailScreen(
                             items(loadedSessions, key = { it.id.value }) { session ->
                                 val isWorking = session.id in workingSessionIds
                                 val isUnreadComplete = !isWorking && session.id in unreadCompletedSessionIds
-                                SessionInboxRow(
-                                    session = session,
-                                    projectLabel = project.label,
-                                    isWorking = isWorking,
-                                    isUnreadComplete = isUnreadComplete,
-                                    activeColor = semanticColors.active,
-                                    completedColor = semanticColors.completed,
-                                    onClick = { onSessionSelected(session.id) },
-                                )
+                                SwipeSessionRow(
+                                    onDeleteRequest = { deletingSession = session },
+                                    backgroundPadding = PaddingValues(0.dp),
+                                    backgroundShape = RectangleShape,
+                                ) {
+                                    Surface(color = MaterialTheme.colorScheme.surface) {
+                                        SessionInboxRow(
+                                            session = session,
+                                            projectLabel = project.label,
+                                            isWorking = isWorking,
+                                            isUnreadComplete = isUnreadComplete,
+                                            activeColor = semanticColors.active,
+                                            completedColor = semanticColors.completed,
+                                            onClick = { onSessionSelected(session.id) },
+                                        )
+                                    }
+                                }
                                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                             }
                         }
@@ -2571,6 +2715,20 @@ private fun ProjectDetailScreen(
                 }
             }
         }
+    }
+    deletingSession?.let { session ->
+        AlertDialog(
+            onDismissRequest = { deletingSession = null },
+            title = { Text("Delete session?") },
+            text = { Text("This permanently deletes ${session.title} from Hermes Serve.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    sessionActionScope.launch { onDeleteSession(session.id) }
+                    deletingSession = null
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { deletingSession = null }) { Text("Cancel") } },
+        )
     }
 }
 
