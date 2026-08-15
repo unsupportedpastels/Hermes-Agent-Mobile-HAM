@@ -3082,9 +3082,6 @@ private fun SessionDetailScreen(
                 title = {
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(session.title)
-                        workspaceLabel?.let { label ->
-                            Text(label, style = MaterialTheme.typography.labelSmall)
-                        }
                         listOfNotNull(
                             chat.provider?.takeIf(String::isNotBlank),
                             chat.model?.takeIf(String::isNotBlank),
@@ -3098,6 +3095,22 @@ private fun SessionDetailScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        workspaceLabel?.let { label ->
+                            Text(
+                                "Workspace: $label",
+                                color = if (workspacePath == null) {
+                                    MaterialTheme.colorScheme.tertiary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Session workspace: $label"
+                                },
                             )
                         }
                     }
@@ -3133,20 +3146,6 @@ private fun SessionDetailScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            workspaceLabel?.let { label ->
-                Text(
-                    "Workspace: $label",
-                    color = if (workspacePath == null) {
-                        MaterialTheme.colorScheme.tertiary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.semantics {
-                        contentDescription = "Session workspace: $label"
-                    },
-                )
-            }
             when {
                 chat.isLoading && chat.messages.isEmpty() -> {
                     Box(
