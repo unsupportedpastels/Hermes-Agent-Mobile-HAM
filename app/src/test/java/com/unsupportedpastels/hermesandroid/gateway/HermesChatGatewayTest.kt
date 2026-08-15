@@ -26,6 +26,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -428,21 +429,13 @@ class HermesChatGatewayTest {
     }
 
     @Test
-    fun malformedFramesAreSkippedWithoutTearingDownTheConnection() = runTest {
+    fun malformedFrameFailsPendingRequestInsteadOfLeavingItSuspended() = runTest {
         val ticketClient = RecordingTicketClient("ticket-1")
         val socket = ScriptedSocket()
         socket.onSend = { frame ->
             val request = Json.parseToJsonElement(frame).jsonObject
             if (request["method"]?.jsonPrimitive?.content == "prompt.submit") {
-                val id = request["id"]!!.jsonPrimitive.content
-                // A newer server may emit frames this client cannot parse; they must
-                // be skipped, leaving later events and the pending ack intact.
                 socket.offer("this is not json")
-                socket.offer("[1, 2, 3]")
-                socket.offer(
-                    """{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"runtime-1","payload":{"text":"still alive"}}}""",
-                )
-                socket.offer("""{"jsonrpc":"2.0","id":$id,"result":{"status":"streaming"}}""")
             }
         }
         val connection = HermesChatGateway(
@@ -453,14 +446,14 @@ class HermesChatGatewayTest {
             parentScope = backgroundScope,
         ).connect()
 
-        val ack = connection.submitPrompt(RuntimeSessionId("runtime-1"), "hello")
-        val events = connection.events.take(1).toList()
-
-        assertEquals("streaming", ack.status)
-        assertEquals(
-            listOf(HermesChatEvent.MessageDelta(RuntimeSessionId("runtime-1"), "still alive")),
-            events,
-        )
+        try {
+            withTimeout(1_000) {
+                connection.submitPrompt(RuntimeSessionId("runtime-1"), "hello")
+            }
+            fail("Malformed response must fail the pending request")
+        } catch (error: HermesChatProtocolException) {
+            assertEquals("Hermes chat frame was invalid", error.message)
+        }
         connection.close()
     }
 

@@ -19,7 +19,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -130,10 +129,14 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -2077,9 +2080,12 @@ private fun SessionListScreen(
         } else {
             val homeListState = rememberLazyListState()
             var userHasScrolled by remember { mutableStateOf(false) }
-            LaunchedEffect(homeListState) {
-                homeListState.interactionSource.interactions.collect { interaction ->
-                    if (interaction is DragInteraction.Start) userHasScrolled = true
+            val homeScrollObserver = remember {
+                object : NestedScrollConnection {
+                    override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                        if (isUserInitiatedHomeScroll(available, source)) userHasScrolled = true
+                        return Offset.Zero
+                    }
                 }
             }
             // Sections load in asynchronously above the initial anchor (projects arrive
@@ -2089,7 +2095,13 @@ private fun SessionListScreen(
                 snapshotFlow {
                     homeListState.firstVisibleItemIndex to homeListState.firstVisibleItemScrollOffset
                 }.collect { (index, offset) ->
-                    if (!userHasScrolled && (index > 0 || offset > 0)) {
+                    val decision = decideHomeListPinning(
+                        userHasScrolled = userHasScrolled,
+                        firstVisibleItemIndex = index,
+                        firstVisibleItemScrollOffset = offset,
+                    )
+                    userHasScrolled = decision.userHasScrolled
+                    if (decision.pinToTop) {
                         homeListState.scrollToItem(0)
                     }
                 }
@@ -2098,7 +2110,9 @@ private fun SessionListScreen(
             val fabClearance = if (showDockOwnedActions && canStartNewChat) 96.dp else 0.dp
             LazyColumn(
                 state = homeListState,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .nestedScroll(homeScrollObserver),
                 contentPadding = PaddingValues(
                     start = innerPadding.calculateStartPadding(layoutDirection),
                     top = innerPadding.calculateTopPadding(),
@@ -2295,16 +2309,22 @@ private fun SwipeSessionRow(
     // route the callback through rememberUpdatedState to avoid stale captures
     // when the row recomposes with a fresh SessionSummary.
     val currentDeleteRequest by rememberUpdatedState(onDeleteRequest)
-    // Resizing the list pane (or collapsing it with the pane slider) shrinks
-    // this box until its swipe anchors coincide, which makes the state resolve
-    // to StartToEnd with no gesture on the row. Only honor the dismiss while a
-    // pointer is actually down on the row itself.
-    var touchActive by remember { mutableStateOf(false) }
+    // Resizing the list pane can make swipe anchors coincide and request a
+    // dismissal without input. Track a real pointer transition through the
+    // post-release settlement phase instead of requiring the pointer to remain
+    // pressed while confirmValueChange runs.
+    var pointerPressed by remember { mutableStateOf(false) }
+    var gestureSettlingToDelete by remember { mutableStateOf(false) }
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             when (value) {
                 SwipeToDismissBoxValue.StartToEnd -> {
-                    if (touchActive) currentDeleteRequest()
+                    val requestDelete = shouldRequestSwipeDelete(
+                        pointerPressed = pointerPressed,
+                        gestureSettlingToDelete = gestureSettlingToDelete,
+                    )
+                    gestureSettlingToDelete = false
+                    if (requestDelete) currentDeleteRequest()
                     false
                 }
                 SwipeToDismissBoxValue.EndToStart -> false
@@ -2333,14 +2353,17 @@ private fun SwipeSessionRow(
             modifier = Modifier.pointerInput(Unit) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
-                    touchActive = true
+                    pointerPressed = true
+                    gestureSettlingToDelete = false
                     try {
                         while (true) {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
                             if (event.changes.none { it.pressed }) break
                         }
                     } finally {
-                        touchActive = false
+                        pointerPressed = false
+                        gestureSettlingToDelete =
+                            dismissState.targetValue == SwipeToDismissBoxValue.StartToEnd
                     }
                 }
             },
@@ -2349,6 +2372,33 @@ private fun SwipeSessionRow(
         }
     }
 }
+
+internal data class HomeListPinDecision(
+    val userHasScrolled: Boolean,
+    val pinToTop: Boolean,
+)
+
+internal fun decideHomeListPinning(
+    userHasScrolled: Boolean,
+    firstVisibleItemIndex: Int,
+    firstVisibleItemScrollOffset: Int,
+): HomeListPinDecision {
+    return HomeListPinDecision(
+        userHasScrolled = userHasScrolled,
+        pinToTop = !userHasScrolled &&
+            (firstVisibleItemIndex > 0 || firstVisibleItemScrollOffset > 0),
+    )
+}
+
+internal fun isUserInitiatedHomeScroll(
+    available: Offset,
+    source: NestedScrollSource,
+): Boolean = source == NestedScrollSource.UserInput && available != Offset.Zero
+
+internal fun shouldRequestSwipeDelete(
+    pointerPressed: Boolean,
+    gestureSettlingToDelete: Boolean,
+): Boolean = pointerPressed || gestureSettlingToDelete
 
 @Composable
 private fun SwipeActionBackground(

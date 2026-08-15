@@ -1115,12 +1115,12 @@ class HermesChatConnection internal constructor(
     private fun handleFrame(frame: String) {
         val message = try {
             json.parseToJsonElement(frame).jsonObject
-        } catch (_: Exception) {
-            // Released-server tolerance applies to whole frames as well as unknown
-            // event types: a frame this client cannot parse (e.g. from a newer
-            // server) is skipped rather than tearing down the connection and
-            // failing every pending request.
-            return
+        } catch (error: Exception) {
+            // A syntactically malformed frame could be the only response to an
+            // outstanding RPC. Fail the connection so pending callers cannot wait
+            // forever; forward compatibility is handled by ignoring unknown,
+            // well-formed event types below.
+            throw HermesChatProtocolException("Hermes chat frame was invalid", error)
         }
         if (message.stringValue("jsonrpc") != "2.0") return
 
