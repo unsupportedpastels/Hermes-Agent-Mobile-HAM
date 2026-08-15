@@ -1,8 +1,8 @@
 # HAM — Hermes Agent Mobile
 
-![HAM mark](assets/brand/ham-mark.svg)
+![Official HAM pixel-art icon](app/src/main/res/drawable-nodpi/ham_launcher_art.png)
 
-**HAM (Hermes Agent Mobile)** is an independent, open-source Android client for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It gives you a native Material 3 workspace for connecting to a Hermes server you control.
+**HAM (Hermes Agent Mobile)** is an independent, open-source Android client for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Its official mark is the winged pixel-art sandwich shown above.
 
 > **Unofficial client.** HAM is not affiliated with or endorsed by Nous Research. The Hermes Agent project remains independently maintained and is MIT-licensed.
 

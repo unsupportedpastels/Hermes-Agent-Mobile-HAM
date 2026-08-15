@@ -4,30 +4,8 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- HAM: a flying sandwich with a circuit-board filling. All artwork stays in Android's 66dp safe zone. -->
-    <path
-        android:fillColor="#E9E7EC"
-        android:pathData="M22,57c-1.7,-4.7 0.8,-10.7 7.2,-11.7c3.6,-0.6 7.3,0.4 10.7,2.9l-2.1,5.2c-3.4,-1.1 -5.8,0.5 -6.8,3.7c-3,1.3 -6.1,1.2 -9,0z" />
-    <path
-        android:fillColor="#E9E7EC"
-        android:pathData="M86,57c1.7,-4.7 -0.8,-10.7 -7.2,-11.7c-3.6,-0.6 -7.3,0.4 -10.7,2.9l2.1,5.2c3.4,-1.1 5.8,0.5 6.8,3.7c3,1.3 6.1,1.2 9,0z" />
-    <path
-        android:fillColor="#F5B544"
-        android:pathData="M39,33h30c4,0 7,3 7,7v7h-44v-7c0,-4 3,-7 7,-7z" />
-    <path
-        android:fillColor="#F5B544"
-        android:pathData="M32,62h44v7c0,4 -3,7 -7,7h-30c-4,0 -7,-3 -7,-7z" />
-    <path
-        android:fillColor="#6E3BA1"
-        android:pathData="M37,46h34c2.2,0 4,1.8 4,4v9c0,2.2 -1.8,4 -4,4h-34c-2.2,0 -4,-1.8 -4,-4v-9c0,-2.2 1.8,-4 4,-4z" />
+    <!-- The official HAM artwork supplies the complete adaptive-icon background. -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M44,52h7l3,3v4m0,-4l4,-4v-3m0,7l4,3h5m-18,1l3,-3h6"
-        android:strokeColor="#EAD5FF"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:strokeWidth="2.2" />
-    <path
-        android:fillColor="#EAD5FF"
-        android:pathData="M40,50a2,2 0,1 0,4,0a2,2 0,1 0,-4,0M54,46a2,2 0,1 0,4,0a2,2 0,1 0,-4,0M66,56a2,2 0,1 0,4,0a2,2 0,1 0,-4,0M45,58a2,2 0,1 0,4,0a2,2 0,1 0,-4,0" />
+        android:pathData="M0,0h108v108h-108z" />
 </vector>
