@@ -37,11 +37,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -50,6 +55,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -80,7 +86,10 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -91,6 +100,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.VerticalDragHandle
 import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
+import androidx.compose.material3.adaptive.currentWindowSize
 import androidx.compose.material3.adaptive.layout.PaneExpansionStateKey
 import androidx.compose.material3.adaptive.layout.calculatePaneScaffoldDirective
 import androidx.compose.material3.adaptive.layout.rememberPaneExpansionState
@@ -102,6 +112,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -126,8 +137,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.testTag
@@ -195,6 +207,7 @@ import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.theme.LocalHermesSemanticColors
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
 import java.util.Locale
 
@@ -216,6 +229,13 @@ private var SemanticsPropertyReceiver.sessionStatusPulseAlpha by SessionStatusPu
 
 private const val SESSION_STATUS_PULSE_MILLIS = 900
 
+/**
+ * Minimum window width for the project dock rail. Sits between the M3 medium and expanded
+ * breakpoints so unfolded foldables (~820dp windows) keep the dock. Compared against the current
+ * window, not the device screen, so split-screen windows below this width hide the dock.
+ */
+private const val PROJECT_DOCK_MIN_WIDTH_DP = 800
+
 internal fun sessionStatusPulseAlphaAt(playTimeMillis: Long): Float {
     val boundedTime = playTimeMillis.coerceAtLeast(0L) % (SESSION_STATUS_PULSE_MILLIS * 2L)
     val phase = if (boundedTime <= SESSION_STATUS_PULSE_MILLIS) {
@@ -227,7 +247,6 @@ internal fun sessionStatusPulseAlphaAt(playTimeMillis: Long): Float {
     return 1f + (0.35f - 1f) * easedPhase
 }
 
-private const val PROJECT_DOCK_MIN_WIDTH_DP = 800
 
 @OptIn(ExperimentalMaterial3AdaptiveApi::class)
 @Composable
@@ -374,7 +393,8 @@ fun HermesApp(
         windowAdaptiveInfo.windowSizeClass.isWidthAtLeastBreakpoint(
             WIDTH_DP_MEDIUM_LOWER_BOUND,
         )
-    val supportsNavigationRail = LocalConfiguration.current.screenWidthDp >= PROJECT_DOCK_MIN_WIDTH_DP
+    val windowWidthDp = with(LocalDensity.current) { currentWindowSize().width.toDp() }
+    val supportsNavigationRail = windowWidthDp >= PROJECT_DOCK_MIN_WIDTH_DP.dp
     val paneExpansionState = rememberPaneExpansionState(PaneExpansionStateKey.Default)
     LaunchedEffect(projectSessionPaneProportion, supportsListDetail) {
         if (supportsListDetail && projectSessionPaneProportion != null) {
@@ -881,6 +901,7 @@ private fun ProjectCreationSheet(
                     .fillMaxHeight()
                     .align(Alignment.Center)
                     .navigationBarsPadding()
+                    .imePadding()
                     .padding(horizontal = 20.dp, vertical = 8.dp)
                     .testTag("Create project sheet"),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1421,6 +1442,7 @@ private fun ProjectIconPickerSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -1606,6 +1628,8 @@ private fun ModelPickerSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -1821,6 +1845,7 @@ private fun SessionListScreen(
     var editingSession by remember { mutableStateOf<SessionSummary?>(null) }
     var deletingSession by remember { mutableStateOf<SessionSummary?>(null) }
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
     val sessionActionScope = rememberCoroutineScope()
     val pinnedOnly = searchQuery.contains("is:pinned", ignoreCase = true)
     val archivedOnly = searchQuery.contains("is:archived", ignoreCase = true)
@@ -1963,6 +1988,7 @@ private fun SessionListScreen(
                 }
             }
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             if (showDockOwnedActions && canStartNewChat) {
                 ExtendedFloatingActionButton(
@@ -2068,10 +2094,17 @@ private fun SessionListScreen(
                     }
                 }
             }
+            val layoutDirection = LocalLayoutDirection.current
+            val fabClearance = if (showDockOwnedActions && canStartNewChat) 96.dp else 0.dp
             LazyColumn(
                 state = homeListState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = innerPadding,
+                contentPadding = PaddingValues(
+                    start = innerPadding.calculateStartPadding(layoutDirection),
+                    top = innerPadding.calculateTopPadding(),
+                    end = innerPadding.calculateEndPadding(layoutDirection),
+                    bottom = innerPadding.calculateBottomPadding() + fabClearance,
+                ),
             ) {
                 if (snapshot.delegationStatus.active.isNotEmpty()) {
                     item(key = "running-subagents-heading") {
@@ -2175,9 +2208,6 @@ private fun SessionListScreen(
                             )
                         }
                     }
-                    item(key = "home-bottom-clearance") {
-                        Box(modifier = Modifier.size(104.dp))
-                    }
                 }
             }
             }
@@ -2236,17 +2266,20 @@ private fun SessionListScreen(
             dismissButton = { TextButton(onClick = { deletingSession = null }) { Text("Cancel") } },
         )
     }
-    pendingDelete?.let { session ->
-        Snackbar(
-            action = { TextButton(onClick = { pendingDelete = null }) { Text("Undo") } },
-            modifier = Modifier.padding(16.dp),
-        ) { Text("${session.title} will be deleted") }
-        LaunchedEffect(session.id) {
-            delay(5_000)
-            if (pendingDelete?.id == session.id) {
-                onDeleteSession(session.id)
-                pendingDelete = null
-            }
+    LaunchedEffect(pendingDelete?.id) {
+        val session = pendingDelete ?: return@LaunchedEffect
+        val result = withTimeoutOrNull(5_000) {
+            snackbarHostState.showSnackbar(
+                message = "${session.title} will be deleted",
+                actionLabel = "Undo",
+                duration = SnackbarDuration.Indefinite,
+            )
+        }
+        if (result == SnackbarResult.ActionPerformed) {
+            pendingDelete = null
+        } else if (pendingDelete?.id == session.id) {
+            onDeleteSession(session.id)
+            pendingDelete = null
         }
     }
 }
@@ -2921,7 +2954,7 @@ private fun MissingProjectScreen() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun ServerSettingsScreen(
     serverOrigin: ServerOrigin?,
@@ -2994,134 +3027,144 @@ internal fun ServerSettingsScreen(
             )
         },
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .consumeWindowInsets(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .consumeWindowInsets(innerPadding),
         ) {
-            Text(
-                "Enter the public HTTPS origin of your unchanged Hermes Serve instance.",
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            OutlinedTextField(
-                value = value,
-                onValueChange = {
-                    value = it
-                    saveError = null
-                },
-                label = { Text("Server origin") },
-                supportingText = {
-                    Text(
-                        validationMessage
-                            ?: "HTTPS origin only — no path, credentials, query, or ticket.",
-                    )
-                },
-                isError = validationMessage != null,
-                enabled = !isSaving,
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            saveError?.let { message ->
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .verticalScroll(rememberScrollState())
+                    .imePadding()
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
                 Text(
-                    message,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
+                    "Enter the public HTTPS origin of your unchanged Hermes Serve instance.",
+                    style = MaterialTheme.typography.bodyLarge,
                 )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    enabled = parsedOrigin != null && !isSaving,
-                    onClick = {
-                        val origin = parsedOrigin ?: return@Button
-                        coroutineScope.launch {
-                            isSaving = true
-                            saveError = null
-                            val result = onSave(origin)
-                            isSaving = false
-                            if (result.isSuccess) {
-                                onBack()
-                            } else {
-                                saveError = "Could not save server. Try again."
-                            }
-                        }
-                    },
-                ) {
-                    Text(if (isSaving) "Saving…" else "Save")
-                }
-                TextButton(
-                    enabled = !isSaving,
-                    onClick = dropUnlessResumed { onBack() },
-                ) {
-                    Text("Cancel")
-                }
-            }
-            if (snapshot.authenticationState == AuthenticationState.Authenticated) {
-                HorizontalDivider()
-                Text("Connection", style = MaterialTheme.typography.titleMedium)
-                Text("Hermes ${snapshot.serverVersion ?: "unknown"} · Authenticated")
-                if (snapshot.profiles.isNotEmpty()) {
-                    Text("Profile", style = MaterialTheme.typography.labelLarge)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        snapshot.profiles.forEach { profile ->
-                            FilterChip(
-                                selected = profile == snapshot.selectedProfile,
-                                onClick = { onLoadManagementSettings(profile) },
-                                label = { Text(profile) },
-                            )
-                        }
-                    }
-                }
-                Text("Default model for new chats", style = MaterialTheme.typography.titleMedium)
-                snapshot.defaultModelOptions?.current?.let { current ->
-                    Text("${current.provider} / ${current.model}")
-                }
                 OutlinedTextField(
-                    value = modelQuery,
-                    onValueChange = { modelQuery = it.take(128) },
-                    label = { Text("Search profile models") },
+                    value = value,
+                    onValueChange = {
+                        value = it
+                        saveError = null
+                    },
+                    label = { Text("Server origin") },
+                    supportingText = {
+                        Text(
+                            validationMessage
+                                ?: "HTTPS origin only — no path, credentials, query, or ticket.",
+                        )
+                    },
+                    isError = validationMessage != null,
+                    enabled = !isSaving,
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                snapshot.defaultModelOptions?.providers.orEmpty().forEach { provider ->
-                    provider.models
-                        .filter { modelQuery.isBlank() || it.contains(modelQuery.trim(), ignoreCase = true) }
-                        .take(8)
-                        .forEach { model ->
-                            val selection = ModelSelection(provider.slug, model)
-                            FilterChip(
-                                selected = pendingDefault == selection,
-                                onClick = { pendingDefault = selection },
-                                label = { Text("${provider.name} · $model") },
-                            )
-                        }
+                saveError?.let { message ->
+                    Text(
+                        message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
-                pendingDefault?.let { selection ->
-                    Button(onClick = {
-                        coroutineScope.launch {
-                            val result = onSetProfileDefaultModel(selection, false)
-                            if (result.confirmationRequired) {
-                                pendingExpensive = selection
-                                expensiveMessage = result.confirmationMessage
-                            } else if (result.accepted) {
-                                pendingDefault = null
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        enabled = parsedOrigin != null && !isSaving,
+                        onClick = {
+                            val origin = parsedOrigin ?: return@Button
+                            coroutineScope.launch {
+                                isSaving = true
+                                saveError = null
+                                val result = onSave(origin)
+                                isSaving = false
+                                if (result.isSuccess) {
+                                    onBack()
+                                } else {
+                                    saveError = "Could not save server. Try again."
+                                }
+                            }
+                        },
+                    ) {
+                        Text(if (isSaving) "Saving…" else "Save")
+                    }
+                    TextButton(
+                        enabled = !isSaving,
+                        onClick = dropUnlessResumed { onBack() },
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+                if (snapshot.authenticationState == AuthenticationState.Authenticated) {
+                    HorizontalDivider()
+                    Text("Connection", style = MaterialTheme.typography.titleMedium)
+                    Text("Hermes ${snapshot.serverVersion ?: "unknown"} · Authenticated")
+                    if (snapshot.profiles.isNotEmpty()) {
+                        Text("Profile", style = MaterialTheme.typography.labelLarge)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            snapshot.profiles.forEach { profile ->
+                                FilterChip(
+                                    selected = profile == snapshot.selectedProfile,
+                                    onClick = { onLoadManagementSettings(profile) },
+                                    label = { Text(profile) },
+                                )
                             }
                         }
-                    }) { Text("Set default") }
+                    }
+                    Text("Default model for new chats", style = MaterialTheme.typography.titleMedium)
+                    snapshot.defaultModelOptions?.current?.let { current ->
+                        Text("${current.provider} / ${current.model}")
+                    }
+                    OutlinedTextField(
+                        value = modelQuery,
+                        onValueChange = { modelQuery = it.take(128) },
+                        label = { Text("Search profile models") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        snapshot.defaultModelOptions?.providers.orEmpty().forEach { provider ->
+                            provider.models
+                                .filter { modelQuery.isBlank() || it.contains(modelQuery.trim(), ignoreCase = true) }
+                                .take(8)
+                                .forEach { model ->
+                                    val selection = ModelSelection(provider.slug, model)
+                                    FilterChip(
+                                        selected = pendingDefault == selection,
+                                        onClick = { pendingDefault = selection },
+                                        label = { Text("${provider.name} · $model") },
+                                    )
+                                }
+                        }
+                    }
+                    pendingDefault?.let { selection ->
+                        Button(onClick = {
+                            coroutineScope.launch {
+                                val result = onSetProfileDefaultModel(selection, false)
+                                if (result.confirmationRequired) {
+                                    pendingExpensive = selection
+                                    expensiveMessage = result.confirmationMessage
+                                } else if (result.accepted) {
+                                    pendingDefault = null
+                                }
+                            }
+                        }) { Text("Set default") }
+                    }
+                    TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
+                    snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    CronJobsPanel(
+                        state = snapshot.cronJobsState,
+                        onRefresh = onRefreshCronJobs,
+                        actionJobId = snapshot.cronJobActionJobId,
+                        actionError = snapshot.cronJobActionError,
+                        onJobAction = onCronJobAction,
+                    )
                 }
-                TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
-                snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                CronJobsPanel(
-                    state = snapshot.cronJobsState,
-                    onRefresh = onRefreshCronJobs,
-                    actionJobId = snapshot.cronJobActionJobId,
-                    actionError = snapshot.cronJobActionError,
-                    onJobAction = onCronJobAction,
-                )
             }
         }
     }
@@ -3140,6 +3183,16 @@ internal fun ServerSettingsScreen(
         )
     }
 }
+
+/**
+ * True when the transcript should keep following new content: the newest item is still visible,
+ * or the list has not laid out yet. Once the user scrolls up past the newest item, auto-follow
+ * pauses until they return to the bottom.
+ */
+internal fun isTranscriptPinnedToBottom(
+    lastVisibleItemIndex: Int?,
+    totalItemsCount: Int,
+): Boolean = lastVisibleItemIndex == null || lastVisibleItemIndex >= totalItemsCount - 1
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -3215,13 +3268,32 @@ private fun SessionDetailScreen(
     val transcriptListState = rememberLazyListState(
         initialFirstVisibleItemIndex = timelineLastIndex,
     )
+    val pinnedToBottom by remember(transcriptListState) {
+        derivedStateOf {
+            val layoutInfo = transcriptListState.layoutInfo
+            isTranscriptPinnedToBottom(
+                lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index,
+                totalItemsCount = layoutInfo.totalItemsCount,
+            )
+        }
+    }
+    LaunchedEffect(session.id) {
+        if (chat.messages.isNotEmpty() || hasRunStateContent) {
+            transcriptListState.scrollToItem(timelineLastIndex)
+        }
+    }
+    var lastFollowedMessageCount by remember(session.id) { mutableStateOf(chat.messages.size) }
     LaunchedEffect(
-        session.id,
         chat.messages.size,
         chat.messages.lastOrNull()?.text?.length,
         chat.runState,
     ) {
-        if (chat.messages.isNotEmpty() || hasRunStateContent) {
+        if (chat.messages.isEmpty() && !hasRunStateContent) return@LaunchedEffect
+        if (!pinnedToBottom) return@LaunchedEffect
+        if (chat.messages.size != lastFollowedMessageCount) {
+            lastFollowedMessageCount = chat.messages.size
+            transcriptListState.animateScrollToItem(timelineLastIndex)
+        } else {
             transcriptListState.scrollToItem(timelineLastIndex)
         }
     }
@@ -3301,6 +3373,9 @@ private fun SessionDetailScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding)
+                .wrapContentWidth(Alignment.CenterHorizontally)
+                .widthIn(max = 840.dp)
+                .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -3860,6 +3935,7 @@ private fun SessionInsightsSheet(
                 .heightIn(max = 720.dp)
                 .verticalScroll(rememberScrollState())
                 .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {

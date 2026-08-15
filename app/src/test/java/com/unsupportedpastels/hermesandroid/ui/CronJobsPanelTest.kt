@@ -63,7 +63,8 @@ class CronJobsPanelTest {
 
         composeRule.setContent {
             MaterialTheme {
-                // The caller owns scrolling, like the settings screen does.
+                // The panel no longer scrolls internally; the caller owns scrolling, as
+                // ServerSettingsScreen does.
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     CronJobsPanel(
                         state = state,
