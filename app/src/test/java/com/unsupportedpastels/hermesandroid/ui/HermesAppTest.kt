@@ -1965,6 +1965,32 @@ class HermesAppTest {
     }
 
     @Test
+    fun modelChipPreservesUnsentDraft() {
+        val sessionId = sessions.first().id
+        var pickerOpened: DurableSessionId? = null
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(
+                        authenticationState = AuthenticationState.Authenticated,
+                        chatSessions = mapOf(sessionId to ChatSessionSnapshot()),
+                    ),
+                    onOpenModelPicker = { pickerOpened = it },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNode(hasSetTextAction()).performTextInput("Keep this draft")
+        composeRule.onNodeWithContentDescription("Change session model").performClick()
+
+        assertEquals(sessionId, pickerOpened)
+        val inputText = composeRule.onNode(hasSetTextAction())
+            .fetchSemanticsNode().config[SemanticsProperties.InputText].text
+        assertEquals("Keep this draft", inputText)
+    }
+
+    @Test
     fun removingLastAttachmentRemovesItsChip() {
         var attachments by mutableStateOf(
             mapOf(

@@ -750,7 +750,6 @@ fun HermesApp(
                         },
                         onReasoningSelected = { effort -> onReasoningSelected(session.id, effort) },
                         onOpenModelPicker = {
-                            drafts[draftKey] = ""
                             onSlashCompletionRequested(session.id, "")
                             onOpenModelPicker(session.id)
                         },
@@ -3266,10 +3265,23 @@ internal fun ServerSettingsScreen(
  */
 private const val TranscriptEndScrollOffset = 1 shl 20
 
-internal fun isTranscriptPinnedToBottom(
+/**
+ * True when the transcript is at its actual end: the newest item is visible
+ * AND its bottom is flush with the viewport end. Index visibility alone is
+ * not enough — a streaming final message taller than the viewport keeps the
+ * last index visible through any scroll inside its tail, so a drag would
+ * disable follow with no way to re-engage on return.
+ */
+internal fun isTranscriptAtTrueEnd(
     lastVisibleItemIndex: Int?,
     totalItemsCount: Int,
-): Boolean = lastVisibleItemIndex == null || lastVisibleItemIndex >= totalItemsCount - 1
+    lastVisibleItemBottom: Int,
+    viewportEnd: Int,
+    tolerance: Int = 0,
+): Boolean =
+    lastVisibleItemIndex != null &&
+        lastVisibleItemIndex >= totalItemsCount - 1 &&
+        lastVisibleItemBottom <= viewportEnd + tolerance
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -3348,19 +3360,28 @@ private fun SessionDetailScreen(
     val transcriptListState = rememberLazyListState(
         initialFirstVisibleItemIndex = timelineLastIndex,
     )
+    // A settled scroll can land 1-2px short of the clamped end; allow that
+    // slack when deciding the last item's bottom is flush with the viewport.
+    val followEndTolerancePx = with(LocalDensity.current) { 2.dp.roundToPx() }
     val pinnedToBottom by remember(transcriptListState) {
         derivedStateOf {
             val layoutInfo = transcriptListState.layoutInfo
-            isTranscriptPinnedToBottom(
-                lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index,
+            val last = layoutInfo.visibleItemsInfo.lastOrNull()
+            isTranscriptAtTrueEnd(
+                lastVisibleItemIndex = last?.index,
                 totalItemsCount = layoutInfo.totalItemsCount,
+                lastVisibleItemBottom = last?.let { it.offset + it.size } ?: 0,
+                viewportEnd = layoutInfo.viewportEndOffset,
+                tolerance = followEndTolerancePx,
             )
         }
     }
     // Follow is an intent, not a position: only a user drag disengages it, and
-    // returning to the bottom re-engages it. Gating on instantaneous
-    // pinnedToBottom permanently broke follow whenever a burst of new items
-    // cancelled the catch-up animation and left the view one frame behind.
+    // returning to the bottom re-engages it. Gating on instantaneous index
+    // visibility permanently broke follow whenever a burst of new items
+    // cancelled the catch-up animation and left the view one frame behind, and
+    // a tall streaming message kept the last index visible through any scroll
+    // inside its tail, so returning to the bottom never re-engaged either.
     var followBottom by remember(session.id) { mutableStateOf(true) }
     LaunchedEffect(transcriptListState) {
         transcriptListState.interactionSource.interactions.collect { interaction ->
@@ -3368,8 +3389,8 @@ private fun SessionDetailScreen(
         }
     }
     LaunchedEffect(transcriptListState) {
-        snapshotFlow { pinnedToBottom }.collect { pinned ->
-            if (pinned) followBottom = true
+        snapshotFlow { pinnedToBottom }.collect { atEnd ->
+            if (atEnd) followBottom = true
         }
     }
     // The transcript often arrives after the screen composes (async load on a
