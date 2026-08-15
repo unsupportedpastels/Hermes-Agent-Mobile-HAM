@@ -24,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
@@ -619,7 +620,14 @@ class HermesChatConnection internal constructor(
     private val pendingRequestMethods = ConcurrentHashMap<Long, String>()
     private val interactionLock = Any()
     private val pendingApprovals = HashMap<String, ArrayDeque<PendingApproval>>()
-    private val eventChannel = Channel<HermesChatEvent>(capacity = MAX_EVENT_BUFFER)
+    // DROP_OLDEST: a slow Main-thread collector (fold/unfold recomposition jank
+    // during a fast delta stream) must degrade to lost intermediate deltas, not a
+    // torn-down connection. Terminal events arrive last, so they are the least
+    // likely to be dropped, and resume reconciliation restores authoritative state.
+    private val eventChannel = Channel<HermesChatEvent>(
+        capacity = MAX_EVENT_BUFFER,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     private val connectionJob = SupervisorJob(parentScope.coroutineContext[Job])
     private val connectionScope = CoroutineScope(parentScope.coroutineContext + connectionJob)
     private val readerJob: Job = connectionScope.launch { readLoop() }
@@ -1107,8 +1115,12 @@ class HermesChatConnection internal constructor(
     private fun handleFrame(frame: String) {
         val message = try {
             json.parseToJsonElement(frame).jsonObject
-        } catch (error: Exception) {
-            throw HermesChatProtocolException("Hermes chat frame was invalid", error)
+        } catch (_: Exception) {
+            // Released-server tolerance applies to whole frames as well as unknown
+            // event types: a frame this client cannot parse (e.g. from a newer
+            // server) is skipped rather than tearing down the connection and
+            // failing every pending request.
+            return
         }
         if (message.stringValue("jsonrpc") != "2.0") return
 
@@ -1379,9 +1391,9 @@ class HermesChatConnection internal constructor(
 
             else -> null
         }
-        if (event != null && eventChannel.trySend(event).isFailure) {
-            throw HermesChatTransportException("Hermes chat event buffer exceeded")
-        }
+        // With DROP_OLDEST the send only fails once the channel is closed, which
+        // teardown already handles; a full buffer silently sheds the oldest event.
+        if (event != null) eventChannel.trySend(event)
     }
 
     private fun parseResumeResult(

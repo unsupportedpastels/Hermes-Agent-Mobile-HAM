@@ -20,7 +20,7 @@ class NotificationTapIntentTest {
         val intent = notificationTapIntent(context, "session-1")
 
         assertEquals(NotificationTapActivity::class.java.name, intent.component?.className)
-        assertEquals("session-1", intent.getStringExtra(HermesTurnNotificationService.EXTRA_SESSION_ID))
+        assertEquals("session-1", intent.getStringExtra(EXTRA_TAP_SESSION_ID))
         assertTrue(intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK != 0)
         val activity = context.packageManager.getActivityInfo(intent.component!!, 0)
         assertFalse(activity.exported)

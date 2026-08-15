@@ -292,6 +292,88 @@ class HermesChatIntegrationTest {
     }
 
     @Test
+    fun openingASessionWithARunningTurnCountsItActiveAndReleasesOnCompletion() = runTest(dispatcher) {
+        var liveChannel: Channel<HermesChatEvent>? = null
+        var liveRuntime: RuntimeSessionId? = null
+        val session = ReconnectingChatSession(
+            runtimeId = "runtime-adopted",
+            running = true,
+            inflightText = "partial from another client",
+            inflightUser = "Earlier prompt",
+            onResume = { channel, runtime ->
+                liveChannel = channel
+                liveRuntime = runtime
+            },
+        )
+        val notifications = RecordingTurnNotificationController()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> session },
+            nowEpochSeconds = { 1_900_000_000 },
+            notifications = notifications,
+        )
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        // A turn already running on the server (started elsewhere or before an app
+        // restart) is an active turn for this client too: it must be counted so the
+        // foreground service anchors event delivery while the app is backgrounded.
+        assertTrue(notifications.turnStarts.any { it == durableId })
+        assertEquals(1, notifications.lastActiveCount)
+
+        liveChannel?.trySend(
+            HermesChatEvent.MessageComplete(checkNotNull(liveRuntime), "done elsewhere", "complete"),
+        )
+        liveChannel?.close()
+        advanceUntilIdle()
+
+        assertEquals(0, notifications.lastActiveCount)
+        assertFalse(viewModel.snapshots.value.chatSessions.getValue(durableId).isSending)
+    }
+
+    @Test
+    fun recoveryGiveUpReleasesTheActiveTurnCount() = runTest(dispatcher) {
+        val first = ReconnectingChatSession(
+            runtimeId = "runtime-lost",
+            running = false,
+            inflightText = null,
+            onSubmit = { channel, runtime ->
+                channel.trySend(HermesChatEvent.MessageDelta(runtime, "partial before loss"))
+                channel.close()
+            },
+        )
+        var connections = 0
+        val notifications = RecordingTurnNotificationController()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ ->
+                connections += 1
+                if (connections == 1) first else throw HermesChatTransportException("still offline")
+            },
+            nowEpochSeconds = { 1_900_000_000 },
+            notifications = notifications,
+        )
+        advanceUntilIdle()
+
+        viewModel.sendMessage(durableId, "Keep working")
+        runCurrent()
+        assertEquals(1, notifications.lastActiveCount)
+        advanceUntilIdle()
+
+        // Every reconnect attempt failed; the turn is over from this client's view,
+        // so the ongoing "working" notification must be released, not stuck on.
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertFalse(chat.isSending)
+        assertEquals(0, notifications.lastActiveCount)
+    }
+
+    @Test
     fun stagingFailureOnFreshDraftTearsDownTheRuntime() = runTest(dispatcher) {
         val session = StreamingChatSession()
         val viewModel = chatViewModel(

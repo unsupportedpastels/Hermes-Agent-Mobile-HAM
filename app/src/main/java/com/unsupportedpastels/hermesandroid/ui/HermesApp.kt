@@ -152,6 +152,7 @@ import com.unsupportedpastels.hermesandroid.app.ProjectSummary
 import com.unsupportedpastels.hermesandroid.app.ProjectId
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.app.validHostFolderName
+import com.unsupportedpastels.hermesandroid.app.isNoProjectBucket
 import com.unsupportedpastels.hermesandroid.app.validProjectWorkspacePath
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentPolicy
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
@@ -642,6 +643,7 @@ fun HermesApp(
                     }
                     val projectDraftMissingWorkspace = session.isLocalDraft &&
                         session.projectId != null &&
+                        !isNoProjectBucket(session.projectId) &&
                         validProjectWorkspacePath(session.workspacePath) == null
                     val latestUserMessageIndex = chat.messages
                         .indexOfLast { it.role == ChatMessageRole.User }
@@ -3024,9 +3026,14 @@ private fun SessionDetailScreen(
     val semanticColors = LocalHermesSemanticColors.current
     var showSessionInsights by remember(session.id) { mutableStateOf(false) }
     val workspacePath = validProjectWorkspacePath(session.workspacePath)
-    val workspaceLabel = workspacePath ?: session.projectId?.let { "No workspace" }
+    // Home-bucket sessions run in the server's default working directory; until
+    // the server reports the actual cwd there is no path to show, and "No
+    // workspace" would wrongly suggest the draft cannot start.
+    val workspaceLabel = workspacePath
+        ?: session.projectId?.takeUnless(::isNoProjectBucket)?.let { "No workspace" }
     val projectDraftMissingWorkspace = session.isLocalDraft &&
         session.projectId != null &&
+        !isNoProjectBucket(session.projectId) &&
         workspacePath == null
     var attachmentError by remember(session.id) { mutableStateOf<String?>(null) }
     var pendingSend by remember(session.id) { mutableStateOf<Pair<String, Int>?>(null) }

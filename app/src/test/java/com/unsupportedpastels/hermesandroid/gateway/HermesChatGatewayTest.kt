@@ -428,6 +428,43 @@ class HermesChatGatewayTest {
     }
 
     @Test
+    fun malformedFramesAreSkippedWithoutTearingDownTheConnection() = runTest {
+        val ticketClient = RecordingTicketClient("ticket-1")
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "prompt.submit") {
+                val id = request["id"]!!.jsonPrimitive.content
+                // A newer server may emit frames this client cannot parse; they must
+                // be skipped, leaving later events and the pending ack intact.
+                socket.offer("this is not json")
+                socket.offer("[1, 2, 3]")
+                socket.offer(
+                    """{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"runtime-1","payload":{"text":"still alive"}}}""",
+                )
+                socket.offer("""{"jsonrpc":"2.0","id":$id,"result":{"status":"streaming"}}""")
+            }
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = ticketClient,
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        val ack = connection.submitPrompt(RuntimeSessionId("runtime-1"), "hello")
+        val events = connection.events.take(1).toList()
+
+        assertEquals("streaming", ack.status)
+        assertEquals(
+            listOf(HermesChatEvent.MessageDelta(RuntimeSessionId("runtime-1"), "still alive")),
+            events,
+        )
+        connection.close()
+    }
+
+    @Test
     fun streamingDeltasPreserveInterTokenLeadingWhitespace() = runTest {
         // DeepSeek-style tokenizers attach the inter-word space to the FRONT of
         // the next token ("HE", " WORLD"). Trimming each delta strips that
@@ -867,14 +904,21 @@ class HermesChatGatewayTest {
     }
 
     @Test
-    fun eventBufferOverflowFailsClosedInsteadOfDroppingStreamEvents() = runTest {
-        val socket = ScriptedSocket().apply {
-            onSend = {
+    fun eventBufferOverflowDropsOldestEventsInsteadOfTearingDownTheConnection() = runTest {
+        // A slow collector during a fast delta stream sheds the oldest buffered
+        // events; the connection, pending acks, and newest events all survive.
+        // The final text is restored by message.complete, which carries it whole.
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            if (request["method"]?.jsonPrimitive?.content == "prompt.submit") {
+                val id = request["id"]!!.jsonPrimitive.content
                 repeat(129) { index ->
-                    offer(
+                    socket.offer(
                         """{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"runtime-overflow","payload":{"text":"$index"}}}""",
                     )
                 }
+                socket.offer("""{"jsonrpc":"2.0","id":$id,"result":{"status":"streaming"}}""")
             }
         }
         val connection = HermesChatGateway(
@@ -885,11 +929,18 @@ class HermesChatGatewayTest {
             parentScope = backgroundScope,
         ).connect()
 
-        val failure = runCatching {
-            connection.submitPrompt(RuntimeSessionId("runtime-overflow"), "hello")
-        }.exceptionOrNull()
+        val ack = connection.submitPrompt(RuntimeSessionId("runtime-overflow"), "hello")
+        assertEquals("streaming", ack.status)
 
-        assertTrue(failure is HermesChatTransportException)
+        val events = connection.events.take(128).toList()
+        assertEquals(
+            HermesChatEvent.MessageDelta(RuntimeSessionId("runtime-overflow"), "1"),
+            events.first(),
+        )
+        assertEquals(
+            HermesChatEvent.MessageDelta(RuntimeSessionId("runtime-overflow"), "128"),
+            events.last(),
+        )
         connection.close()
     }
 

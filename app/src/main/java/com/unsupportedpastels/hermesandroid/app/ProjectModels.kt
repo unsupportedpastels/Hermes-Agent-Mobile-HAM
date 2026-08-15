@@ -114,6 +114,17 @@ fun validHostFolderName(name: String?): String? {
 
 private const val MAX_HOST_FOLDER_NAME_LENGTH = 128
 
+/**
+ * The gateway's synthetic bucket holding every session no project claimed
+ * (labelled "Home" by Hermes clients). It intentionally has no workspace path:
+ * sessions in it are created without a cwd and the server applies its default
+ * working directory. Drafts in this bucket must therefore be sendable without
+ * a workspace, unlike drafts in real projects.
+ */
+const val NO_PROJECT_BUCKET_ID = "__no_project__"
+
+fun isNoProjectBucket(projectId: ProjectId?): Boolean = projectId?.value == NO_PROJECT_BUCKET_ID
+
 fun validProjectWorkspacePath(path: String?): String? {
     val value = path?.trim()?.takeIf(String::isNotBlank) ?: return null
     if (value.length > ProjectSummary.MAX_PATH_LENGTH || value.any(Char::isISOControl)) return null
