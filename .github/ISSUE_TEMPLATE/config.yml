@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability or sensitive privacy report
+    url: https://github.com/unsupportedpastels
+    about: Do not disclose sensitive details in a public issue. Follow SECURITY.md to report privately.
+  - name: Hermes Agent upstream project
+    url: https://github.com/NousResearch/hermes-agent
+    about: Report Hermes server or framework issues to the relevant upstream project when appropriate.

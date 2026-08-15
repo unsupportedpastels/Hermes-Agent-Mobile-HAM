@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a reproducible HAM problem without sensitive data.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include server URLs, credentials, cookies, WebSocket tickets, prompts, transcripts, or attachments. Report security-sensitive issues privately as described in SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: HAM version or commit
+      placeholder: 0.1.0 or abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: device_class
+    attributes:
+      label: Device posture
+      options:
+        - Phone / compact window
+        - Fold cover screen
+        - Fold unfolded / expanded window
+        - Tablet, DeX, split screen, or freeform
+        - Other
+    validations:
+      required: true

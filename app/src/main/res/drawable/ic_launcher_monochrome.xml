@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Single-color themed-icon version of the HAM sandwich mark. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M22,57c-1.7,-4.7 0.8,-10.7 7.2,-11.7c3.6,-0.6 7.3,0.4 10.7,2.9l-2.1,5.2c-3.4,-1.1 -5.8,0.5 -6.8,3.7c-3,1.3 -6.1,1.2 -9,0zM86,57c1.7,-4.7 -0.8,-10.7 -7.2,-11.7c-3.6,-0.6 -7.3,0.4 -10.7,2.9l2.1,5.2c3.4,-1.1 5.8,0.5 6.8,3.7c3,1.3 6.1,1.2 9,0zM39,33h30c4,0 7,3 7,7v7h-44v-7c0,-4 3,-7 7,-7zM37,46h34c2.2,0 4,1.8 4,4v9c0,2.2 -1.8,4 -4,4h-34c-2.2,0 -4,-1.8 -4,-4v-9c0,-2.2 1.8,-4 4,-4zM32,62h44v7c0,4 -3,7 -7,7h-30c-4,0 -7,-3 -7,-7z" />
+</vector>

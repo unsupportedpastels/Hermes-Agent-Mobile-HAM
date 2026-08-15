@@ -1,43 +1,57 @@
-# Hermes Android
+# HAM — Hermes Agent Mobile
 
-Native Kotlin/Jetpack Compose remote client for an unchanged `hermes serve` backend.
+![HAM mark](assets/brand/ham-mark.svg)
 
-## Current capabilities
+**HAM (Hermes Agent Mobile)** is an independent, open-source Android client for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It gives you a native Material 3 workspace for connecting to a Hermes server you control.
 
-- Reproducible AGP 9 / Gradle 9 build and a foldable-first Material 3 adaptive shell.
-- Navigation 3 `Home → Project → Session workspace` flow with compact one-pane and wider list/detail presentation.
-- Authoritative project/session browsing with a flat-session fallback when project RPCs are unavailable.
-- Project-aware local drafts that create a remote runtime only on first Send.
-- Persistent HTTPS server-origin setup and origin-scoped encrypted native OAuth tokens.
-- Nous OAuth through the system browser and loopback PKCE callback, proactive/reactive token refresh, and process-start authentication restoration.
-- Durable transcript loading, ticketed JSON-RPC WebSockets, prompt submission, streaming output, bounded reconnect/resume reconciliation, Markdown, managed images, remote attachments, and live slash completion.
-- Concurrent HAM-started sessions with controller state keyed by durable session ID; navigating away does not stop a running turn.
-- Tool/status activity, reasoning, clarification and approval responses, scoped Stop, and truthful handoff states for unsupported secure input.
-- Foreground lifecycle support plus notifications for final responses and blocking input. Notification taps open the exact durable session.
-- Strict observer-by-default compatibility with released Hermes servers and no required backend changes.
+> **Unofficial client.** HAM is not affiliated with or endorsed by Nous Research. The Hermes Agent project remains independently maintained and is MIT-licensed.
 
-The remote `hermes serve` process remains authoritative. HAM does not resume or take control of another connected client's runtime merely to inspect it, and it never closes a shared runtime because the Android UI navigated away or disconnected.
+## What HAM does
 
-## State and security boundaries
+- Connects to an unchanged, officially compatible `hermes serve` backend.
+- Browses projects and sessions, creates local drafts, and starts a remote runtime only when you send the first prompt.
+- Streams replies, tool activity, reasoning, approvals, clarifications, managed images, and remote attachments.
+- Supports native Nous OAuth with system-browser PKCE, origin-scoped encrypted credentials, refresh, and reconnect/reconciliation.
+- Adapts cleanly across compact phones, Fold cover screens, unfolded layouts, split screen, freeform windows, and DeX.
+- Preserves a HAM-started live turn when you navigate away; it does not take over or close another client’s runtime.
 
-- Durable stored-session IDs, local draft IDs, project IDs, and transient runtime IDs remain distinct.
-- Credentials and cached connection state are scoped by normalized server origin; changing origins tears down stale jobs/controllers and never carries credentials forward.
-- WebSocket tickets are fresh, single-use, and in memory only.
-- Working indicators represent HAM's actual `isSending` turn state, not an idle attached runtime or REST recency metadata.
-- Tokens, cookies, tickets, prompts, transcripts, attachments, and connection strings must never be logged.
+## Security & privacy
 
-## Build
+HAM connects only to the server origin you configure. It does not include a hosted Hermes service, telemetry SDK, analytics SDK, ad network, or hard-coded remote endpoint.
+
+- Credentials, cookies, connection state, and cached transcripts are scoped to the normalized server origin.
+- WebSocket tickets are fresh, single-use, and held in memory only.
+- Production connections should use HTTPS. Cleartext traffic is disabled in the manifest.
+- Your prompts, attachments, and transcript data are processed by the Hermes server you choose—not by a HAM-operated service.
+
+See [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md) for details.
+
+## Status
+
+HAM is pre-release software. It is being prepared for an initial Google Play release and is not yet a published Play Store app. See [release readiness](docs/release-readiness.md) for the remaining shipping checklist.
+
+## Build from source
+
+### Prerequisites
+
+- JDK 17
+- Android SDK platform corresponding to the project’s configured `compileSdk`
+- An Android device or emulator for runtime verification
+
+Create an untracked `local.properties` with your SDK path, then run:
 
 ```bash
 ./gradlew testDebugUnitTest lintDebug assembleDebug validateDebugScreenshotTest
 ```
 
-Screenshot references must not be regenerated without visual review. For runtime verification, install the exact debug APK with a serial-qualified, data-preserving `adb install -r` and exercise Back/reopen, concurrent turns, reconnect, notification routing, and compact/wide layouts.
+The debug APK is written to `app/build/outputs/apk/debug/`.
 
-The Android SDK path belongs in untracked `local.properties`.
+For local setup and runtime checks, see [docs/setup.md](docs/setup.md) and [docs/testing.md](docs/testing.md).
 
-## Target device
+## Contributing
 
-The primary physical target is the standard/non-Ultra Samsung Galaxy Z Fold 8. The UI must also adapt by live window size rather than device-model checks, including cover display, unfolded display, split screen, freeform windows, and DeX.
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request. In particular, HAM must stay a client of released, official Hermes interfaces—no private backend route, plugin, or server fork is a requirement for the app.
 
-See [setup](docs/setup.md), [requirements](docs/requirements.md), and [testing](docs/testing.md).
+## License
+
+HAM is released under the [MIT License](LICENSE). Third-party components retain their own licenses.
