@@ -1761,7 +1761,7 @@ class HermesConnectionViewModel(
                     HermesChatResponseStatus.Unknown,
                     -> RunInteractionLifecycle.Failed
                 }
-                publishApprovalResponse(operation, lifecycle)
+                publishApprovalResponse(operation, lifecycle, response.nextApproval)
                 if (lifecycle == RunInteractionLifecycle.Failed) {
                     publishApprovalError(operation)
                 }
@@ -3754,6 +3754,7 @@ class HermesConnectionViewModel(
     private fun publishApprovalResponse(
         operation: ControllerOperation,
         lifecycle: RunInteractionLifecycle,
+        nextApproval: HermesChatEvent.ApprovalRequest? = null,
     ) {
         synchronized(controllerLock) {
             if (!isCurrentControllerOperation(operation)) return
@@ -3766,15 +3767,24 @@ class HermesConnectionViewModel(
                 current.choices != operation.advertisedChoices ||
                 current.lifecycle != RunInteractionLifecycle.Responding
             ) return
+            val transitionedRunState = chat.runState.transitionApprovalLifecycle(
+                operation.runtimeSessionId,
+                operation.requestId,
+                lifecycle,
+            )
+            val nextRunState = if (
+                lifecycle != RunInteractionLifecycle.Failed &&
+                nextApproval?.sessionId == operation.runtimeSessionId
+            ) {
+                transitionedRunState.reduce(nextApproval)
+            } else {
+                transitionedRunState
+            }
             mutableSnapshots.value = snapshot.copy(
                 chatSessions = snapshot.chatSessions + (
                     operation.durableSessionId to chat.copy(
                         error = null,
-                        runState = chat.runState.transitionApprovalLifecycle(
-                            operation.runtimeSessionId,
-                            operation.requestId,
-                            lifecycle,
-                        ),
+                        runState = nextRunState,
                     )
                     ),
             )

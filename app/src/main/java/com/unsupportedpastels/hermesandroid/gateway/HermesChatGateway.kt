@@ -164,6 +164,7 @@ enum class HermesChatResponseStatus {
 
 data class HermesChatResponse(
     val status: HermesChatResponseStatus,
+    val nextApproval: HermesChatEvent.ApprovalRequest? = null,
 )
 
 /**
@@ -579,8 +580,19 @@ class HermesChatGateway(
 
 private data class PendingApproval(
     val requestId: String?,
+    val command: String?,
+    val description: String?,
     val choices: List<String>,
-)
+) {
+    fun toEvent(sessionId: RuntimeSessionId): HermesChatEvent.ApprovalRequest =
+        HermesChatEvent.ApprovalRequest(
+            sessionId = sessionId,
+            requestId = requestId,
+            command = command,
+            description = description,
+            choices = choices,
+        )
+}
 
 class HermesChatConnection internal constructor(
     private val socket: HermesChatSocket,
@@ -834,7 +846,7 @@ class HermesChatConnection internal constructor(
         synchronized(interactionLock) {
             val queue = pendingApprovals[sessionKey]
             val pending = if (boundedRequestId == null) {
-                queue?.peekFirst()
+                queue?.peekLast()
             } else {
                 queue?.firstOrNull { it.requestId == boundedRequestId }
             }
@@ -850,17 +862,25 @@ class HermesChatConnection internal constructor(
             put("all", all)
         }
         val response = parseInteractionResponse(request("approval.respond", params))
-        synchronized(interactionLock) {
+        val nextApproval = synchronized(interactionLock) {
             val queue = pendingApprovals[sessionKey]
-            when {
-                queue == null -> Unit
-                all -> queue.clear()
-                boundedRequestId != null -> queue.removeIf { it.requestId == boundedRequestId }
-                queue.isNotEmpty() -> queue.removeFirst()
+            if (response.status in setOf(
+                    HermesChatResponseStatus.Ok,
+                    HermesChatResponseStatus.Resolved,
+                    HermesChatResponseStatus.Expired,
+                )
+            ) {
+                when {
+                    queue == null -> Unit
+                    all -> queue.clear()
+                    boundedRequestId != null -> queue.removeIf { it.requestId == boundedRequestId }
+                    queue.isNotEmpty() -> queue.removeLast()
+                }
             }
             if (queue == null || queue.isEmpty()) pendingApprovals.remove(sessionKey)
+            queue?.peekLast()?.toEvent(runtimeSessionId)
         }
-        return response
+        return response.copy(nextApproval = nextApproval)
     }
 
     override suspend fun interruptSession(
@@ -1354,7 +1374,14 @@ class HermesChatConnection internal constructor(
                     )
                     synchronized(interactionLock) {
                         pendingApprovals.getOrPut(sessionId.value) { ArrayDeque() }
-                            .addLast(PendingApproval(approval.requestId, choices))
+                            .addLast(
+                                PendingApproval(
+                                    requestId = approval.requestId,
+                                    command = approval.command,
+                                    description = approval.description,
+                                    choices = choices,
+                                ),
+                            )
                     }
                     approval
                 }

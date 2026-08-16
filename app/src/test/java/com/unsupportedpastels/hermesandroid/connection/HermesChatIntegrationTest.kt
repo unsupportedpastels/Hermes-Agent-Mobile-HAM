@@ -1311,6 +1311,50 @@ class HermesChatIntegrationTest {
     }
 
     @Test
+    fun approvalControllerPromotesTheNextQueuedApprovalAfterResolvingTheLatest() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        val firstApproval = HermesChatEvent.ApprovalRequest(
+            sessionId = session.runtimeSessionId,
+            requestId = "approval-1",
+            command = "first command",
+            description = "First approval",
+            choices = listOf("once", "deny"),
+        )
+        session.emit(firstApproval)
+        session.emit(
+            HermesChatEvent.ApprovalRequest(
+                sessionId = session.runtimeSessionId,
+                requestId = "approval-2",
+                command = "second command",
+                description = "Second approval",
+                choices = listOf("session", "deny"),
+            ),
+        )
+        advanceUntilIdle()
+
+        val response = viewModel.respondToApproval(durableId, "session")
+        runCurrent()
+        session.approvalResponse.complete(
+            HermesChatResponse(
+                status = HermesChatResponseStatus.Ok,
+                nextApproval = firstApproval,
+            ),
+        )
+        response.join()
+
+        val promoted = viewModel.snapshots.value.chatSessions.getValue(durableId).runState.approval
+        assertEquals("approval-1", promoted?.requestId)
+        assertEquals("First approval", promoted?.descriptionPreview)
+        assertEquals(listOf("once", "deny"), promoted?.choices)
+        assertEquals(RunInteractionLifecycle.Pending, promoted?.lifecycle)
+    }
+
+    @Test
     fun stopControllerTargetsSendingRuntimeOnceAndTerminalizesLiveInteractionsWithoutClosingSocket() = runTest(dispatcher) {
         val session = ControllerChatSession()
         val viewModel = chatViewModel(session)

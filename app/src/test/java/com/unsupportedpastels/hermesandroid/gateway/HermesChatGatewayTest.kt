@@ -914,6 +914,9 @@ class HermesChatGatewayTest {
             request["params"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content },
         )
         assertEquals(HermesChatResponseStatus.Ok, response.status)
+        assertEquals("approval-1", response.nextApproval?.requestId)
+        assertEquals("first", response.nextApproval?.description)
+        assertEquals(listOf("once", "deny"), response.nextApproval?.choices)
         connection.close()
     }
 
