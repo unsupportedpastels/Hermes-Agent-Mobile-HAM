@@ -511,6 +511,76 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
+    fun newDraftUsesTheSameSelectedProfileForPreviewAndFirstRuntime() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = AuthenticatingHermesConnectionClient().apply {
+            profiles = listOf("default", "work")
+            defaultModelOptions = ModelOptions(
+                current = ModelSelection("openai-codex", "gpt-5.6-sol"),
+                providers = emptyList(),
+            )
+        }
+        val chatSession = RecordingProjectDraftChatSession()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+            chatConnector = HermesChatConnector { _, _ -> chatSession },
+            projectConnector = null,
+        )
+
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+        viewModel.loadManagementSettings("work").join()
+
+        val draftId = viewModel.createNewSession()
+        advanceUntilIdle()
+        viewModel.sendMessage(draftId, "Use work defaults")
+        advanceUntilIdle()
+
+        assertEquals("work", client.defaultModelProfiles.last())
+        assertEquals("work", chatSession.createdProfile)
+    }
+
+    @Test
+    fun newDraftPreservesResolvedModelWhenReasoningLookupFails() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = AuthenticatingHermesConnectionClient().apply {
+            defaultModelOptions = ModelOptions(
+                current = ModelSelection("openai-codex", "gpt-5.6-sol"),
+                providers = emptyList(),
+            )
+            profileReasoningFailure = HermesConnectionException("malformed config")
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+            projectConnector = null,
+        )
+
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        val draftId = viewModel.createNewSession()
+        advanceUntilIdle()
+
+        val chat = viewModel.snapshots.value.chatSessions.getValue(draftId)
+        assertEquals("openai-codex", chat.provider)
+        assertEquals("gpt-5.6-sol", chat.model)
+        assertEquals(null, chat.reasoningEffort)
+        assertTrue(chat.draftDefaultsLoaded)
+    }
+
+    @Test
     fun createProjectSessionPublishesExactProjectDraftWithValidatedWorkspaceWithoutRuntime() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
@@ -2046,7 +2116,10 @@ private class AuthenticatingHermesConnectionClient : HermesConnectionClient {
     var hostDirectoryResponse = HostDirectoryListing("/srv", emptyList())
     val hostDirectoryRequests = mutableListOf<Triple<ServerOrigin, String?, String?>>()
     var defaultModelOptions = ModelOptions(current = null, providers = emptyList())
+    var profiles = listOf("default")
+    val defaultModelProfiles = mutableListOf<String>()
     var profileReasoningEffort: String? = null
+    var profileReasoningFailure: Throwable? = null
 
     override suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo =
         probeResponse.await()
@@ -2075,14 +2148,26 @@ private class AuthenticatingHermesConnectionClient : HermesConnectionClient {
         serverOrigin: ServerOrigin,
         accessToken: String,
         profile: String,
-    ): ModelOptions = defaultModelOptions
+    ): ModelOptions {
+        defaultModelProfiles += profile
+        return defaultModelOptions
+    }
+
+    override suspend fun loadProfiles(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+    ): List<String> = profiles
 
     override suspend fun loadProfileReasoningEffort(
         serverOrigin: ServerOrigin,
         accessToken: String,
         profile: String,
+        provider: String,
         model: String,
-    ): String? = profileReasoningEffort
+    ): String? {
+        profileReasoningFailure?.let { throw it }
+        return profileReasoningEffort
+    }
 
     override suspend fun loadTranscript(
         serverOrigin: ServerOrigin,
@@ -2328,6 +2413,7 @@ private class RecordingProjectDraftChatSession : HermesChatSession {
     override val events = MutableSharedFlow<HermesChatEvent>()
     var createCalls = 0
     var createdForDurableId: DurableSessionId? = null
+    var createdProfile: String? = null
     var createdWorkspacePath: String? = null
     var submittedText: String? = null
 
@@ -2343,6 +2429,7 @@ private class RecordingProjectDraftChatSession : HermesChatSession {
     ): ResumedChatSession {
         createCalls += 1
         createdForDurableId = durableSessionId
+        createdProfile = profile
         createdWorkspacePath = workspacePath
         return ResumedChatSession(
             runtimeSessionId = RuntimeSessionId("runtime-project-draft"),

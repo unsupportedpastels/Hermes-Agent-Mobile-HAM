@@ -169,7 +169,28 @@ class HermesConnectionClientTest {
             ServerOrigin.parse("https://hermes.example"),
             "opaque-access",
             "work",
+            "openai",
             "gpt-5.6-sol",
+        )
+
+        assertEquals("high", effort)
+    }
+
+    @Test
+    fun profileReasoningEffortPrefersSelectedProviderWhenModelNamesOverlap() = runTest {
+        val engine = MockEngine {
+            respond(
+                """{"agent":{"reasoning_effort":"medium","reasoning_overrides":{"anthropic/shared-model":"low","openai/shared-model":"high","shared-model":"minimal"}}}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+
+        val effort = HttpHermesConnectionClient(HttpClient(engine)).loadProfileReasoningEffort(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+            "openai",
+            "shared-model",
         )
 
         assertEquals("high", effort)

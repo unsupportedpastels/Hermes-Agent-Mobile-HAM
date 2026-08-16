@@ -305,6 +305,7 @@ interface HermesConnectionClient {
         serverOrigin: ServerOrigin,
         accessToken: String,
         profile: String,
+        provider: String,
         model: String,
     ): String? = null
 
@@ -478,6 +479,7 @@ class HttpHermesConnectionClient(
         serverOrigin: ServerOrigin,
         accessToken: String,
         profile: String,
+        provider: String,
         model: String,
     ): String? {
         val response = client.get("${serverOrigin.value}/api/config") {
@@ -492,13 +494,23 @@ class HttpHermesConnectionClient(
             ?: throw HermesConnectionException("Hermes config response was invalid")
         val agent = root["agent"] as? JsonObject ?: return null
         val overrides = agent["reasoning_overrides"] as? JsonObject
-        val modelVariants = reasoningModelVariants(model)
-        val override = overrides
+        val bareModelVariants = reasoningBareModelVariants(model)
+        val normalizedProvider = provider.trim().lowercase()
+        val qualifiedVariants = bareModelVariants.mapTo(mutableSetOf()) {
+            "$normalizedProvider/$it"
+        }
+        val normalizedModel = model.trim().lowercase()
+        if (normalizedModel.startsWith("$normalizedProvider/")) {
+            qualifiedVariants += normalizedModel
+        }
+        fun matchingOverride(keys: Set<String>): String? = overrides
             ?.entries
-            ?.firstOrNull { (key, _) -> reasoningModelVariants(key).any(modelVariants::contains) }
+            ?.firstOrNull { (key, _) -> key.trim().lowercase() in keys }
             ?.value
             ?.jsonPrimitive
             ?.contentOrNull
+        val override = matchingOverride(qualifiedVariants)
+            ?: matchingOverride(bareModelVariants)
         return canonicalProfileReasoningEffort(override)
             ?: canonicalProfileReasoningEffort(
                 agent["reasoning_effort"]?.jsonPrimitive?.contentOrNull,
@@ -892,17 +904,14 @@ private fun canonicalProfileReasoningEffort(value: String?): String? {
     }
 }
 
-private fun reasoningModelVariants(value: String): Set<String> {
-    val normalized = value.trim().lowercase()
-    if (normalized.isEmpty()) return emptySet()
-    val bare = normalized.substringAfterLast('/')
-    return buildSet {
-        listOf(normalized, bare).forEach { model ->
-            add(model)
-            add(model.replace('.', '-'))
-            add(model.replace('-', '.'))
-        }
-    }
+private fun reasoningBareModelVariants(value: String): Set<String> {
+    val bare = value.trim().lowercase().substringAfterLast('/')
+    if (bare.isEmpty()) return emptySet()
+    return setOf(
+        bare,
+        bare.replace('.', '-'),
+        bare.replace('-', '.'),
+    )
 }
 
 private fun validManagedDirectoryEntryName(name: String): String? {
