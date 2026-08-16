@@ -539,11 +539,20 @@ class HermesConnectionViewModel(
         val origin = serverOrigin ?: return
         val cached = repository.read(CacheScope(origin, profile), nowEpochSeconds())
         currentCoroutineContext().ensureActive()
+        val currentSnapshot = mutableSnapshots.value
+        val liveMetadataIsAuthoritative =
+            currentSnapshot.connectionState == ConnectionState.Connected &&
+                currentSnapshot.sessionMetadataSource == CacheSource.Live &&
+                currentSnapshot.authenticationState in setOf(
+                    AuthenticationState.Authenticated,
+                    AuthenticationState.NotRequired,
+                )
         if (
             activeOrigin != origin || generation != originGeneration ||
-            profileGeneration != expectedProfileGeneration || cached.sessions.isEmpty()
+            profileGeneration != expectedProfileGeneration || cached.sessions.isEmpty() ||
+            liveMetadataIsAuthoritative
         ) return
-        mutableSnapshots.value = mutableSnapshots.value.copy(
+        mutableSnapshots.value = currentSnapshot.copy(
             durableSessions = cached.sessions.map(CachedSession::summary),
             sessionMetadataSource = CacheSource.Cached,
             chatSessions = cached.sessions.fold(mutableSnapshots.value.chatSessions) { chats, session ->

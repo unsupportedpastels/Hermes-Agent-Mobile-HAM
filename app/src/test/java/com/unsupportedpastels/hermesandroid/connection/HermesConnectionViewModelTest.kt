@@ -185,6 +185,48 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
+    fun delayedOfflineCacheCannotReplaceLiveSessionsAfterSuccessfulFirstLaunch() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val cached = SessionSummary(DurableSessionId("cached-1"), "Cached session")
+        val live = SessionSummary(DurableSessionId("live-1"), "Live session")
+        val cacheReadBarrier = CompletableDeferred<Unit>()
+        val cache = RecordingOfflineCacheRepository(
+            snapshots = mapOf(
+                CacheScope(origin, "default") to OfflineCacheSnapshot(
+                    listOf(CachedSession(cached, updatedAtEpochSeconds = 10)),
+                ),
+            ),
+            readBarrier = cacheReadBarrier,
+        )
+        val client = FakeHermesConnectionClient()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            cacheRepository = cache,
+            nowEpochSeconds = { 11 },
+        )
+        runCurrent()
+        client.response.complete(
+            HermesConnectionInfo(
+                version = "0.20.0",
+                authRequired = false,
+                nativeOAuthSupported = false,
+                providers = emptyList(),
+                sessions = listOf(live),
+            ),
+        )
+        runCurrent()
+        assertEquals(CacheSource.Live, viewModel.snapshots.value.sessionMetadataSource)
+        assertEquals(listOf(live), viewModel.snapshots.value.durableSessions)
+
+        cacheReadBarrier.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(CacheSource.Live, viewModel.snapshots.value.sessionMetadataSource)
+        assertEquals(listOf(live), viewModel.snapshots.value.durableSessions)
+    }
+
+    @Test
     fun clearingOfflineCachePreservesLiveServerSessions() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val live = SessionSummary(DurableSessionId("live-1"), "Live session")
@@ -2929,13 +2971,16 @@ private class FakeHermesConnectionClient : HermesConnectionClient {
 
 private class RecordingOfflineCacheRepository(
     private val snapshots: Map<CacheScope, OfflineCacheSnapshot> = emptyMap(),
+    private val readBarrier: CompletableDeferred<Unit>? = null,
 ) : OfflineCacheRepository {
     override val transcriptCachingEnabled = MutableStateFlow(false)
     val clearedScopes = mutableListOf<CacheScope?>()
     val clearedTranscriptScopes = mutableListOf<CacheScope?>()
 
-    override suspend fun read(scope: CacheScope, nowEpochSeconds: Long): OfflineCacheSnapshot =
-        snapshots[scope] ?: OfflineCacheSnapshot()
+    override suspend fun read(scope: CacheScope, nowEpochSeconds: Long): OfflineCacheSnapshot {
+        readBarrier?.await()
+        return snapshots[scope] ?: OfflineCacheSnapshot()
+    }
 
     override suspend fun writeMetadata(
         scope: CacheScope,
