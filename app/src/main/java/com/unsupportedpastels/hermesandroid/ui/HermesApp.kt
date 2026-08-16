@@ -4829,10 +4829,8 @@ private fun SessionDetailScreen(
                         .semantics { contentDescription = "Change session model" },
                 )
                 val reportedReasoningEffort = chat.reasoningEffort?.takeIf(String::isNotBlank)
-                // Reasoning can be changed lazily via setReasoningEffort (it attaches a live
-                // session on demand), so it stays editable as long as the model advertises the
-                // capability — matching the always-editable model picker. Fast mode, by contrast,
-                // requires an already-attached controller and remains gated on maintenanceAvailable.
+                // Reasoning and Fast can attach a live session on explicit user action, so the
+                // selectors stay available whenever the model explicitly advertises support.
                 val reasoningEditable = chat.modelCapabilities?.reasoning == true
                 if (reasoningEditable) {
                     var reasoningMenuOpen by remember(session.id) { mutableStateOf(false) }
@@ -4884,10 +4882,7 @@ private fun SessionDetailScreen(
                         )
                     }
                 }
-                if (
-                    chat.modelCapabilities?.fast == true &&
-                    (maintenanceAvailable || session.isLocalDraft)
-                ) {
+                if (chat.modelCapabilities?.fast == true) {
                     var fastMenuOpen by remember(session.id) { mutableStateOf(false) }
                     val fastEnabled = chat.fastMode == "fast"
                     Box {

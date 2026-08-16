@@ -58,6 +58,8 @@ import com.unsupportedpastels.hermesandroid.notifications.AndroidTurnNotificatio
 import com.unsupportedpastels.hermesandroid.notifications.NoOpTurnNotificationController
 import com.unsupportedpastels.hermesandroid.notifications.TurnNotificationController
 import com.unsupportedpastels.hermesandroid.gateway.KtorWsTicketClient
+import com.unsupportedpastels.hermesandroid.gateway.CurrentModelInfo
+import com.unsupportedpastels.hermesandroid.gateway.ModelCapabilities
 import com.unsupportedpastels.hermesandroid.gateway.ModelOptions
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
@@ -1501,15 +1503,14 @@ class HermesConnectionViewModel(
                         ?.takeIf { it.profile == selected && it.model != null && it.provider != null }
                         ?.let { ModelSelection(checkNotNull(it.provider), checkNotNull(it.model)) }
                         ?: options.current
-                    val effectiveCapabilities = currentInfo
-                        ?.takeIf { it.profile == selected && it.model != null && it.provider != null }
-                        ?.capabilities
-                        ?: options.capabilitiesFor(effectiveModel)
+                    val effectiveCapabilities = effectiveModel?.let { selection ->
+                        resolveModelCapabilities(currentInfo, options, selection)
+                    }
                     val updatedChats = currentSnapshot.chatSessions.mapValues { (_, chat) ->
                         if (
                             effectiveModel != null &&
-                            chat.model == effectiveModel.model &&
-                            chat.provider == effectiveModel.provider
+                            chat.provider == effectiveModel.provider &&
+                            modelIdentifiersMatch(chat.model, effectiveModel.model)
                         ) {
                             chat.copy(
                                 modelCapabilities = effectiveCapabilities,
@@ -3215,40 +3216,35 @@ class HermesConnectionViewModel(
     }
 
     fun setFast(durableSessionId: DurableSessionId, fast: Boolean): Job {
-        val controller = liveControllers[durableSessionId]
         val chat = mutableSnapshots.value.chatSessions[durableSessionId]
-        val runtimeSessionId = controller?.runtimeSessionId
-        if (
-            controller == null &&
-            durableSessionId in pendingDraftSessions &&
-            chat?.modelCapabilities?.fast == true
-        ) {
-            return viewModelScope.launch {
-                updateChat(durableSessionId) {
-                    it.copy(fastMode = if (fast) "fast" else "normal", error = null)
-                }
-            }
-        }
-        if (
-            controller == null ||
-            runtimeSessionId == null ||
-            chat?.modelCapabilities?.fast != true ||
-            activeOrigin == null ||
-            !isExactControllerRuntime(durableSessionId, controller.session, runtimeSessionId)
-        ) {
+        if (chat?.modelCapabilities?.fast != true) {
             return viewModelScope.launch {
                 updateChat(durableSessionId) { it.copy(error = "Fast mode is unavailable for this model") }
             }
         }
-        val origin = checkNotNull(activeOrigin)
-        val originGeneration = generation
-        val operationGeneration = controller.operationGeneration
-        val session = controller.session
+        val operationGeneration = liveControllers[durableSessionId]?.operationGeneration
+            ?: (++nextChatOperationGeneration).also {
+                chatOperationGenerations[durableSessionId] = it
+            }
         val job = viewModelScope.launch {
+            val origin = activeOrigin
+            if (origin == null) {
+                updateChat(durableSessionId) { it.copy(error = "Hermes is not connected") }
+                return@launch
+            }
+            val originGeneration = generation
             try {
-                if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
-                    !isExactControllerRuntime(durableSessionId, session, runtimeSessionId)
-                ) return@launch
+                val accessToken = accessTokenForRequest(origin, originGeneration)
+                    ?: throw HermesConnectionException("Sign in is required to change Fast mode")
+                val session = ensureLiveSession(
+                    origin = origin,
+                    originGeneration = originGeneration,
+                    operationGeneration = operationGeneration,
+                    accessToken = accessToken,
+                    durableSessionId = durableSessionId,
+                )
+                val runtimeSessionId = liveControllers[durableSessionId]?.runtimeSessionId
+                    ?: throw HermesConnectionException("Hermes session is not ready")
                 session.setFast(runtimeSessionId, fast)
                 currentCoroutineContext().ensureActive()
                 if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
@@ -3259,10 +3255,13 @@ class HermesConnectionViewModel(
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
+            } catch (_: NativeRefreshExpiredException) {
+                if (isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) {
+                    disconnectChat()
+                    publishSignInRequired()
+                }
             } catch (error: Exception) {
-                if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
-                    !isExactControllerRuntime(durableSessionId, session, runtimeSessionId)
-                ) return@launch
+                if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
                 updateChat(durableSessionId) {
                     it.copy(error = error.message?.take(160) ?: "Could not change fast mode")
                 }
@@ -4196,16 +4195,51 @@ class HermesConnectionViewModel(
                     ?.let { model ->
                         resumed.provider?.takeIf(String::isNotBlank)?.let { provider ->
                             val snapshot = mutableSnapshots.value
-                            snapshot.currentModelInfo
-                                ?.takeIf { it.model == model && it.provider == provider }
-                                ?.capabilities
-                                ?: snapshot.defaultModelOptions
-                                    ?.capabilitiesFor(ModelSelection(provider, model))
+                            resolveModelCapabilities(
+                                currentInfo = snapshot.currentModelInfo,
+                                options = snapshot.defaultModelOptions,
+                                selection = ModelSelection(provider, model),
+                            )
                         }
                     }
                     ?: current.modelCapabilities,
             )
         }
+    }
+
+    private fun resolveModelCapabilities(
+        currentInfo: CurrentModelInfo?,
+        options: ModelOptions?,
+        selection: ModelSelection,
+    ): ModelCapabilities? {
+        val currentCapabilities = currentInfo
+            ?.takeIf {
+                it.provider == selection.provider &&
+                    modelIdentifiersMatch(it.model, selection.model) &&
+                    it.capabilities.hasExplicitCapability
+            }
+            ?.capabilities
+        if (currentCapabilities != null) return currentCapabilities
+
+        val provider = options?.providers?.firstOrNull { it.slug == selection.provider } ?: return null
+        provider.capabilities[selection.model]
+            ?.takeIf(ModelCapabilities::hasExplicitCapability)
+            ?.let { return it }
+        val matchingCapabilities = provider.capabilities
+            .filterKeys { modelIdentifiersMatch(it, selection.model) }
+            .values
+            .filter(ModelCapabilities::hasExplicitCapability)
+            .distinct()
+        return matchingCapabilities.singleOrNull()
+    }
+
+    private fun modelIdentifiersMatch(first: String?, second: String?): Boolean {
+        if (first == null || second == null) return false
+        if (first == second) return true
+        val firstQualified = '/' in first
+        val secondQualified = '/' in second
+        return firstQualified != secondQualified &&
+            first.substringAfterLast('/') == second.substringAfterLast('/')
     }
 
     private fun chatMessageFromJson(row: JsonObject): ChatMessage? {

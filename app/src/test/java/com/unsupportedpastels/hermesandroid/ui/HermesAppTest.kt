@@ -523,6 +523,35 @@ class HermesAppTest {
     }
 
     @Test
+    fun durableSessionWithAdvertisedFastShowsSpeedometerWithoutLiveRuntime() {
+        val sessionId = sessions.first().id
+        var selectedFast: Pair<DurableSessionId, Boolean>? = null
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(
+                        chatSessions = mapOf(
+                            sessionId to ChatSessionSnapshot(
+                                model = "openai/gpt-5.6-sol",
+                                provider = "openai-codex",
+                                modelCapabilities = ModelCapabilities(fast = true, reasoning = true),
+                                fastMode = "normal",
+                                reasoningEffort = "medium",
+                            ),
+                        ),
+                    ),
+                    initialRoute = SessionDetailRoute(sessionId),
+                    onFastSelected = { id, fast -> selectedFast = id to fast },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Change fast mode").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Fast").performClick()
+        assertEquals(sessionId to true, selectedFast)
+    }
+
+    @Test
     fun exactModelCommandOpensNativePickerWithoutSendingChatText() {
         val sessionId = sessions.first().id
         var opened: DurableSessionId? = null

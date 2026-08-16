@@ -1453,6 +1453,110 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
+    fun resumeMatchesQualifiedRuntimeModelToCurrentModelCapabilities() = runTest(dispatcher) {
+        val settings = MutableStateFlow(
+            ServerSettingsState.Ready(ServerOrigin.parse("https://hermes.example")),
+        )
+        val durableId = DurableSessionId("stored-qualified-model-capabilities")
+        val client = AuthenticatingHermesConnectionClient().apply {
+            currentModelInfoLoader = { _, _, _ ->
+                CurrentModelInfo(
+                    profile = "default",
+                    model = "gpt-5.6-sol",
+                    provider = "openai-codex",
+                    effectiveContextLength = 8192,
+                    capabilities = ModelCapabilities(reasoning = true, fast = true),
+                )
+            }
+        }
+        val chatSession = ReasoningResumeChatSession(
+            durableSessionId = durableId,
+            model = "openai/gpt-5.6-sol",
+        )
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+            chatConnector = HermesChatConnector { _, _ -> chatSession },
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(
+            AuthenticatedHermesConnection(
+                "user",
+                listOf(SessionSummary(durableId, "Qualified model capabilities")),
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.loadManagementSettings().join()
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertEquals(ModelCapabilities(reasoning = true, fast = true), chat.modelCapabilities)
+    }
+
+    @Test
+    fun resumeFallsBackToModelOptionsWhenCurrentInfoHasNoExplicitCapabilities() = runTest(dispatcher) {
+        val settings = MutableStateFlow(
+            ServerSettingsState.Ready(ServerOrigin.parse("https://hermes.example")),
+        )
+        val durableId = DurableSessionId("stored-options-capabilities")
+        val client = AuthenticatingHermesConnectionClient().apply {
+            currentModelInfoLoader = { _, _, _ ->
+                CurrentModelInfo(
+                    profile = "default",
+                    model = "gpt-5.6-sol",
+                    provider = "openai-codex",
+                    effectiveContextLength = 8192,
+                    capabilities = ModelCapabilities(),
+                )
+            }
+            defaultModelOptions = ModelOptions(
+                current = ModelSelection("openai-codex", "gpt-5.6-sol"),
+                providers = listOf(
+                    ModelProviderOption(
+                        slug = "openai-codex",
+                        name = "Codex",
+                        models = listOf("gpt-5.6-sol"),
+                        capabilities = mapOf(
+                            "gpt-5.6-sol" to ModelCapabilities(reasoning = true, fast = true),
+                        ),
+                    ),
+                ),
+            )
+        }
+        val chatSession = ReasoningResumeChatSession(durableId)
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+            chatConnector = HermesChatConnector { _, _ -> chatSession },
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(
+            AuthenticatedHermesConnection(
+                "user",
+                listOf(SessionSummary(durableId, "Options capabilities")),
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.loadManagementSettings().join()
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertEquals(ModelCapabilities(reasoning = true, fast = true), chat.modelCapabilities)
+    }
+
+    @Test
     fun modelPickerCreatesDraftRuntimeAndAppliesOnlyAdvertisedSessionSelection() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
@@ -1515,6 +1619,51 @@ class HermesConnectionViewModelTest {
         assertEquals(RuntimeSessionId("runtime-model"), chatSession.fastRuntimeId)
         assertEquals(true, chatSession.appliedFast)
         assertEquals("fast", viewModel.snapshots.value.chatSessions.getValue(draftId).fastMode)
+    }
+
+    @Test
+    fun fastSelectionLazilyAttachesAnAdvertisedDurableSession() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val durableId = DurableSessionId("stored-lazy-fast")
+        val client = AuthenticatingHermesConnectionClient().apply {
+            currentModelInfoLoader = { _, _, _ ->
+                CurrentModelInfo(
+                    profile = "default",
+                    model = "gpt-5.6-sol",
+                    provider = "openai-codex",
+                    effectiveContextLength = 8192,
+                    capabilities = ModelCapabilities(reasoning = true, fast = true),
+                )
+            }
+        }
+        val chatSession = ReasoningResumeChatSession(durableId)
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = FixedTokenStore(),
+            chatConnector = HermesChatConnector { _, _ -> chatSession },
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(
+            AuthenticatedHermesConnection(
+                "user",
+                listOf(SessionSummary(durableId, "Lazy Fast session")),
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.loadManagementSettings().join()
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        viewModel.setFast(durableId, fast = true)
+        advanceUntilIdle()
+
+        assertEquals(2, chatSession.resumeCalls)
+        assertEquals(RuntimeSessionId("runtime-reasoning"), chatSession.fastRuntimeId)
+        assertEquals(true, chatSession.appliedFast)
+        assertEquals("fast", viewModel.snapshots.value.chatSessions.getValue(durableId).fastMode)
     }
 
     @Test
@@ -3591,38 +3740,50 @@ private class RecordingProjectDraftChatSession : HermesChatSession {
 
 private class ReasoningResumeChatSession(
     private val durableSessionId: DurableSessionId,
+    private val model: String = "gpt-5.6-sol",
 ) : HermesChatSession {
     override val events = emptyFlow<HermesChatEvent>()
+    var resumeCalls = 0
+    var fastRuntimeId: RuntimeSessionId? = null
+    var appliedFast: Boolean? = null
 
     override suspend fun resume(
         durableSessionId: DurableSessionId,
         profile: String?,
-    ): ResumedChatSession = ResumedChatSession(
-        runtimeSessionId = RuntimeSessionId("runtime-reasoning"),
-        durableSessionId = this.durableSessionId,
-        resumed = true,
-        messages = listOf(
-            JsonObject(
-                mapOf(
-                    "role" to JsonPrimitive("assistant"),
-                    "text" to JsonPrimitive(""),
-                    "reasoning_content" to JsonPrimitive("Recovered reasoning"),
+    ): ResumedChatSession {
+        resumeCalls += 1
+        return ResumedChatSession(
+            runtimeSessionId = RuntimeSessionId("runtime-reasoning"),
+            durableSessionId = this.durableSessionId,
+            resumed = true,
+            messages = listOf(
+                JsonObject(
+                    mapOf(
+                        "role" to JsonPrimitive("assistant"),
+                        "text" to JsonPrimitive(""),
+                        "reasoning_content" to JsonPrimitive("Recovered reasoning"),
+                    ),
+                ),
+                JsonObject(
+                    mapOf(
+                        "role" to JsonPrimitive("tool"),
+                        "name" to JsonPrimitive("terminal"),
+                        "context" to JsonPrimitive("pwd"),
+                    ),
                 ),
             ),
-            JsonObject(
-                mapOf(
-                    "role" to JsonPrimitive("tool"),
-                    "name" to JsonPrimitive("terminal"),
-                    "context" to JsonPrimitive("pwd"),
-                ),
-            ),
-        ),
-        running = false,
-        inflight = null,
-        model = "gpt-5.6-sol",
-        provider = "openai-codex",
-        reasoningEffort = "medium",
-    )
+            running = false,
+            inflight = null,
+            model = model,
+            provider = "openai-codex",
+            reasoningEffort = "medium",
+        )
+    }
+
+    override suspend fun setFast(runtimeSessionId: RuntimeSessionId, fast: Boolean) {
+        fastRuntimeId = runtimeSessionId
+        appliedFast = fast
+    }
 
     override suspend fun submitPrompt(
         runtimeSessionId: RuntimeSessionId,
