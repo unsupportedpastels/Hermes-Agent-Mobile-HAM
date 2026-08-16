@@ -337,6 +337,7 @@ fun HermesApp(
         Result.failure(UnsupportedOperationException("Removing servers is unavailable"))
     },
     onLoadManagementSettings: (String) -> Unit = {},
+    onRefreshDurableSessions: (Boolean) -> Unit = {},
     onSetProfileDefaultModel: suspend (ModelSelection, Boolean) -> ModelSwitchResult = { _, _ ->
         ModelSwitchResult(accepted = false)
     },
@@ -740,6 +741,7 @@ fun HermesApp(
                     isRefreshing = isHomeRefreshing,
                     onRefresh = onRefreshHome,
                     onLoadManagementSettings = onLoadManagementSettings,
+                    onRefreshDurableSessions = onRefreshDurableSessions,
                     onConfigureServer = openServerSettings,
                     onSignIn = onSignIn,
                     onProjectSelected = navigateToProject,
@@ -2091,6 +2093,7 @@ private fun SessionListScreen(
     isRefreshing: Boolean = false,
     onRefresh: () -> Unit = {},
     onLoadManagementSettings: (String) -> Unit = {},
+    onRefreshDurableSessions: (Boolean) -> Unit = {},
     onConfigureServer: () -> Unit,
     onSignIn: () -> Unit,
     onProjectSelected: (ProjectId) -> Unit,
@@ -2171,6 +2174,15 @@ private fun SessionListScreen(
             snapshot.authenticationState == AuthenticationState.Authenticated
         ) {
             onLoadManagementSettings(snapshot.selectedProfile)
+        }
+    }
+    // The durable listing is fetched with archived=exclude by default, which would
+    // hide every archived row behind an `is:archived` filter; refetch with the
+    // archived-only query while that filter is active, and restore the exclude
+    // listing when it is cleared.
+    LaunchedEffect(archivedOnly, serverOrigin, snapshot.selectedProfile) {
+        if (serverOrigin != null && snapshot.authenticationState == AuthenticationState.Authenticated) {
+            onRefreshDurableSessions(archivedOnly)
         }
     }
     LaunchedEffect(serverOrigin, snapshot.selectedProfile) {

@@ -122,6 +122,7 @@ private const val TOKEN_REFRESH_SKEW_SECONDS = 30L
 private const val MAX_CHAT_RECOVERIES_PER_OPERATION = 2
 private const val MAX_SESSION_TITLE_CHARS = 256
 private const val SLASH_COMPLETION_DEBOUNCE_MS = 60L
+private const val OPERATIONAL_STATUS_POLL_INTERVAL_MILLIS = 60_000L
 
 internal suspend fun <Probe, SavedToken : Any> probeAndLoadSavedTokenConcurrently(
     probe: suspend () -> Probe,
@@ -211,6 +212,14 @@ private data class OperationalStatusFetch(
     val generation: Long,
     val profile: String,
     val attemptedAtEpochSeconds: Long,
+)
+
+/** Identifies a completed durable-session fetch so identical filter refreshes are skipped. */
+private data class DurableSessionsFetchKey(
+    val origin: String,
+    val generation: Long,
+    val profile: String,
+    val archivedOnly: Boolean,
 )
 
 private data class ProjectMetadataSessionRecord(
@@ -332,6 +341,11 @@ class HermesConnectionViewModel(
     private var managementRequestGeneration = 0L
     private var operationalStatusJob: Job? = null
     private var lastOperationalStatusFetch: OperationalStatusFetch? = null
+    // The active Home filter's archived mode: durable-session reloads (management
+    // settings, Home refresh) must honor it so archived rows do not vanish while
+    // an `is:archived` filter is selected, and must not leak into the normal list.
+    private var activeSessionArchivedFilter = false
+    private var lastDurableSessionsFetchKey: DurableSessionsFetchKey? = null
     private var searchJob: Job? = null
     private val projectSessionJobs = mutableMapOf<ProjectId, Job>()
     private val projectSessionGenerations = mutableMapOf<ProjectId, Long>()
@@ -457,6 +471,8 @@ class HermesConnectionViewModel(
                 operationalStatusJob?.cancel()
                 operationalStatusJob = null
                 lastOperationalStatusFetch = null
+                activeSessionArchivedFilter = false
+                lastDurableSessionsFetchKey = null
                 searchJob?.cancel()
                 searchJob = null
                 projectSessionJobs.values.forEach(Job::cancel)
@@ -1190,7 +1206,9 @@ class HermesConnectionViewModel(
     /**
      * Refreshes the public profile-scoped status at most once per 60 seconds unless
      * explicitly forced by an authenticated Home refresh. Old origin/profile results
-     * are discarded, and a transient failure retains the last good snapshot.
+     * are discarded, and a transient failure retains the last good snapshot. Every
+     * completed fetch schedules the next 60-second tick so an open operational
+     * overview keeps refreshing without needing another caller.
      */
     fun refreshOperationalStatus(
         profile: String = mutableSnapshots.value.selectedProfile,
@@ -1211,6 +1229,8 @@ class HermesConnectionViewModel(
             last.profile == boundedProfile &&
             now - last.attemptedAtEpochSeconds < 60L
         ) {
+            // Rate-limited: keep an in-flight fetch; a completed fetch already
+            // scheduled the next 60-second tick, so no further action is needed.
             return operationalStatusJob?.takeIf(Job::isActive) ?: viewModelScope.launch { }
         }
         if (force) operationalStatusJob?.cancel()
@@ -1247,9 +1267,25 @@ class HermesConnectionViewModel(
                     )
                 }
             }
+            // Continue the 60-second cadence while the scope is still current.
+            if (isCurrentOperationalScope(origin, expectedGeneration, boundedProfile)) {
+                scheduleOperationalStatusTick(origin, expectedGeneration, boundedProfile)
+            }
         }
         operationalStatusJob = job
         return job
+    }
+
+    /** One-shot 60-second timer that resumes the status cadence; dies with the scope. */
+    private fun scheduleOperationalStatusTick(
+        origin: ServerOrigin,
+        expectedGeneration: Long,
+        boundedProfile: String,
+    ): Job = viewModelScope.launch {
+        delay(OPERATIONAL_STATUS_POLL_INTERVAL_MILLIS)
+        if (isCurrentOperationalScope(origin, expectedGeneration, boundedProfile)) {
+            refreshOperationalStatus(profile = boundedProfile, force = false)
+        }
     }
 
     private fun isCurrentOperationalScope(
@@ -1280,7 +1316,20 @@ class HermesConnectionViewModel(
                     ?: return@launch
                 currentCoroutineContext().ensureActive()
                 if (!isCurrentProjectLoad(serverOrigin, originGeneration)) return@launch
-                val durableSessions = client.authenticate(serverOrigin, accessToken).sessions
+                val profile = mutableSnapshots.value.selectedProfile.trim().take(64).ifEmpty { "default" }
+                val durableSessions = client.loadSessionsForProfile(
+                    serverOrigin,
+                    accessToken,
+                    profile,
+                    archivedOnly = activeSessionArchivedFilter,
+                ).also {
+                    lastDurableSessionsFetchKey = DurableSessionsFetchKey(
+                        origin = serverOrigin.value,
+                        generation = originGeneration,
+                        profile = profile,
+                        archivedOnly = activeSessionArchivedFilter,
+                    )
+                }
                 currentCoroutineContext().ensureActive()
                 if (!isCurrentProjectLoad(serverOrigin, originGeneration)) return@launch
                 if (durableSessions != mutableSnapshots.value.durableSessions) {
@@ -1354,6 +1403,10 @@ class HermesConnectionViewModel(
         val previousProfile = mutableSnapshots.value.selectedProfile
         if (previousProfile != boundedProfile) {
             profileGeneration += 1
+            // The Home list clears its filter when the scope changes; reloads for
+            // the new profile must start from the unfiltered (exclude) list.
+            activeSessionArchivedFilter = false
+            lastDurableSessionsFetchKey = null
             viewModelScope.launch {
                 cacheRepository?.clearTranscriptTails(CacheScope(origin, previousProfile))
             }
@@ -1406,6 +1459,34 @@ class HermesConnectionViewModel(
                             null
                         }
                     }
+                    // The durable rows must belong to the profile that is about to
+                    // become selected; validating a bulk-delete selection against
+                    // another profile's rows would be a destructive scope mismatch.
+                    // A transient failure keeps the previous rows visible instead
+                    // of failing the whole management load.
+                    val profileSessions = try {
+                        client.loadSessionsForProfile(
+                            serverOrigin = origin,
+                            accessToken = token,
+                            profile = selected,
+                            archivedOnly = activeSessionArchivedFilter,
+                        ).also {
+                            lastDurableSessionsFetchKey = DurableSessionsFetchKey(
+                                origin = origin.value,
+                                generation = expectedGeneration,
+                                profile = selected,
+                                archivedOnly = activeSessionArchivedFilter,
+                            )
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    }
+                    currentCoroutineContext().ensureActive()
+                    if (!isCurrentManagementRequest(origin, expectedGeneration, requestGeneration)) {
+                        return@launch
+                    }
                     val currentSnapshot = mutableSnapshots.value
                     val effectiveModel = currentInfo
                         ?.takeIf { it.profile == selected && it.model != null && it.provider != null }
@@ -1432,6 +1513,7 @@ class HermesConnectionViewModel(
                     mutableSnapshots.value = currentSnapshot.copy(
                         profiles = profiles,
                         selectedProfile = selected,
+                        durableSessions = profileSessions ?: currentSnapshot.durableSessions,
                         defaultModelOptions = options,
                         currentModelInfo = currentInfo?.takeIf { it.profile == selected },
                         profileReasoningEffort = profileReasoningEffort,
@@ -1457,6 +1539,45 @@ class HermesConnectionViewModel(
         }
         managementJob = job
         return job
+    }
+
+    /**
+     * Re-fetches durable rows for the currently selected profile and the active
+     * Home filter. An `is:archived` filter maps to the official `archived=only`
+     * query (the default `archived=exclude` listing would hide every archived
+     * row and make the filter look empty); clearing the filter re-fetches with
+     * `archived=exclude` so archived rows do not leak into the normal list.
+     * Identical fetches (same origin, generation, profile, mode) are skipped,
+     * and stale results are never published after a scope change.
+     */
+    fun refreshDurableSessions(archivedOnly: Boolean): Job {
+        val origin = activeOrigin ?: return viewModelScope.launch { }
+        val expectedGeneration = generation
+        val profile = mutableSnapshots.value.selectedProfile.trim().take(64).ifEmpty { "default" }
+        val key = DurableSessionsFetchKey(origin.value, expectedGeneration, profile, archivedOnly)
+        if (lastDurableSessionsFetchKey == key) return viewModelScope.launch { }
+        return viewModelScope.launch {
+            val accessToken = accessTokenForRequest(origin, expectedGeneration)
+                ?: return@launch
+            val sessions = try {
+                client.loadSessionsForProfile(origin, accessToken, profile, archivedOnly)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A filter refresh is auxiliary; keep the previous rows visible.
+                return@launch
+            }
+            currentCoroutineContext().ensureActive()
+            if (
+                activeOrigin == origin &&
+                generation == expectedGeneration &&
+                mutableSnapshots.value.selectedProfile == profile
+            ) {
+                lastDurableSessionsFetchKey = key
+                activeSessionArchivedFilter = archivedOnly
+                mutableSnapshots.value = mutableSnapshots.value.copy(durableSessions = sessions)
+            }
+        }
     }
 
     private fun isCurrentManagementRequest(
@@ -2274,6 +2395,17 @@ class HermesConnectionViewModel(
                 promptStaged = true
                 yield()
                 session.submitPrompt(runtimeId, submittedText)
+                // A prompt can launch background processes, so refresh the activity
+                // stack only after the turn is accepted: the pre-submit snapshot
+                // cannot contain processes created by this turn.
+                loadProcessRowsIfCurrent(
+                    durableSessionId = durableSessionId,
+                    session = session,
+                    runtimeSessionId = runtimeId,
+                    origin = origin,
+                    originGeneration = originGeneration,
+                    operationGeneration = operationGeneration,
+                )
                 // Only count the turn once the prompt was accepted; a rejected or failed
                 // submission must not leave a phantom active turn (foreground service).
                 markTurnActive(durableSessionId)
@@ -3472,7 +3604,16 @@ class HermesConnectionViewModel(
             if (creatingDraft) {
                 val draftSettings = mutableSnapshots.value.chatSessions[durableSessionId]
                 if (draftSettings?.modelCapabilities?.fast == true && draftSettings.fastMode != null) {
-                    session.setFast(resumed.runtimeSessionId, draftSettings.fastMode == "fast")
+                    try {
+                        session.setFast(resumed.runtimeSessionId, draftSettings.fastMode == "fast")
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // A transient Fast-mode RPC failure must not orphan the draft
+                        // runtime createSession just returned (draft creation uses
+                        // close_on_disconnect=false): keep the controller below and
+                        // let the explicit Fast control retry the setting.
+                    }
                 }
             }
             if (closeWhenIdle && !resumed.running) {

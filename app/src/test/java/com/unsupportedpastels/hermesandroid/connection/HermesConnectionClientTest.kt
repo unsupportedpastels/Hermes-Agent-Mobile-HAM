@@ -530,6 +530,36 @@ class HermesConnectionClientTest {
     }
 
     @Test
+    fun loadSessionsForProfileArchivedOnlyUsesOfficialArchivedOnlyQuery() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals("/api/profiles/sessions", request.url.encodedPath)
+            assertEquals("only", request.url.parameters["archived"])
+            assertEquals("work", request.url.parameters["profile"])
+            assertEquals("Bearer opaque-access", request.headers[HttpHeaders.Authorization])
+            respond(
+                content = """{
+                    "sessions":[{
+                        "id":"stored-archived",
+                        "title":"Archived task",
+                        "archived":true
+                    }]
+                }""".trimIndent(),
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+
+        val sessions = HttpHermesConnectionClient(HttpClient(engine)).loadSessionsForProfile(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            profile = "work",
+            archivedOnly = true,
+        )
+
+        assertEquals(listOf("stored-archived"), sessions.map { it.id.value })
+        assertTrue(sessions.single().archived)
+    }
+
+    @Test
     fun probeDiscoversReachableGatedServerAndNativeNousLogin() = runTest {
         val requestedPaths = mutableListOf<String>()
         val engine = MockEngine { request ->

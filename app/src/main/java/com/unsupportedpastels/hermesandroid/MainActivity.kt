@@ -272,6 +272,9 @@ internal fun HermesAppHost(
         onSelectServerOrigin = { origin -> viewModel.select(origin).await() },
         onRemoveServerOrigin = { origin -> viewModel.remove(origin).await() },
         onLoadManagementSettings = { profile -> connectionViewModel?.loadManagementSettings(profile) },
+        onRefreshDurableSessions = { archivedOnly ->
+            connectionViewModel?.refreshDurableSessions(archivedOnly)
+        },
         onSetProfileDefaultModel = { selection, confirm ->
             connectionViewModel?.setProfileDefaultModel(selection, confirm)
                 ?: ModelSwitchResult(accepted = false)

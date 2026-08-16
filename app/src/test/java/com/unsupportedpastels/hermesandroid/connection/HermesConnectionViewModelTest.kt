@@ -30,6 +30,7 @@ import com.unsupportedpastels.hermesandroid.gateway.PromptSubmission
 import com.unsupportedpastels.hermesandroid.app.ProjectSessionsResult
 import com.unsupportedpastels.hermesandroid.app.ProjectTreeResult
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
+import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.CronJob
 import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
@@ -47,6 +48,7 @@ import com.unsupportedpastels.hermesandroid.app.ProjectId
 import com.unsupportedpastels.hermesandroid.app.ProjectLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSessionLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSummary
+import com.unsupportedpastels.hermesandroid.app.ProcessRow
 import com.unsupportedpastels.hermesandroid.app.RunToolState
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import androidx.lifecycle.ViewModelProvider
@@ -69,6 +71,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -1501,6 +1504,104 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
+    fun draftFastSetupFailurePreservesCreatedRuntimeAndRetryReusesIt() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = AuthenticatingHermesConnectionClient().apply {
+            probeResponse.complete(authRequiredInfo())
+            authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+            defaultModelOptions = ModelOptions(
+                current = ModelSelection("nous", "fast-model"),
+                providers = listOf(
+                    ModelProviderOption(
+                        "nous",
+                        "Nous Research",
+                        listOf("fast-model"),
+                        capabilities = mapOf("fast-model" to ModelCapabilities(fast = true, reasoning = true)),
+                    ),
+                ),
+            )
+        }
+        val chatSession = FastFailureDraftChatSession()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+            chatConnector = HermesChatConnector { _, _ -> chatSession },
+            projectConnector = null,
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        val draftId = viewModel.createNewSession()
+        advanceUntilIdle()
+        viewModel.setFast(draftId, fast = true)
+        advanceUntilIdle()
+
+        viewModel.sendMessage(draftId, "Run the task")
+        advanceUntilIdle()
+
+        // The transient Fast RPC failure must not orphan the created runtime:
+        // the controller is still published and the prompt still submits.
+        assertEquals(1, chatSession.createCalls)
+        assertEquals(1, chatSession.setFastCalls)
+        assertEquals(1, chatSession.submitCalls)
+        assertFalse(chatSession.closed)
+        assertTrue(
+            viewModel.snapshots.value.activeRuntimes.any {
+                it.durableSessionId == draftId && it.access == RuntimeAccess.Controller
+            },
+        )
+        assertEquals(null, viewModel.snapshots.value.chatSessions.getValue(draftId).error)
+
+        // A retry resumes the same runtime instead of creating a second orphan.
+        viewModel.sendMessage(draftId, "Keep going")
+        advanceUntilIdle()
+        assertEquals(1, chatSession.createCalls)
+        assertEquals(2, chatSession.submitCalls)
+    }
+
+    @Test
+    fun promptStartRefreshesProcessRowsFromTheLaunchedTurn() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = AuthenticatingHermesConnectionClient().apply {
+            probeResponse.complete(authRequiredInfo())
+            authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        }
+        val chatSession = ProcessAwareDraftChatSession()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+            chatConnector = HermesChatConnector { _, _ -> chatSession },
+            projectConnector = null,
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        val draftId = viewModel.createNewSession()
+        advanceUntilIdle()
+
+        viewModel.sendMessage(draftId, "Launch the build")
+        advanceUntilIdle()
+
+        // The process row only exists after the prompt was accepted, so the
+        // post-submit refresh must be the one that populates the activity stack.
+        assertEquals(1, chatSession.submitCalls)
+        assertTrue(chatSession.processListCalls >= 2)
+        val rows = viewModel.snapshots.value.chatSessions.getValue(draftId).processRows
+        assertEquals(listOf("proc-1"), rows.map { it.processId })
+        assertEquals("running", rows.single().status)
+    }
+
+    @Test
     fun modelPickerKeepsConfirmationOpenUntilHermesAcceptsExpensiveSelection() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val client = AuthenticatingHermesConnectionClient()
@@ -1754,7 +1855,7 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
-    fun refreshHomeDataReloadsAuthenticationAndTreeAndTogglesRefreshing() = runTest(dispatcher) {
+    fun refreshHomeDataReloadsSelectedProfileSessionsAndTreeAndTogglesRefreshing() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
         val projectId = ProjectId("project-1")
@@ -1805,7 +1906,11 @@ class HermesConnectionViewModelTest {
         advanceUntilIdle()
         refreshJob.join()
 
-        assertEquals(2, client.authenticateCalls)
+        // The Home refresh reloads the selected profile's rows through the
+        // profile-scoped contract instead of re-authenticating the default profile.
+        assertEquals(1, client.authenticateCalls)
+        assertEquals(2, client.sessionsForProfileRequests.size)
+        assertEquals("default", client.sessionsForProfileRequests.last().profile)
         assertEquals(2, treeLoads)
         assertFalse(viewModel.homeRefreshing.value)
         assertEquals(ProjectLoadState.Loaded(tree.projects), viewModel.snapshots.value.projectState)
@@ -2480,6 +2585,94 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
+    fun loadManagementSettingsAtomicallyPublishesSelectedProfileSessions() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val defaultSessions = listOf(SessionSummary(DurableSessionId("stored-default"), "Default row"))
+        val workSessions = listOf(SessionSummary(DurableSessionId("stored-work"), "Work row"))
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = AuthenticatingHermesConnectionClient().apply {
+            probeResponse.complete(authRequiredInfo())
+            authenticationResponse.complete(AuthenticatedHermesConnection("user", defaultSessions))
+            profiles = listOf("default", "work")
+            sessionsForProfileLoader = { _, _, profile, _ ->
+                if (profile == "work") workSessions else defaultSessions
+            }
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+        )
+        advanceUntilIdle()
+        assertEquals(defaultSessions, viewModel.snapshots.value.durableSessions)
+
+        viewModel.loadManagementSettings("work").join()
+
+        assertEquals("work", viewModel.snapshots.value.selectedProfile)
+        // Bulk-delete validation must never see the previous profile's rows.
+        assertEquals(workSessions, viewModel.snapshots.value.durableSessions)
+        assertEquals("work", client.sessionsForProfileRequests.last().profile)
+    }
+
+    @Test
+    fun archivedOnlyFilterFetchesArchivedRowsAndClearingRestoresExcludeListing() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val archivedRow = SessionSummary(DurableSessionId("stored-archived"), "Archived", archived = true)
+        val activeRow = SessionSummary(DurableSessionId("stored-active"), "Active")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = AuthenticatingHermesConnectionClient().apply {
+            probeResponse.complete(authRequiredInfo())
+            authenticationResponse.complete(AuthenticatedHermesConnection("user", listOf(activeRow)))
+            sessionsForProfileLoader = { _, _, _, archivedOnly ->
+                if (archivedOnly) listOf(archivedRow) else listOf(activeRow)
+            }
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+        )
+        advanceUntilIdle()
+
+        viewModel.refreshDurableSessions(archivedOnly = true).join()
+        assertEquals(listOf(archivedRow), viewModel.snapshots.value.durableSessions)
+        assertEquals(true, client.sessionsForProfileRequests.last().archivedOnly)
+
+        viewModel.refreshDurableSessions(archivedOnly = false).join()
+        assertEquals(listOf(activeRow), viewModel.snapshots.value.durableSessions)
+        assertEquals(false, client.sessionsForProfileRequests.last().archivedOnly)
+    }
+
+    @Test
+    fun homeRefreshKeepsArchivedRowsWhileArchivedFilterIsActive() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val archivedRow = SessionSummary(DurableSessionId("stored-archived"), "Archived", archived = true)
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = AuthenticatingHermesConnectionClient().apply {
+            probeResponse.complete(authRequiredInfo())
+            authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+            sessionsForProfileLoader = { _, _, _, archivedOnly ->
+                if (archivedOnly) listOf(archivedRow) else emptyList()
+            }
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+        )
+        advanceUntilIdle()
+
+        viewModel.refreshDurableSessions(archivedOnly = true).join()
+        assertEquals(listOf(archivedRow), viewModel.snapshots.value.durableSessions)
+
+        // A pull-to-refresh while the archived filter is active must not clobber
+        // the archived rows with an exclude listing.
+        viewModel.refreshHomeData().join()
+        assertEquals(listOf(archivedRow), viewModel.snapshots.value.durableSessions)
+        assertEquals(true, client.sessionsForProfileRequests.last().archivedOnly)
+    }
+
+    @Test
     fun bulkDeleteRefreshesDurableRowsOnlyAfterAuthoritativeSuccess() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val first = SessionSummary(DurableSessionId("stored-1"), "One")
@@ -2568,6 +2761,39 @@ class HermesConnectionViewModelTest {
         val state = viewModel.snapshots.value.operationalStatusState
         assertTrue(state is OperationalStatusState.TransientError)
         assertEquals("0.20.1", checkNotNull(state.lastGoodOrNull()).status.version)
+    }
+
+    @Test
+    fun operationalStatusSchedulesNextFetchAfterSixtySecondsWithoutExplicitCall() = runTest(dispatcher) {
+        var now = 1_900_000_000L
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = AuthenticatingHermesConnectionClient().apply {
+            probeResponse.complete(authRequiredInfo())
+            authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+            statusResponse = operationalStatus("default", "0.20.1")
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+            nowEpochSeconds = { now },
+        )
+        advanceUntilIdle()
+        assertEquals(1, client.operationalStatusProfiles.size)
+
+        // Establish a fresh fetch whose completed tick owns the next cadence;
+        // the initial connect's tick was already consumed during advanceUntilIdle.
+        viewModel.refreshOperationalStatus(force = true).join()
+        assertEquals(2, client.operationalStatusProfiles.size)
+
+        // Once the 60-second window passes, the tick scheduled by the completed
+        // fetch refreshes the status without any explicit caller.
+        now += 60
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(3, client.operationalStatusProfiles.size)
+        assertTrue(viewModel.snapshots.value.operationalStatusState is OperationalStatusState.Ready)
     }
 
     @Test
@@ -2739,6 +2965,12 @@ private class RecordingOfflineCacheRepository(
     }
 }
 
+private data class SessionProfileRequest(
+    val origin: String,
+    val profile: String,
+    val archivedOnly: Boolean,
+)
+
 private class AuthenticatingHermesConnectionClient : HermesConnectionClient {
     val probeResponse = CompletableDeferred<HermesConnectionInfo>()
     val authenticationResponse = CompletableDeferred<AuthenticatedHermesConnection>()
@@ -2774,6 +3006,25 @@ private class AuthenticatingHermesConnectionClient : HermesConnectionClient {
         operationalStatusFailure?.let { throw it }
         operationalStatusProfiles += profile
         operationalStatus(profile, statusResponse.version ?: "0.20.0")
+    }
+    val sessionsForProfileRequests = mutableListOf<SessionProfileRequest>()
+    var sessionsForProfileFailure: Throwable? = null
+    var sessionsForProfileLoader: suspend (ServerOrigin, String, String, Boolean) -> List<SessionSummary> =
+        { _, _, _, _ ->
+            authenticatedSessionsOverride?.let { return@let it }
+                ?: authenticationResponse.await().sessions
+        }
+
+    override suspend fun loadSessionsForProfile(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        archivedOnly: Boolean,
+    ): List<SessionSummary> {
+        sessionsForProfileRequests += SessionProfileRequest(serverOrigin.value, profile, archivedOnly)
+        sessionsForProfileFailure?.let { throw it }
+        authenticateBarriers.firstOrNull()?.let { it.await() }
+        return sessionsForProfileLoader(serverOrigin, accessToken, profile, archivedOnly)
     }
 
     override suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo {
@@ -3153,6 +3404,101 @@ private class ModelPickerChatSession(
     ): PromptSubmission = error("picker must not submit a prompt")
 
     override suspend fun close() = Unit
+}
+
+private class FastFailureDraftChatSession : HermesChatSession {
+    override val events = MutableSharedFlow<HermesChatEvent>()
+    var createCalls = 0
+    var setFastCalls = 0
+    var submitCalls = 0
+    var closed = false
+
+    override suspend fun resume(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ): ResumedChatSession = error("draft should be created")
+
+    override suspend fun createSession(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+        workspacePath: String?,
+    ): ResumedChatSession {
+        createCalls += 1
+        return ResumedChatSession(
+            runtimeSessionId = RuntimeSessionId("runtime-fast-fail"),
+            durableSessionId = durableSessionId,
+            resumed = false,
+            messages = emptyList(),
+            running = false,
+            inflight = null,
+        )
+    }
+
+    override suspend fun setFast(runtimeSessionId: RuntimeSessionId, fast: Boolean) {
+        setFastCalls += 1
+        throw HermesChatTransportException("fast mode RPC failed transiently")
+    }
+
+    override suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+    ): PromptSubmission {
+        submitCalls += 1
+        return PromptSubmission("streaming")
+    }
+
+    override suspend fun close() {
+        closed = true
+    }
+}
+
+private class ProcessAwareDraftChatSession : HermesChatSession {
+    override val events = MutableSharedFlow<HermesChatEvent>()
+    var createCalls = 0
+    var submitCalls = 0
+    var processListCalls = 0
+    var closed = false
+
+    override suspend fun resume(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+    ): ResumedChatSession = error("draft should be created")
+
+    override suspend fun createSession(
+        durableSessionId: DurableSessionId,
+        profile: String?,
+        workspacePath: String?,
+    ): ResumedChatSession {
+        createCalls += 1
+        return ResumedChatSession(
+            runtimeSessionId = RuntimeSessionId("runtime-processes"),
+            durableSessionId = durableSessionId,
+            resumed = false,
+            messages = emptyList(),
+            running = false,
+            inflight = null,
+        )
+    }
+
+    override suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+    ): PromptSubmission {
+        submitCalls += 1
+        return PromptSubmission("streaming")
+    }
+
+    override suspend fun loadProcessList(runtimeSessionId: RuntimeSessionId): List<ProcessRow> {
+        processListCalls += 1
+        // The prompt's background process only exists after the turn was accepted.
+        return if (submitCalls == 0) emptyList() else {
+            listOf(ProcessRow(processId = "proc-1", command = "npm run build", status = "running"))
+        }
+    }
+
+    override suspend fun close() {
+        closed = true
+    }
 }
 
 private class RecordingProjectDraftChatSession : HermesChatSession {

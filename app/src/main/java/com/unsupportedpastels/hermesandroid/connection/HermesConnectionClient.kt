@@ -334,11 +334,16 @@ interface HermesConnectionClient {
         accessToken: String,
     ): AuthenticatedHermesConnection = throw UnsupportedOperationException()
 
-    /** Reload only the selected profile's durable rows after a scoped mutation. */
+    /**
+     * Reload only the selected profile's durable rows after a scoped mutation.
+     * [archivedOnly] maps to the official `archived=only` query so an archived
+     * filter can actually see archived rows instead of an always-excluded list.
+     */
     suspend fun loadSessionsForProfile(
         serverOrigin: ServerOrigin,
         accessToken: String,
         profile: String,
+        archivedOnly: Boolean = false,
     ): List<SessionSummary> = authenticate(serverOrigin, accessToken).sessions
 
     suspend fun loadTranscript(
@@ -1007,7 +1012,8 @@ class HttpHermesConnectionClient(
         serverOrigin: ServerOrigin,
         accessToken: String,
         profile: String,
-    ): List<SessionSummary> = loadSessions(serverOrigin, accessToken, profile)
+        archivedOnly: Boolean,
+    ): List<SessionSummary> = loadSessions(serverOrigin, accessToken, profile, archivedOnly)
 
     private suspend fun loadAuthenticatedUser(
         serverOrigin: ServerOrigin,
@@ -1379,6 +1385,7 @@ class HttpHermesConnectionClient(
         serverOrigin: ServerOrigin,
         accessToken: String?,
         profile: String = "default",
+        archivedOnly: Boolean = false,
     ): List<SessionSummary> {
         val boundedProfile = profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
             ?: throw HermesConnectionException("Hermes session profile is invalid")
@@ -1386,7 +1393,7 @@ class HttpHermesConnectionClient(
             accessToken?.let { bearerAuth(it) }
             parameter("limit", MAX_DURABLE_SESSIONS)
             parameter("order", "recent")
-            parameter("archived", "exclude")
+            parameter("archived", if (archivedOnly) "only" else "exclude")
             parameter("profile", boundedProfile)
         }
         if (!sessionsResponse.status.isSuccess()) {
