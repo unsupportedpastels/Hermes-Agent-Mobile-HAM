@@ -13,7 +13,11 @@ To operate, HAM may handle:
 - project, session, prompt, response, tool-status, and transcript data returned by that server; and
 - files or images you explicitly attach for upload to that server.
 
-HAM stores connection and session data locally on your device, scoped to the normalized server origin. Authentication material is stored using Android-backed encrypted storage. Fresh WebSocket tickets remain in memory only.
+HAM stores connection and session metadata locally on your device, scoped to the normalized server origin, selected profile, and durable session ID. This metadata cache is bounded, expires after 30 days, and may be shown with a cached/offline marker until Hermes Serve reconciles it. Authentication material is stored using Android-backed encrypted storage. Fresh WebSocket tickets remain in memory only.
+
+Transcript tails are not stored unless you opt in under Settings. Opted-in transcript tails are encrypted with an Android Keystore-backed key and bounded to 200 messages per session, 128 KiB per message body, 100 sessions, and 4 MiB total. Tails associated with an origin are cleared on logout or when that origin is removed; all tails are cleared by the explicit cache control and application data removal. HAM never caches access or refresh tokens, tickets, transient runtime IDs, secret input, attachments, or connection strings. Android Auto Backup is disabled.
+
+Host-file contents are downloaded only after an explicit preview, play, save, or share action. Save uses Android's user-selected document destination. Share creates a bounded temporary file in app-private cache and exposes only that file through a one-time Android content-URI grant; Android may later evict the cache file.
 
 ## Where data goes
 

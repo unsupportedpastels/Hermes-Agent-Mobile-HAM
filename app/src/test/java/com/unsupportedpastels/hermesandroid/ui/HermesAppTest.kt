@@ -67,9 +67,12 @@ import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
 import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
 import com.unsupportedpastels.hermesandroid.gateway.UnsupportedBlockingKind
+import com.unsupportedpastels.hermesandroid.files.HostFileEntry
+import com.unsupportedpastels.hermesandroid.files.HostFileListing
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.navigation.ProjectRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
+import com.unsupportedpastels.hermesandroid.share.SharePayload
 import org.junit.Rule
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -81,6 +84,44 @@ import org.robolectric.annotation.Config
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [35])
 class HermesAppTest {
+    @Test
+    fun sharedContentPickerStagesIntoSelectedSessionWithoutSending() {
+        val sessionId = sessions.first().id
+        val attachment = ComposerAttachment(
+            id = "content://provider/report",
+            uri = "content://provider/report",
+            displayName = "report.pdf",
+            mimeType = "application/pdf",
+            sizeBytes = 1024,
+        )
+        var staged: Pair<DurableSessionId, List<ComposerAttachment>>? = null
+        var sent: Pair<DurableSessionId, String>? = null
+        var consumed = false
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot,
+                    sharePayload = SharePayload(1, "Review this report", listOf(attachment)),
+                    onSharePayloadConsumed = { consumed = true },
+                    onAddAttachments = { id, values ->
+                        staged = id to values
+                        emptyList()
+                    },
+                    onSendMessage = { id, text -> sent = id to text },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Send to chat").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Share with First session").performClick()
+
+        assertEquals(sessionId to listOf(attachment), staged)
+        assertTrue(consumed)
+        assertEquals(null, sent)
+        composeRule.onNodeWithText("Review this report").assertIsDisplayed()
+    }
+
     @get:Rule
     val composeRule = createComposeRule()
 
@@ -92,6 +133,119 @@ class HermesAppTest {
         connectionState = ConnectionState.Connected,
         durableSessions = sessions,
     )
+
+    @Test
+    fun sessionFilesStageCanonicalReferenceWithoutArtifactBrowserInAttachmentMenu() {
+        val session = sessions.first()
+        var loadedPath: String? = "not-called"
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            chatSessions = mapOf(
+                session.id to ChatSessionSnapshot(
+                    messages = listOf(
+                        ChatMessage(
+                            ChatMessageRole.Assistant,
+                            "Generated output\nMEDIA: /tmp/report.pdf\nMEDIA: /tmp/preview.png\nMEDIA: /tmp/voice.mp3",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    initialRoute = SessionDetailRoute(session.id),
+                    onLoadHostFiles = { path ->
+                        loadedPath = path
+                        Result.success(
+                            HostFileListing(
+                                path = "/srv",
+                                parentPath = null,
+                                entries = listOf(
+                                    HostFileEntry(
+                                        name = "notes.txt",
+                                        path = "/srv/notes.txt",
+                                        isDirectory = false,
+                                        size = 12,
+                                        mimeType = "text/plain",
+                                    ),
+                                ),
+                            ),
+                        )
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Attach files").performClick()
+        composeRule.onNodeWithText("Host files").performClick()
+        composeRule.waitUntil { loadedPath == null }
+        composeRule.onNodeWithText("notes.txt").assertIsDisplayed()
+        composeRule.onNodeWithText("Attach").performClick()
+        val stagedDraft = composeRule.onNode(
+            SemanticsMatcher.keyIsDefined(SemanticsProperties.InputText),
+        ).fetchSemanticsNode().config[SemanticsProperties.InputText].text
+        assertEquals("", stagedDraft)
+        composeRule.onNodeWithContentDescription("Remove host reference @file:/srv/notes.txt")
+            .assertIsDisplayed()
+
+        composeRule.onNodeWithContentDescription("Attach files").performClick()
+        composeRule.onNodeWithText("Host files").performClick()
+        composeRule.onNodeWithText("notes.txt").assertIsDisplayed()
+        composeRule.onNodeWithText("Attach").performClick()
+        composeRule.onAllNodesWithContentDescription("Remove host reference @file:/srv/notes.txt")
+            .assertCountEquals(1)
+
+        composeRule.onNodeWithContentDescription("Attach files").performClick()
+        composeRule.onAllNodesWithText("Artifacts").assertCountEquals(0)
+    }
+
+    @Test
+    fun sessionDetailsSummarizeArtifactsAndOpenArtifactBrowser() {
+        val session = sessions.first()
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            chatSessions = mapOf(
+                session.id to ChatSessionSnapshot(
+                    messages = listOf(
+                        ChatMessage(
+                            ChatMessageRole.Assistant,
+                            "Generated output\nMEDIA: /tmp/report.pdf\nMEDIA: /tmp/preview.png\nMEDIA: /tmp/voice.mp3",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    initialRoute = SessionDetailRoute(session.id),
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Open session details").performClick()
+        composeRule.onAllNodesWithText("Artifacts").assertCountEquals(1)
+        composeRule.onAllNodesWithText("3 artifacts").assertCountEquals(1)
+        composeRule.onAllNodesWithText("report.pdf").assertCountEquals(1)
+        composeRule.onAllNodesWithText("preview.png").assertCountEquals(1)
+        composeRule.onAllNodesWithText("voice.mp3").assertCountEquals(1)
+        composeRule.onNodeWithText("View all artifacts").performScrollTo().performClick()
+        composeRule.onNodeWithTag("Artifact search").assertIsDisplayed()
+        composeRule.onNodeWithText("report.pdf").assertIsDisplayed()
+        composeRule.onAllNodesWithText("Share")[0].performScrollTo().assertIsDisplayed()
+        composeRule.onAllNodesWithText("Save")[0].performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Filter artifacts: Audio").performClick()
+        composeRule.onNodeWithText("voice.mp3").assertIsDisplayed()
+        composeRule.onNodeWithText("Play").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Filter artifacts: Image").performClick()
+        composeRule.onNodeWithContentDescription("Zoom image preview.png").performClick()
+        composeRule.onNodeWithText("Close").assertIsDisplayed()
+    }
 
     @Test
     fun completedSwipeOpensDeleteConfirmationAfterPointerRelease() {
@@ -1448,8 +1602,9 @@ class HermesAppTest {
     }
 
     @Test
-    fun unsupportedBlockingRequestDirectsUserToAnotherClientWithoutSensitiveInput() {
+    fun sudoRequestUsesMaskedOneShotInputAndCorrelatesTheExactRequest() {
         val sessionId = sessions.first().id
+        var response: List<Any>? = null
         val snapshot = connectedSnapshot.copy(
             chatSessions = mapOf(
                 sessionId to ChatSessionSnapshot(
@@ -1467,12 +1622,23 @@ class HermesAppTest {
         )
 
         composeRule.setContent {
-            HermesAndroidTheme { HermesApp(snapshot = snapshot) }
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    onBlockingResponse = { id, kind, requestId, value ->
+                        response = listOf(id, kind, requestId, value)
+                    },
+                )
+            }
         }
 
         composeRule.onNodeWithText("First session").performClick()
-        composeRule.onNodeWithText("This Android client cannot answer this request.").assertIsDisplayed()
-        composeRule.onNodeWithText("Continue in another connected Hermes client.").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Sudo password").performTextInput("opaque-password")
+        composeRule.onNodeWithText("Send password").performClick()
+        assertEquals(
+            listOf(sessionId, UnsupportedBlockingKind.Sudo, "sudo-1", "opaque-password"),
+            response,
+        )
         composeRule.onAllNodesWithText("Sensitive prompt must not render").assertCountEquals(0)
     }
 

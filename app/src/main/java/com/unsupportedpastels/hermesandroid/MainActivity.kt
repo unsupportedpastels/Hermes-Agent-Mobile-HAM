@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.content.Intent
 import android.Manifest
 import android.os.Build
+import android.view.WindowManager
 
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -11,6 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -28,9 +30,13 @@ import com.unsupportedpastels.hermesandroid.connection.ServerSettingsViewModel
 import com.unsupportedpastels.hermesandroid.connection.launchBrowserAndAwaitReturn
 import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
+import com.unsupportedpastels.hermesandroid.gateway.UnsupportedBlockingKind
 import com.unsupportedpastels.hermesandroid.notifications.NotificationNavigationInbox
 import com.unsupportedpastels.hermesandroid.notifications.SessionNotificationVisibilityRegistry
 import com.unsupportedpastels.hermesandroid.notifications.synchronizeVisibleSessionNotifications
+import com.unsupportedpastels.hermesandroid.share.SharePayload
+import com.unsupportedpastels.hermesandroid.share.nextShareRequestId
+import com.unsupportedpastels.hermesandroid.share.parseStagedShare
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.ui.HermesApp
 import com.unsupportedpastels.hermesandroid.ui.PaneLayoutPreferencesViewModel
@@ -41,6 +47,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
+    private val incomingShare = MutableStateFlow<SharePayload?>(null)
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { }
@@ -62,6 +69,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        consumeIncomingShare(intent)
         enableEdgeToEdge()
         window.isNavigationBarContrastEnforced = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -70,13 +78,40 @@ class MainActivity : ComponentActivity() {
         setContent {
             HermesAndroidTheme {
                 val snapshot by connectionViewModel.snapshots.collectAsStateWithLifecycle()
+                val transcriptCachingEnabled by connectionViewModel.transcriptCachingEnabled
+                    .collectAsStateWithLifecycle()
                 val notificationRequest by NotificationNavigationInbox.requests.collectAsStateWithLifecycle()
+                val sharePayload by incomingShare.collectAsStateWithLifecycle()
+                val hasSensitivePrompt = snapshot.chatSessions.values.any { chat ->
+                    chat.runState.unsupportedBlocking?.let { interaction ->
+                        interaction.lifecycle in setOf(
+                            com.unsupportedpastels.hermesandroid.app.RunInteractionLifecycle.Pending,
+                            com.unsupportedpastels.hermesandroid.app.RunInteractionLifecycle.Responding,
+                        ) &&
+                            (interaction.kind == UnsupportedBlockingKind.Sudo ||
+                                interaction.kind == UnsupportedBlockingKind.Secret)
+                    } == true
+                }
+                LaunchedEffect(hasSensitivePrompt) {
+                    if (hasSensitivePrompt) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    }
+                }
                 HermesAppHost(
                     viewModel = serverSettingsViewModel,
                     connectionViewModel = connectionViewModel,
                     projectIconViewModel = projectIconViewModel,
                     paneLayoutPreferencesViewModel = paneLayoutPreferencesViewModel,
                     snapshot = snapshot,
+                    transcriptCachingEnabled = transcriptCachingEnabled,
+                    onTranscriptCachingChanged = { enabled ->
+                        connectionViewModel.setTranscriptCachingEnabled(enabled)
+                    },
+                    onClearOfflineCache = { connectionViewModel.clearOfflineCache() },
+                    sharePayload = sharePayload,
+                    onSharePayloadConsumed = { incomingShare.value = null },
                     requestedSessionId = notificationRequest?.sessionId,
                     requestedSessionRequestId = notificationRequest?.requestId,
                     onVisibleSessionChanged = { sessionId ->
@@ -105,10 +140,23 @@ class MainActivity : ComponentActivity() {
                     onApprovalResponse = { sessionId, choice, all ->
                         connectionViewModel.respondToApproval(sessionId, choice, all)
                     },
+                    onBlockingResponse = { sessionId, kind, requestId, value ->
+                        connectionViewModel.respondToBlockingPrompt(sessionId, kind, requestId, value)
+                    },
                     onStopSession = connectionViewModel::stopSession,
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumeIncomingShare(intent)
+    }
+
+    private fun consumeIncomingShare(intent: Intent) {
+        parseStagedShare(this, intent, nextShareRequestId())?.let { incomingShare.value = it }
     }
 
 
@@ -140,6 +188,11 @@ internal fun HermesAppHost(
     projectIconViewModel: ProjectIconViewModel? = null,
     paneLayoutPreferencesViewModel: PaneLayoutPreferencesViewModel? = null,
     snapshot: HermesGatewaySnapshot,
+    transcriptCachingEnabled: Boolean = false,
+    onTranscriptCachingChanged: (Boolean) -> Unit = {},
+    onClearOfflineCache: () -> Unit = {},
+    sharePayload: SharePayload? = null,
+    onSharePayloadConsumed: () -> Unit = {},
     requestedSessionId: DurableSessionId? = null,
     requestedSessionRequestId: Long? = null,
     onVisibleSessionChanged: (DurableSessionId?) -> Unit = {},
@@ -151,6 +204,7 @@ internal fun HermesAppHost(
     onReasoningSelected: (DurableSessionId, String) -> Unit = { _, _ -> },
     onClarificationResponse: (DurableSessionId, String, String) -> Unit = { _, _, _ -> },
     onApprovalResponse: (DurableSessionId, String, Boolean) -> Unit = { _, _, _ -> },
+    onBlockingResponse: (DurableSessionId, UnsupportedBlockingKind, String, String) -> Unit = { _, _, _, _ -> },
     onStopSession: (DurableSessionId) -> Unit = {},
 ) {
     val serverSettingsState by viewModel.states.collectAsStateWithLifecycle()
@@ -186,6 +240,8 @@ internal fun HermesAppHost(
 
     HermesApp(
         snapshot = snapshot,
+        sharePayload = sharePayload,
+        onSharePayloadConsumed = onSharePayloadConsumed,
         requestedSessionId = requestedSessionId,
         requestedSessionRequestId = requestedSessionRequestId,
         persistedProjectDockState = persistedProjectDockState,
@@ -198,6 +254,9 @@ internal fun HermesAppHost(
         },
         onVisibleSessionChanged = onVisibleSessionChanged,
         serverSettingsState = serverSettingsState,
+        transcriptCachingEnabled = transcriptCachingEnabled,
+        onTranscriptCachingChanged = onTranscriptCachingChanged,
+        onClearOfflineCache = onClearOfflineCache,
         onSaveServerOrigin = { origin -> viewModel.save(origin).await() },
         onLoadManagementSettings = { profile -> connectionViewModel?.loadManagementSettings(profile) },
         onSetProfileDefaultModel = { selection, confirm ->
@@ -250,6 +309,7 @@ internal fun HermesAppHost(
         onReasoningSelected = onReasoningSelected,
         onClarificationResponse = onClarificationResponse,
         onApprovalResponse = onApprovalResponse,
+        onBlockingResponse = onBlockingResponse,
         onStopSession = onStopSession,
         onSteerSession = { sessionId, text ->
             connectionViewModel?.steerSession(sessionId, text)
@@ -268,6 +328,16 @@ internal fun HermesAppHost(
             connectionViewModel?.let { viewModel ->
                 resultPreservingCancellation { viewModel.loadHostDirectories(path) }
             } ?: Result.failure(IllegalStateException("Host folder browsing unavailable"))
+        },
+        onLoadHostFiles = { path ->
+            connectionViewModel?.let { connection ->
+                resultPreservingCancellation { connection.loadHostFiles(path) }
+            } ?: Result.failure(IllegalStateException("Host file browsing unavailable"))
+        },
+        onLoadManagedFile = { path ->
+            connectionViewModel?.let { connection ->
+                resultPreservingCancellation { connection.loadManagedFile(path) }
+            } ?: Result.failure(IllegalStateException("Managed files unavailable"))
         },
         onCreateHostDirectory = { parentPath, name ->
             connectionViewModel?.let { viewModel ->

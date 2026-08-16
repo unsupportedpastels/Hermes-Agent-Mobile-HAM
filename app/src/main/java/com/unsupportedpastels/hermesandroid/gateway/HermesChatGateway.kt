@@ -488,6 +488,12 @@ interface HermesChatSession {
         requestId: String? = null,
     ): HermesChatResponse = throw HermesChatProtocolException("Approval response is not available")
 
+    suspend fun respondToBlockingPrompt(
+        kind: UnsupportedBlockingKind,
+        requestId: String,
+        value: String,
+    ): HermesChatResponse = throw HermesChatProtocolException("Blocking prompt response is not available")
+
     suspend fun interruptSession(
         runtimeSessionId: RuntimeSessionId,
     ): HermesChatResponse = throw HermesChatProtocolException("Session interrupt is not available")
@@ -881,6 +887,25 @@ class HermesChatConnection internal constructor(
             queue?.peekLast()?.toEvent(runtimeSessionId)
         }
         return response.copy(nextApproval = nextApproval)
+    }
+
+    override suspend fun respondToBlockingPrompt(
+        kind: UnsupportedBlockingKind,
+        requestId: String,
+        value: String,
+    ): HermesChatResponse {
+        val (method, valueKey) = when (kind) {
+            UnsupportedBlockingKind.Secret -> "secret.respond" to "value"
+            UnsupportedBlockingKind.Sudo -> "sudo.respond" to "password"
+            UnsupportedBlockingKind.TerminalRead -> "terminal.read.respond" to "text"
+            UnsupportedBlockingKind.PreviewRead -> "preview.read.respond" to "text"
+            UnsupportedBlockingKind.WindowRead -> "window.read.respond" to "text"
+        }
+        val params = buildJsonObject {
+            put("request_id", boundedRpcInput(requestId, HERMES_CHAT_MAX_EVENT_ID_CHARS, "request ID"))
+            put(valueKey, boundedRpcInput(value, HERMES_CHAT_MAX_EVENT_TEXT_CHARS, "response", allowBlank = true))
+        }
+        return parseInteractionResponse(request(method, params))
     }
 
     override suspend fun interruptSession(

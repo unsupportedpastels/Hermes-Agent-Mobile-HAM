@@ -32,6 +32,37 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class HermesChatGatewayTest {
     @Test
+    fun blockingPromptResponsesUseAuditedMethodAndValueKeys() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            val id = request["id"]!!.jsonPrimitive.content
+            socket.offer("""{"jsonrpc":"2.0","id":$id,"result":{"status":"ok"}}""")
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        connection.respondToBlockingPrompt(UnsupportedBlockingKind.Secret, "secret-1", "opaque-value")
+        connection.respondToBlockingPrompt(UnsupportedBlockingKind.Sudo, "sudo-1", "opaque-password")
+        connection.respondToBlockingPrompt(UnsupportedBlockingKind.TerminalRead, "terminal-1", "")
+
+        val requests = socket.sentFrames.map { Json.parseToJsonElement(it).jsonObject }
+        assertEquals(listOf("secret.respond", "sudo.respond", "terminal.read.respond"), requests.map {
+            it["method"]!!.jsonPrimitive.content
+        })
+        assertEquals("secret-1", requests[0]["params"]!!.jsonObject["request_id"]!!.jsonPrimitive.content)
+        assertEquals("opaque-value", requests[0]["params"]!!.jsonObject["value"]!!.jsonPrimitive.content)
+        assertEquals("opaque-password", requests[1]["params"]!!.jsonObject["password"]!!.jsonPrimitive.content)
+        assertEquals("", requests[2]["params"]!!.jsonObject["text"]!!.jsonPrimitive.content)
+        connection.close()
+    }
+
+    @Test
     fun appliesCanonicalSessionScopedReasoningEffort() = runTest {
         val socket = ScriptedSocket()
         socket.onSend = { frame ->

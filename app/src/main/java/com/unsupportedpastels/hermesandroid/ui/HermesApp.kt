@@ -2,6 +2,7 @@ package com.unsupportedpastels.hermesandroid.ui
 
 import android.content.Context
 import android.content.Intent
+import android.media.MediaPlayer
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.text.format.DateUtils
@@ -23,6 +24,8 @@ import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -98,6 +101,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.rememberSwipeToDismissBoxState
@@ -143,6 +147,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
@@ -172,10 +177,12 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.dropUnlessResumed
+import androidx.core.content.FileProvider
 import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
@@ -202,13 +209,19 @@ import com.unsupportedpastels.hermesandroid.app.validHostFolderName
 import com.unsupportedpastels.hermesandroid.app.isNoProjectBucket
 import com.unsupportedpastels.hermesandroid.app.validProjectWorkspacePath
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentPolicy
+import com.unsupportedpastels.hermesandroid.artifacts.Artifact
+import com.unsupportedpastels.hermesandroid.artifacts.ArtifactExtractor
+import com.unsupportedpastels.hermesandroid.artifacts.ArtifactOrigin
+import com.unsupportedpastels.hermesandroid.artifacts.ArtifactType
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.connection.ModelPickerState
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
 import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
+import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
+import com.unsupportedpastels.hermesandroid.gateway.CacheSource
 import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.ContextBreakdownCategory
@@ -219,17 +232,24 @@ import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
+import com.unsupportedpastels.hermesandroid.gateway.UnsupportedBlockingKind
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.gateway.ValidReasoningEfforts
+import com.unsupportedpastels.hermesandroid.files.HostFileContent
+import com.unsupportedpastels.hermesandroid.files.HostFileListing
 import com.unsupportedpastels.hermesandroid.navigation.HomeRoute
 import com.unsupportedpastels.hermesandroid.navigation.ProjectRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import com.unsupportedpastels.hermesandroid.navigation.ServerSettingsRoute
+import com.unsupportedpastels.hermesandroid.share.SharePayload
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.theme.LocalHermesSemanticColors
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.URI
 import java.util.Locale
 
@@ -275,6 +295,8 @@ internal fun sessionStatusPulseAlphaAt(playTimeMillis: Long): Float {
 fun HermesApp(
     snapshot: HermesGatewaySnapshot,
     modifier: Modifier = Modifier,
+    sharePayload: SharePayload? = null,
+    onSharePayloadConsumed: () -> Unit = {},
     initialRoute: NavKey = HomeRoute,
     requestedSessionId: DurableSessionId? = null,
     requestedSessionRequestId: Long? = null,
@@ -288,6 +310,9 @@ fun HermesApp(
     initialProjectCreatorOpen: Boolean = false,
     initialProjectCreatorListing: HostDirectoryListing? = null,
     serverSettingsState: ServerSettingsState = ServerSettingsState.Ready(null),
+    transcriptCachingEnabled: Boolean = false,
+    onTranscriptCachingChanged: (Boolean) -> Unit = {},
+    onClearOfflineCache: () -> Unit = {},
     onSaveServerOrigin: suspend (ServerOrigin) -> Result<Unit> = { Result.success(Unit) },
     onLoadManagementSettings: (String) -> Unit = {},
     onSetProfileDefaultModel: suspend (ModelSelection, Boolean) -> ModelSwitchResult = { _, _ ->
@@ -314,6 +339,7 @@ fun HermesApp(
     onReasoningSelected: (DurableSessionId, String) -> Unit = { _, _ -> },
     onClarificationResponse: (DurableSessionId, String, String) -> Unit = { _, _, _ -> },
     onApprovalResponse: (DurableSessionId, String, Boolean) -> Unit = { _, _, _ -> },
+    onBlockingResponse: (DurableSessionId, UnsupportedBlockingKind, String, String) -> Unit = { _, _, _, _ -> },
     onStopSession: (DurableSessionId) -> Unit = {},
     onSteerSession: (DurableSessionId, String) -> Unit = { _, _ -> },
     onSetDelegationPaused: (DurableSessionId, Boolean) -> Unit = { _, _ -> },
@@ -323,6 +349,12 @@ fun HermesApp(
     onCreateProjectSession: (ProjectId) -> DurableSessionId? = { null },
     onLoadHostDirectories: suspend (String?) -> Result<HostDirectoryListing> = {
         Result.failure(UnsupportedOperationException("Host folder browsing is unavailable"))
+    },
+    onLoadHostFiles: suspend (String?) -> Result<HostFileListing> = {
+        Result.failure(UnsupportedOperationException("Host file browsing is unavailable"))
+    },
+    onLoadManagedFile: suspend (String) -> Result<HostFileContent> = {
+        Result.failure(UnsupportedOperationException("Managed files are unavailable"))
     },
     onCreateHostDirectory: suspend (String, String) -> Result<HostDirectoryListing> = { _, _ ->
         Result.failure(UnsupportedOperationException("Host folder creation is unavailable"))
@@ -396,6 +428,7 @@ fun HermesApp(
     }
     val backStack = rememberNavBackStack(*initialBackStack)
     val drafts = rememberSaveable(saver = DraftsSaver) { mutableStateMapOf() }
+    val hostReferences = rememberSaveable(saver = DraftsSaver) { mutableStateMapOf() }
     val observedSendingSessions = remember { mutableStateMapOf<String, Boolean>() }
     val unreadCompletedSessions = remember { mutableStateMapOf<String, Boolean>() }
     var projectDockState by rememberSaveable {
@@ -410,6 +443,7 @@ fun HermesApp(
     var measuredProjectSessionPaneProportion by remember { mutableStateOf<Float?>(null) }
     var iconPickerProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var projectCreatorOpen by rememberSaveable { mutableStateOf(initialProjectCreatorOpen) }
+    var shareResultMessage by remember { mutableStateOf<String?>(null) }
     val windowAdaptiveInfo = currentWindowAdaptiveInfoV2()
     val supportsListDetail =
         windowAdaptiveInfo.windowSizeClass.isWidthAtLeastBreakpoint(
@@ -489,6 +523,23 @@ fun HermesApp(
             backStack.removeLastOrNull()
         }
         backStack.add(SessionDetailRoute(sessionId))
+        Unit
+    }
+    val stageShareIntoSession = { sessionId: DurableSessionId ->
+        sharePayload?.let { payload ->
+            val draftKey = "${serverOrigin?.value.orEmpty()}\u0000${sessionId.value}"
+            val currentDraft = drafts[draftKey].orEmpty()
+            drafts[draftKey] = listOf(currentDraft, payload.text)
+                .filter(String::isNotBlank)
+                .joinToString("\n\n")
+            onSlashCompletionRequested(sessionId, drafts[draftKey].orEmpty())
+            val skipped = payload.rejections + onAddAttachments(sessionId, payload.attachments)
+            if (skipped.isNotEmpty()) {
+                shareResultMessage = skipped.distinct().joinToString("\n")
+            }
+            onSharePayloadConsumed()
+            navigateToSession(sessionId)
+        }
         Unit
     }
     var handledRequestedSessionKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -694,6 +745,12 @@ fun HermesApp(
                     MissingSessionScreen()
                 } else {
                     val draftKey = "${serverOrigin?.value.orEmpty()}\u0000${session.id.value}"
+                    val stagedHostReferences = hostReferences[draftKey]
+                        .orEmpty()
+                        .lineSequence()
+                        .filter(String::isNotBlank)
+                        .distinct()
+                        .toList()
                     val chat = snapshot.chatSessions[session.id] ?: ChatSessionSnapshot()
                     val hasControllerRuntime = snapshot.activeRuntimes.any { runtime ->
                         runtime.durableSessionId == session.id && runtime.access == RuntimeAccess.Controller
@@ -740,13 +797,23 @@ fun HermesApp(
                         canSend = snapshot.authenticationState == AuthenticationState.Authenticated &&
                             !projectDraftMissingWorkspace,
                         attachments = attachments[session.id].orEmpty(),
+                        hostReferences = stagedHostReferences,
                         onAddAttachments = { candidates -> onAddAttachments(session.id, candidates) },
                         onRemoveAttachment = { attachmentId ->
                             onRemoveAttachment(session.id, attachmentId)
                         },
+                        onRemoveHostReference = { reference ->
+                            hostReferences[draftKey] = stagedHostReferences
+                                .filterNot { it == reference }
+                                .joinToString("\n")
+                        },
                         onSend = { text ->
                             onSlashCompletionRequested(session.id, "")
-                            onSendMessage(session.id, text)
+                            val prompt = (stagedHostReferences + text.takeIf(String::isNotBlank))
+                                .filterNotNull()
+                                .joinToString("\n")
+                            hostReferences.remove(draftKey)
+                            onSendMessage(session.id, prompt)
                         },
                         onReasoningSelected = { effort -> onReasoningSelected(session.id, effort) },
                         onOpenModelPicker = {
@@ -772,6 +839,9 @@ fun HermesApp(
                         },
                         onApprovalResponse = { choice, all ->
                             onApprovalResponse(session.id, choice, all)
+                        },
+                        onBlockingResponse = { kind, requestId, value ->
+                            onBlockingResponse(session.id, kind, requestId, value)
                         },
                         showStop = chat.isSending && hasControllerRuntime,
                         stopping = chat.isStopping,
@@ -805,6 +875,13 @@ fun HermesApp(
                         showBack = !supportsListDetail,
                         onBack = navigateBack,
                         onLoadManagedImage = onLoadManagedImage,
+                        onLoadHostFiles = onLoadHostFiles,
+                        onLoadManagedFile = onLoadManagedFile,
+                        onAttachHostReference = { reference ->
+                            hostReferences[draftKey] = (stagedHostReferences + reference)
+                                .distinct()
+                                .joinToString("\n")
+                        },
                     )
                 }
             }
@@ -817,6 +894,9 @@ fun HermesApp(
                     showBack = !supportsListDetail,
                     onBack = navigateBack,
                     onSave = onSaveServerOrigin,
+                    transcriptCachingEnabled = transcriptCachingEnabled,
+                    onTranscriptCachingChanged = onTranscriptCachingChanged,
+                    onClearOfflineCache = onClearOfflineCache,
                     onLoadManagementSettings = onLoadManagementSettings,
                     onSetProfileDefaultModel = onSetProfileDefaultModel,
                     onRefreshCronJobs = onRefreshCronJobs,
@@ -853,6 +933,29 @@ fun HermesApp(
             },
         )
     }
+    if (sharePayload != null) {
+        ShareDestinationSheet(
+            payload = sharePayload,
+            sessions = sessions,
+            projects = projects,
+            onDismiss = onSharePayloadConsumed,
+            onNewChat = { onCreateSession()?.let(stageShareIntoSession) },
+            onProjectSelected = { projectId ->
+                onCreateProjectSession(projectId)?.let(stageShareIntoSession)
+            },
+            onSessionSelected = stageShareIntoSession,
+        )
+    }
+    shareResultMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { shareResultMessage = null },
+            title = { Text("Some shared items were skipped") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { shareResultMessage = null }) { Text("Continue") }
+            },
+        )
+    }
     ModelPickerSheet(
         state = modelPickerState,
         onDismiss = onDismissModelPicker,
@@ -869,6 +972,81 @@ fun HermesApp(
             onDismiss = { iconPickerProjectId = null },
             onSave = { iconId -> onSaveProjectIcon(iconPickerProject.id, iconId) },
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ShareDestinationSheet(
+    payload: SharePayload,
+    sessions: List<SessionSummary>,
+    projects: List<ProjectSummary>,
+    onDismiss: () -> Unit,
+    onNewChat: () -> Unit,
+    onProjectSelected: (ProjectId) -> Unit,
+    onSessionSelected: (DurableSessionId) -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 640.dp)
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Send to chat", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                buildString {
+                    if (payload.text.isNotBlank()) append("Shared text")
+                    if (payload.text.isNotBlank() && payload.attachments.isNotEmpty()) append(" · ")
+                    if (payload.attachments.isNotEmpty()) append("${payload.attachments.size} attachment(s)")
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            FilledTonalButton(onClick = onNewChat, modifier = Modifier.fillMaxWidth()) {
+                Text("New chat")
+            }
+            if (projects.isNotEmpty()) {
+                Text("Projects", style = MaterialTheme.typography.titleSmall)
+                projects.take(8).forEach { project ->
+                    ListItem(
+                        headlineContent = { Text(project.label) },
+                        supportingContent = { Text("Start a new task here") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onProjectSelected(project.id) }
+                            .semantics {
+                                contentDescription = "Share with project ${project.label}"
+                            },
+                    )
+                }
+            }
+            if (sessions.isNotEmpty()) {
+                Text("Recent chats", style = MaterialTheme.typography.titleSmall)
+                LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
+                    items(sessions.take(20), key = { it.id.value }) { session ->
+                        ListItem(
+                            headlineContent = { Text(session.title) },
+                            supportingContent = session.preview?.takeIf(String::isNotBlank)?.let { preview ->
+                                { Text(preview, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSessionSelected(session.id) }
+                                .semantics {
+                                    contentDescription = "Share with ${session.title}"
+                                },
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.size(4.dp))
+        }
     }
 }
 
@@ -1896,6 +2074,14 @@ private fun SessionListScreen(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             Column {
+                if (snapshot.sessionMetadataSource == CacheSource.Cached) {
+                    Text(
+                        "Cached offline data — reconnecting to Hermes",
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.tertiary,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
                 TopAppBar(
                     title = {
                         val context = connectionContext(snapshot, serverOrigin)
@@ -3030,6 +3216,9 @@ internal fun ServerSettingsScreen(
     showBack: Boolean,
     onBack: () -> Unit,
     onSave: suspend (ServerOrigin) -> Result<Unit>,
+    transcriptCachingEnabled: Boolean = false,
+    onTranscriptCachingChanged: (Boolean) -> Unit = {},
+    onClearOfflineCache: () -> Unit = {},
     onLoadManagementSettings: (String) -> Unit = {},
     onSetProfileDefaultModel: suspend (ModelSelection, Boolean) -> ModelSwitchResult = { _, _ ->
         ModelSwitchResult(accepted = false)
@@ -3223,6 +3412,23 @@ internal fun ServerSettingsScreen(
                             }
                         }) { Text("Set default") }
                     }
+                    Text("Offline cache", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Session metadata is cached by default. Transcript tails are encrypted and opt-in.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Cache transcript tails")
+                        Switch(
+                            checked = transcriptCachingEnabled,
+                            onCheckedChange = onTranscriptCachingChanged,
+                        )
+                    }
+                    TextButton(onClick = onClearOfflineCache) { Text("Clear offline cache") }
                     TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
                     snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     CronJobsPanel(
@@ -3292,13 +3498,16 @@ private fun SessionDetailScreen(
     onDraftChanged: (String) -> Unit,
     canSend: Boolean,
     attachments: List<ComposerAttachment>,
+    hostReferences: List<String>,
     onAddAttachments: (List<ComposerAttachment>) -> List<String>,
     onRemoveAttachment: (String) -> Unit,
+    onRemoveHostReference: (String) -> Unit,
     onSend: (String) -> Unit,
     onReasoningSelected: (String) -> Unit,
     onOpenModelPicker: () -> Unit,
     onClarificationResponse: (String, String) -> Unit,
     onApprovalResponse: (String, Boolean) -> Unit,
+    onBlockingResponse: (UnsupportedBlockingKind, String, String) -> Unit,
     showStop: Boolean,
     stopping: Boolean,
     onStop: () -> Unit,
@@ -3320,6 +3529,9 @@ private fun SessionDetailScreen(
     showBack: Boolean,
     onBack: () -> Unit,
     onLoadManagedImage: suspend (String) -> Result<ByteArray>,
+    onLoadHostFiles: suspend (String?) -> Result<HostFileListing>,
+    onLoadManagedFile: suspend (String) -> Result<HostFileContent>,
+    onAttachHostReference: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
@@ -3328,6 +3540,10 @@ private fun SessionDetailScreen(
     val focusManager = LocalFocusManager.current
     val transcriptScope = rememberCoroutineScope()
     var showSessionInsights by remember(session.id) { mutableStateOf(false) }
+    var showHostFiles by remember(session.id) { mutableStateOf(false) }
+    var showArtifacts by remember(session.id) { mutableStateOf(false) }
+    var attachmentMenuOpen by remember(session.id) { mutableStateOf(false) }
+    val sessionArtifacts = remember(chat.messages) { ArtifactExtractor.extract(chat.messages) }
     val workspacePath = validProjectWorkspacePath(session.workspacePath)
     // Home-bucket sessions run in the server's default working directory; until
     // the server reports the actual cwd there is no path to show, and "No
@@ -3488,6 +3704,13 @@ private fun SessionDetailScreen(
                     },
                 )
             }
+            if (chat.transcriptSource == CacheSource.Cached) {
+                Text(
+                    "Cached transcript — reconnecting to Hermes",
+                    color = MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
             when {
                 chat.isLoading && chat.messages.isEmpty() -> {
                     Box(
@@ -3629,6 +3852,7 @@ private fun SessionDetailScreen(
                                     durableSessionId = session.id,
                                     onClarificationResponse = onClarificationResponse,
                                     onApprovalResponse = onApprovalResponse,
+                                    onBlockingResponse = onBlockingResponse,
                                 )
                             }
                         }
@@ -3720,7 +3944,7 @@ private fun SessionDetailScreen(
             }
             val composerEnabled = (!chat.isSending || steeringAvailable) && !chat.isLoading
             val attachmentsEnabled = canSend && composerEnabled && !steeringAvailable
-            if (attachments.isNotEmpty()) {
+            if (attachments.isNotEmpty() || hostReferences.isNotEmpty()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -3739,6 +3963,23 @@ private fun SessionDetailScreen(
                             },
                         )
                     }
+                    hostReferences.forEach { reference ->
+                        InputChip(
+                            selected = true,
+                            onClick = { onRemoveHostReference(reference) },
+                            enabled = attachmentsEnabled,
+                            label = {
+                                Text(
+                                    reference.substringAfter(':').trim('`', '\'', '"'),
+                                    maxLines = 1,
+                                )
+                            },
+                            trailingIcon = { Text("×") },
+                            modifier = Modifier.semantics {
+                                contentDescription = "Remove host reference $reference"
+                            },
+                        )
+                    }
                 }
             }
             Surface(
@@ -3753,17 +3994,36 @@ private fun SessionDetailScreen(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(
-                        onClick = {
-                            attachmentError = null
-                            attachmentPicker.launch(arrayOf("*/*"))
-                        },
-                        enabled = attachmentsEnabled,
-                        modifier = Modifier
-                            .size(44.dp)
-                            .semantics { contentDescription = "Attach files" },
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = null)
+                    Box {
+                        IconButton(
+                            onClick = { attachmentMenuOpen = true },
+                            enabled = attachmentsEnabled,
+                            modifier = Modifier
+                                .size(44.dp)
+                                .semantics { contentDescription = "Attach files" },
+                        ) {
+                            Icon(Icons.Outlined.Add, contentDescription = null)
+                        }
+                        DropdownMenu(
+                            expanded = attachmentMenuOpen,
+                            onDismissRequest = { attachmentMenuOpen = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Device files") },
+                                onClick = {
+                                    attachmentMenuOpen = false
+                                    attachmentError = null
+                                    attachmentPicker.launch(arrayOf("*/*"))
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Host files") },
+                                onClick = {
+                                    attachmentMenuOpen = false
+                                    showHostFiles = true
+                                },
+                            )
+                        }
                     }
                     BasicTextField(
                         value = draft,
@@ -3978,6 +4238,7 @@ private fun SessionDetailScreen(
                 }
                 SessionContextRing(
                     percent = sessionContextPercent(chat),
+                    artifactCount = sessionArtifacts.size,
                     onClick = {
                         showSessionInsights = true
                         if (maintenanceAvailable) onLoadSessionInsights()
@@ -3994,6 +4255,11 @@ private fun SessionDetailScreen(
             provider = chat.provider,
             maintenanceAvailable = maintenanceAvailable,
             maintenanceEnabled = maintenanceEnabled,
+            artifacts = sessionArtifacts,
+            onOpenArtifacts = {
+                showSessionInsights = false
+                showArtifacts = true
+            },
             onRefresh = onLoadSessionInsights,
             onCompress = onCompressSession,
             onUndo = onUndoSession,
@@ -4001,6 +4267,471 @@ private fun SessionDetailScreen(
             onDismiss = { showSessionInsights = false },
         )
     }
+    if (showHostFiles) {
+        HostFileBrowserSheet(
+            onDismiss = { showHostFiles = false },
+            onLoad = onLoadHostFiles,
+            onAttach = { reference ->
+                onAttachHostReference(reference)
+                showHostFiles = false
+            },
+        )
+    }
+    if (showArtifacts) {
+        ArtifactBrowserSheet(
+            artifacts = sessionArtifacts,
+            onDismiss = { showArtifacts = false },
+            onLoadManagedImage = onLoadManagedImage,
+            onLoadManagedFile = onLoadManagedFile,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HostFileBrowserSheet(
+    onDismiss: () -> Unit,
+    onLoad: suspend (String?) -> Result<HostFileListing>,
+    onAttach: (String) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var listing by remember { mutableStateOf<HostFileListing?>(null) }
+    var filter by rememberSaveable { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun load(path: String?) {
+        scope.launch {
+            loading = true
+            error = null
+            onLoad(path).fold(
+                onSuccess = { listing = it },
+                onFailure = { failure ->
+                    error = failure.message?.take(160)?.takeIf(String::isNotBlank)
+                        ?: "Could not load host files"
+                },
+            )
+            loading = false
+        }
+    }
+
+    LaunchedEffect(Unit) { load(null) }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 720.dp)
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Host files", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                listing?.path ?: "Hermes managed files",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = filter,
+                onValueChange = { filter = it.take(256) },
+                label = { Text("Filter files") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listing?.parentPath?.let { parent ->
+                    TextButton(onClick = { load(parent) }, enabled = !loading) { Text("Up") }
+                }
+                TextButton(
+                    onClick = { load(listing?.path) },
+                    enabled = !loading,
+                ) { Text("Refresh") }
+            }
+            if (loading && listing == null) {
+                CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
+            }
+            error?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+            val entries = listing?.entries.orEmpty().filter { entry ->
+                filter.isBlank() ||
+                    entry.name.contains(filter.trim(), ignoreCase = true) ||
+                    entry.path.contains(filter.trim(), ignoreCase = true)
+            }
+            LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
+                items(entries, key = { it.path }) { entry ->
+                    ListItem(
+                        headlineContent = { Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        supportingContent = {
+                            Text(
+                                if (entry.isDirectory) "Folder" else entry.mimeType ?: "File",
+                                maxLines = 1,
+                            )
+                        },
+                        trailingContent = {
+                            TextButton(onClick = { onAttach(entry.reference) }) { Text("Attach") }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = entry.isDirectory && !loading) { load(entry.path) }
+                            .semantics {
+                                contentDescription = if (entry.isDirectory) {
+                                    "Open host folder ${entry.name}"
+                                } else {
+                                    "Host file ${entry.name}"
+                                }
+                            },
+                    )
+                }
+            }
+            if (!loading && error == null && entries.isEmpty()) {
+                Text("No matching files", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Spacer(Modifier.size(4.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ArtifactBrowserSheet(
+    artifacts: List<Artifact>,
+    onDismiss: () -> Unit,
+    onLoadManagedImage: suspend (String) -> Result<ByteArray>,
+    onLoadManagedFile: suspend (String) -> Result<HostFileContent>,
+) {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val scope = rememberCoroutineScope()
+
+    var pendingSave by remember { mutableStateOf<Artifact?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var selectedType by rememberSaveable { mutableStateOf<ArtifactType?>(null) }
+    var zoomedImage by remember { mutableStateOf<Artifact?>(null) }
+    val filteredArtifacts = artifacts.filter { artifact ->
+        (selectedType == null || artifact.type == selectedType) &&
+            (query.isBlank() ||
+                artifact.displayName.contains(query.trim(), ignoreCase = true) ||
+                artifact.source.contains(query.trim(), ignoreCase = true))
+    }
+
+    fun shareManaged(artifact: Artifact) {
+        scope.launch {
+            onLoadManagedFile(artifact.source).fold(
+                onSuccess = { content ->
+                    runCatching {
+                        val sharedFile = withContext(Dispatchers.IO) {
+                            writeSharedArtifact(context, artifact, content.bytes)
+                        }
+                        val uri = FileProvider.getUriForFile(
+                            context,
+                            "${context.packageName}.files",
+                            sharedFile,
+                        )
+                        context.startActivity(
+                            Intent.createChooser(
+                                Intent(Intent.ACTION_SEND).apply {
+                                    type = content.mimeType
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                },
+                                "Share artifact",
+                            ),
+                        )
+                    }.onFailure { failure ->
+                        error = failure.message?.take(160) ?: "Could not share artifact"
+                    }
+                },
+                onFailure = { failure ->
+                    error = failure.message?.take(160) ?: "Could not download artifact"
+                },
+            )
+        }
+    }
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*"),
+    ) { destination ->
+        val artifact = pendingSave
+        pendingSave = null
+        if (destination != null && artifact != null) {
+            scope.launch {
+                onLoadManagedFile(artifact.source).fold(
+                    onSuccess = { content ->
+                        runCatching {
+                            context.contentResolver.openOutputStream(destination, "w")?.use { output ->
+                                output.write(content.bytes)
+                            } ?: error("Destination could not be opened")
+                        }.onFailure { failure ->
+                            error = failure.message?.take(160) ?: "Could not save artifact"
+                        }
+                    },
+                    onFailure = { failure ->
+                        error = failure.message?.take(160) ?: "Could not download artifact"
+                    },
+                )
+            }
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 720.dp)
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Artifacts", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                "Images, audio, and files explicitly referenced in this chat",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it.take(256) },
+                label = { Text("Search artifacts") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("Artifact search"),
+            )
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = selectedType == null,
+                    onClick = { selectedType = null },
+                    label = { Text("All") },
+                    modifier = Modifier.semantics { contentDescription = "Filter artifacts: All" },
+                )
+                ArtifactType.entries.forEach { type ->
+                    FilterChip(
+                        selected = selectedType == type,
+                        onClick = { selectedType = type },
+                        label = { Text(type.name) },
+                        modifier = Modifier.semantics {
+                            contentDescription = "Filter artifacts: ${type.name}"
+                        },
+                    )
+                }
+            }
+            error?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+            if (filteredArtifacts.isEmpty()) {
+                Text(
+                    if (artifacts.isEmpty()) "No artifacts in this chat" else "No matching artifacts",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
+                    items(filteredArtifacts, key = Artifact::stableIdentity) { artifact ->
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (artifact.type == ArtifactType.Image) {
+                                RemoteMediaImage(
+                                    source = artifact.source,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 260.dp)
+                                        .clickable { zoomedImage = artifact }
+                                        .semantics {
+                                            contentDescription = "Zoom image ${artifact.displayName}"
+                                        },
+                                    loadManagedImage = if (artifact.origin == ArtifactOrigin.ManagedPath) {
+                                        { path -> onLoadManagedImage(path).getOrThrow() }
+                                    } else {
+                                        null
+                                    },
+                                )
+                            }
+                            ListItem(
+                                headlineContent = {
+                                    Text(artifact.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                },
+                                supportingContent = {
+                                    Text(
+                                        artifact.type.name.lowercase().replaceFirstChar(Char::uppercase),
+                                        maxLines = 1,
+                                    )
+                                },
+                                trailingContent = {
+                                    if (artifact.origin == ArtifactOrigin.RemoteUrl) {
+                                        TextButton(onClick = {
+                                            runCatching { uriHandler.openUri(artifact.source) }
+                                                .onFailure { error = "Could not open artifact" }
+                                        }) { Text("Open") }
+                                    }
+                                },
+                            )
+                            if (artifact.origin == ArtifactOrigin.ManagedPath) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                ) {
+                                    TextButton(onClick = { shareManaged(artifact) }) { Text("Share") }
+                                    TextButton(onClick = {
+                                        pendingSave = artifact
+                                        saveLauncher.launch(artifact.displayName)
+                                    }) { Text("Save") }
+                                }
+                            }
+                            if (
+                                artifact.type == ArtifactType.Audio &&
+                                artifact.origin == ArtifactOrigin.ManagedPath
+                            ) {
+                                ManagedAudioPlayer(artifact, onLoadManagedFile)
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.size(4.dp))
+        }
+    }
+    zoomedImage?.let { artifact ->
+        ZoomedArtifactDialog(
+            artifact = artifact,
+            onDismiss = { zoomedImage = null },
+            onLoadManagedImage = onLoadManagedImage,
+        )
+    }
+}
+
+@Composable
+private fun ManagedAudioPlayer(
+    artifact: Artifact,
+    onLoadManagedFile: suspend (String) -> Result<HostFileContent>,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var player by remember(artifact.stableIdentity) { mutableStateOf<MediaPlayer?>(null) }
+    var tempFile by remember(artifact.stableIdentity) { mutableStateOf<File?>(null) }
+    var playing by remember(artifact.stableIdentity) { mutableStateOf(false) }
+    var loading by remember(artifact.stableIdentity) { mutableStateOf(false) }
+    var error by remember(artifact.stableIdentity) { mutableStateOf<String?>(null) }
+
+    DisposableEffect(artifact.stableIdentity) {
+        onDispose {
+            player?.release()
+            tempFile?.delete()
+        }
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        TextButton(
+            enabled = !loading,
+            onClick = {
+                val current = player
+                if (current != null) {
+                    if (playing) current.pause() else current.start()
+                    playing = !playing
+                } else {
+                    scope.launch {
+                        loading = true
+                        error = null
+                        onLoadManagedFile(artifact.source).fold(
+                            onSuccess = { content ->
+                                runCatching {
+                                    val (file, prepared) = withContext(Dispatchers.IO) {
+                                        val directory = File(context.cacheDir, "artifact-audio").apply { mkdirs() }
+                                        val file = File.createTempFile("audio-", ".bin", directory)
+                                        file.writeBytes(content.bytes)
+                                        file to MediaPlayer().apply {
+                                            setDataSource(file.absolutePath)
+                                            prepare()
+                                        }
+                                    }
+                                    tempFile = file
+                                    prepared.setOnCompletionListener { playing = false }
+                                    player = prepared
+                                    prepared.start()
+                                    playing = true
+                                }.onFailure { failure ->
+                                    error = failure.message?.take(120) ?: "Could not play audio"
+                                }
+                            },
+                            onFailure = { failure ->
+                                error = failure.message?.take(120) ?: "Could not load audio"
+                            },
+                        )
+                        loading = false
+                    }
+                }
+            },
+        ) {
+            Text(if (loading) "Loading…" else if (playing) "Pause" else "Play")
+        }
+        error?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun ZoomedArtifactDialog(
+    artifact: Artifact,
+    onDismiss: () -> Unit,
+    onLoadManagedImage: suspend (String) -> Result<ByteArray>,
+) {
+    var scale by remember(artifact.stableIdentity) { mutableStateOf(1f) }
+    val transformState = rememberTransformableState { zoomChange, _, _ ->
+        scale = (scale * zoomChange).coerceIn(1f, 5f)
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(artifact.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 240.dp, max = 620.dp)
+                    .transformable(transformState),
+                contentAlignment = Alignment.Center,
+            ) {
+                RemoteMediaImage(
+                    source = artifact.source,
+                    modifier = Modifier.graphicsLayer(scaleX = scale, scaleY = scale),
+                    loadManagedImage = if (artifact.origin == ArtifactOrigin.ManagedPath) {
+                        { path -> onLoadManagedImage(path).getOrThrow() }
+                    } else {
+                        null
+                    },
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+private fun writeSharedArtifact(context: Context, artifact: Artifact, bytes: ByteArray): File {
+    val directory = File(context.cacheDir, "shared-artifacts").apply { mkdirs() }
+    directory.listFiles()
+        .orEmpty()
+        .sortedByDescending(File::lastModified)
+        .drop(19)
+        .forEach(File::delete)
+    val extension = artifact.displayName.substringAfterLast('.', "")
+        .lowercase()
+        .takeIf { it.matches(Regex("^[a-z0-9]{1,10}$")) }
+        ?.let { ".$it" }
+        .orEmpty()
+    return File(
+        directory,
+        "artifact-${artifact.stableIdentity.hashCode().toUInt().toString(16)}$extension",
+    ).apply { writeBytes(bytes) }
 }
 
 private const val MAX_SUBAGENT_GUIDANCE_LENGTH = 512
@@ -4185,6 +4916,8 @@ private fun SessionInsightsSheet(
     provider: String? = null,
     maintenanceAvailable: Boolean,
     maintenanceEnabled: Boolean,
+    artifacts: List<Artifact>,
+    onOpenArtifacts: () -> Unit,
     onRefresh: () -> Unit,
     onCompress: (String?) -> Unit,
     onUndo: () -> Unit,
@@ -4268,6 +5001,12 @@ private fun SessionInsightsSheet(
             }
             if (!chat.insightsLoading) {
                 SessionUsageCard(chat)
+            }
+            SessionArtifactsCard(
+                artifacts = artifacts,
+                onOpenArtifacts = onOpenArtifacts,
+            )
+            if (!chat.insightsLoading) {
                 SessionContextCard(chat)
             }
             if (chat.maintenanceLoading ||
@@ -4466,6 +5205,48 @@ private fun SessionContextCard(chat: ChatSessionSnapshot) {
 }
 
 @Composable
+private fun SessionArtifactsCard(
+    artifacts: List<Artifact>,
+    onOpenArtifacts: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Artifacts", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (artifacts.size == 1) "1 artifact" else "${artifacts.size} artifacts",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (artifacts.isEmpty()) {
+                Text(
+                    "No images, audio, or files referenced in this chat",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else {
+                artifacts.take(3).forEach { artifact ->
+                    Text(
+                        artifact.displayName,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                TextButton(
+                    onClick = onOpenArtifacts,
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text("View all artifacts")
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ContextCategoryRow(category: ContextBreakdownCategory) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -4517,6 +5298,7 @@ private fun RunStateContent(
     durableSessionId: DurableSessionId,
     onClarificationResponse: (String, String) -> Unit,
     onApprovalResponse: (String, Boolean) -> Unit,
+    onBlockingResponse: (UnsupportedBlockingKind, String, String) -> Unit,
 ) {
     if (!runState.hasVisibleContent()) return
     val runningTools = runState.tools.filter { it.state == RunToolState.Running }
@@ -4554,7 +5336,7 @@ private fun RunStateContent(
             )
         }
         runState.unsupportedBlocking?.let { interaction ->
-            UnsupportedBlockingCard(interaction)
+            SecureBlockingCard(interaction, onBlockingResponse)
         }
     }
 }
@@ -5042,16 +5824,64 @@ private fun ApprovalCard(
 }
 
 @Composable
-private fun UnsupportedBlockingCard(interaction: UnsupportedBlockingInteraction) {
+private fun SecureBlockingCard(
+    interaction: UnsupportedBlockingInteraction,
+    onResponse: (UnsupportedBlockingKind, String, String) -> Unit,
+) {
+    var value by remember(interaction.requestId) { mutableStateOf("") }
+    val isSensitiveInput = interaction.kind == UnsupportedBlockingKind.Sudo ||
+        interaction.kind == UnsupportedBlockingKind.Secret
+    val inputLabel = if (interaction.kind == UnsupportedBlockingKind.Sudo) "Sudo password" else "Secret value"
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("${interaction.kind.name} request", style = MaterialTheme.typography.titleSmall)
-            Text("This Android client cannot answer this request.")
-            Text("Continue in another connected Hermes client.")
-            Text("Request status: ${interaction.lifecycle.name}")
+            Text(
+                if (interaction.kind == UnsupportedBlockingKind.Sudo) "Administrator password required"
+                else if (interaction.kind == UnsupportedBlockingKind.Secret) "Secret required"
+                else "Client read request",
+                style = MaterialTheme.typography.titleSmall,
+            )
+            if (interaction.kind == UnsupportedBlockingKind.Secret) {
+                interaction.prompt?.takeIf(String::isNotBlank)?.let { Text(it) }
+            }
+            if (isSensitiveInput && interaction.lifecycle == RunInteractionLifecycle.Pending) {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it.take(4_096) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = inputLabel },
+                    label = { Text(inputLabel) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = {
+                        value = ""
+                        onResponse(interaction.kind, interaction.requestId, "")
+                    }) {
+                        Text("Cancel")
+                    }
+                    Button(
+                        onClick = {
+                            val submitted = value
+                            value = ""
+                            onResponse(interaction.kind, interaction.requestId, submitted)
+                        },
+                        enabled = value.isNotEmpty(),
+                    ) {
+                        Text(if (interaction.kind == UnsupportedBlockingKind.Sudo) "Send password" else "Send secret")
+                    }
+                }
+            } else {
+                Text("Request status: ${interaction.lifecycle.name}")
+            }
         }
     }
 }
@@ -5067,7 +5897,11 @@ private fun sessionContextPercent(chat: ChatSessionSnapshot): Double? {
 }
 
 @Composable
-private fun SessionContextRing(percent: Double?, onClick: () -> Unit) {
+private fun SessionContextRing(
+    percent: Double?,
+    artifactCount: Int,
+    onClick: () -> Unit,
+) {
     val fraction = percent?.let { (it / 100.0).toFloat().coerceIn(0f, 1f) }
     val ringColor = when {
         fraction == null -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -5081,9 +5915,15 @@ private fun SessionContextRing(percent: Double?, onClick: () -> Unit) {
             .size(40.dp)
             .semantics {
                 contentDescription = "Open session details"
-                stateDescription = percent
+                val contextDescription = percent
                     ?.let { "Context ${formatPercent(it)} percent used" }
                     ?: "Context usage unknown"
+                val artifactDescription = if (artifactCount == 1) {
+                    "1 artifact"
+                } else {
+                    "$artifactCount artifacts"
+                }
+                stateDescription = "$contextDescription, $artifactDescription"
             },
     ) {
         Box(contentAlignment = Alignment.Center) {

@@ -12,6 +12,14 @@ import com.unsupportedpastels.hermesandroid.gateway.ModelOptions
 import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
+import com.unsupportedpastels.hermesandroid.files.HostFileContent
+import com.unsupportedpastels.hermesandroid.files.HostFileEntry
+import com.unsupportedpastels.hermesandroid.files.HostFileListing
+import com.unsupportedpastels.hermesandroid.files.MAX_HOST_FILE_BYTES
+import com.unsupportedpastels.hermesandroid.files.MAX_HOST_FILE_ENTRIES
+import com.unsupportedpastels.hermesandroid.files.validCanonicalHostFilePath
+import com.unsupportedpastels.hermesandroid.files.validHostFileMimeType
+import com.unsupportedpastels.hermesandroid.files.validHostFileName
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.request.bearerAuth
@@ -38,10 +46,15 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import java.util.Base64
 
 @Serializable
 private data class HermesStatusResponse(
@@ -194,12 +207,18 @@ class HermesAuthenticationRejectedException(
     message: String,
 ) : HermesConnectionException(message)
 
+private class HermesResponseBodyTooLargeException :
+    HermesConnectionException("Hermes response body was too large")
+
 private const val MAX_RESPONSE_BODY_BYTES = 64 * 1024
 private const val MAX_TRANSCRIPT_BODY_BYTES = 1024 * 1024
 private const val MAX_TRANSCRIPT_REASONING_CHARS = 1024 * 1024
+private val TRANSCRIPT_PAGE_LIMITS = intArrayOf(100, 50, 25, 10, 5, 1)
 private const val MAX_DURABLE_SESSIONS = 20
 private const val MAX_HOST_DIRECTORY_ENTRIES = 500
 private const val MAX_MANAGED_IMAGE_BYTES = 10 * 1024 * 1024
+private const val MAX_HOST_FILE_LISTING_BODY_BYTES = 512 * 1024
+private const val MAX_HOST_FILE_READ_BODY_BYTES = 1024 * 1024
 
 internal fun HttpClientConfig<*>.configureHermesHttpClient() {
     followRedirects = false
@@ -220,11 +239,11 @@ internal suspend fun HttpResponse.readBodyTextBounded(
                 if (read <= 0) break
                 count += read
                 if (count > maxBytes) {
-                    throw HermesConnectionException("Hermes response body was too large")
+                    throw HermesResponseBodyTooLargeException()
                 }
             }
             if (count > maxBytes) {
-                throw HermesConnectionException("Hermes response body was too large")
+                throw HermesResponseBodyTooLargeException()
             }
             String(bytes, 0, count, Charsets.UTF_8)
         } finally {
@@ -254,6 +273,30 @@ interface HermesConnectionClient {
         accessToken: String?,
         path: String? = null,
     ): HostDirectoryListing = throw UnsupportedOperationException()
+
+    suspend fun loadHostFiles(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        path: String? = null,
+    ): HostFileListing = throw UnsupportedOperationException()
+
+    suspend fun readManagedFile(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        path: String,
+    ): HostFileContent = throw UnsupportedOperationException()
+
+    suspend fun downloadManagedFile(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        path: String,
+    ): HostFileContent = throw UnsupportedOperationException()
+
+    suspend fun streamManagedFile(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        path: String,
+    ): HostFileContent = throw UnsupportedOperationException()
 
     suspend fun createHostDirectory(
         serverOrigin: ServerOrigin,
@@ -640,10 +683,37 @@ class HttpHermesConnectionClient(
         accessToken: String?,
         durableSessionId: DurableSessionId,
     ): List<ChatMessage> = try {
+        TRANSCRIPT_PAGE_LIMITS.forEachIndexed { index, pageLimit ->
+            try {
+                return loadTranscriptPage(
+                    serverOrigin = serverOrigin,
+                    accessToken = accessToken,
+                    durableSessionId = durableSessionId,
+                    pageLimit = pageLimit,
+                )
+            } catch (error: HermesResponseBodyTooLargeException) {
+                if (index == TRANSCRIPT_PAGE_LIMITS.lastIndex) throw error
+            }
+        }
+        throw HermesConnectionException("Could not load Hermes transcript")
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: HermesConnectionException) {
+        throw error
+    } catch (error: Exception) {
+        throw HermesConnectionException("Could not load Hermes transcript", error)
+    }
+
+    private suspend fun loadTranscriptPage(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        durableSessionId: DurableSessionId,
+        pageLimit: Int,
+    ): List<ChatMessage> {
         val encodedId = durableSessionId.value.encodeURLPathPart()
         val response = client.get("${serverOrigin.value}/api/sessions/$encodedId/messages") {
             accessToken?.let { bearerAuth(it) }
-            parameter("limit", 100)
+            parameter("limit", pageLimit)
             parameter("order", "latest")
             parameter("profile", "default")
         }
@@ -656,7 +726,7 @@ class HttpHermesConnectionClient(
         val decoded = json.decodeFromString<HermesTranscriptResponse>(
             response.readBodyTextBounded(MAX_TRANSCRIPT_BODY_BYTES),
         )
-        (decoded.messages.ifEmpty { decoded.data }).mapNotNull { row ->
+        return (decoded.messages.ifEmpty { decoded.data }).mapNotNull { row ->
             val role = when (row["role"]?.jsonPrimitive?.contentOrNull?.lowercase()) {
                 "user" -> ChatMessageRole.User
                 "assistant" -> ChatMessageRole.Assistant
@@ -685,12 +755,124 @@ class HttpHermesConnectionClient(
                 reasoningText = reasoning.orEmpty(),
             )
         }
+    }
+
+    override suspend fun loadHostFiles(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        path: String?,
+    ): HostFileListing = try {
+        val requestedPath = path?.let {
+            validCanonicalHostFilePath(it)
+                ?: throw HermesConnectionException("Host file path is invalid")
+        }
+        val response = client.get("${serverOrigin.value}/api/files") {
+            accessToken?.let { bearerAuth(it) }
+            requestedPath?.let { parameter("path", it) }
+        }
+        if (!response.status.isSuccess()) {
+            response.readBodyTextBounded()
+            throw HermesConnectionException(
+                "Hermes host file listing returned HTTP ${response.status.value}",
+            )
+        }
+        parseHostFileListing(response.readBodyTextBounded(MAX_HOST_FILE_LISTING_BODY_BYTES))
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (error: HermesConnectionException) {
         throw error
     } catch (error: Exception) {
-        throw HermesConnectionException("Could not load Hermes transcript", error)
+        throw HermesConnectionException("Could not load host files", error)
+    }
+
+    override suspend fun readManagedFile(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        path: String,
+    ): HostFileContent = try {
+        val canonicalPath = validCanonicalHostFilePath(path)
+            ?: throw HermesConnectionException("Host file path is invalid")
+        val response = client.get("${serverOrigin.value}/api/files/read") {
+            accessToken?.let { bearerAuth(it) }
+            parameter("path", canonicalPath)
+        }
+        if (!response.status.isSuccess()) {
+            response.readBodyTextBounded()
+            throw HermesConnectionException("Hermes host file read returned HTTP ${response.status.value}")
+        }
+        parseHostFileContent(response.readBodyTextBounded(MAX_HOST_FILE_READ_BODY_BYTES))
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: HermesConnectionException) {
+        throw error
+    } catch (error: Exception) {
+        throw HermesConnectionException("Could not read host file", error)
+    }
+
+    override suspend fun downloadManagedFile(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        path: String,
+    ): HostFileContent = downloadManagedFileFrom(
+        serverOrigin = serverOrigin,
+        accessToken = accessToken,
+        path = path,
+        endpoint = "/api/files/download",
+    )
+
+    override suspend fun streamManagedFile(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        path: String,
+    ): HostFileContent = downloadManagedFileFrom(
+        serverOrigin = serverOrigin,
+        accessToken = accessToken,
+        path = path,
+        endpoint = "/api/files/stream",
+    )
+
+    private suspend fun downloadManagedFileFrom(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        path: String,
+        endpoint: String,
+    ): HostFileContent = try {
+        val canonicalPath = validCanonicalHostFilePath(path)
+            ?: throw HermesConnectionException("Host file path is invalid")
+        val response = client.get("${serverOrigin.value}$endpoint") {
+            accessToken?.let { bearerAuth(it) }
+            parameter("path", canonicalPath)
+        }
+        if (!response.status.isSuccess()) {
+            response.bodyAsChannel().cancel(null)
+            throw HermesConnectionException("Hermes host file download returned HTTP ${response.status.value}")
+        }
+        val mimeType = validHostFileMimeType(
+            response.headers[io.ktor.http.HttpHeaders.ContentType]?.substringBefore(';'),
+        ) ?: run {
+            response.bodyAsChannel().cancel(null)
+            throw HermesConnectionException("Hermes host file MIME type was invalid")
+        }
+        val declaredLength = response.headers[io.ktor.http.HttpHeaders.ContentLength]?.let { value ->
+            value.toLongOrNull() ?: throw HermesConnectionException("Hermes host file size was invalid")
+        }
+        if (declaredLength != null && declaredLength !in 0..MAX_HOST_FILE_BYTES.toLong()) {
+            response.bodyAsChannel().cancel(null)
+            throw HermesConnectionException("Hermes host file was too large")
+        }
+        val bytes = response.readBytesBounded(MAX_HOST_FILE_BYTES)
+        HostFileContent(
+            name = canonicalPath.substringAfterLast('/', canonicalPath).substringAfterLast('\\'),
+            path = canonicalPath,
+            mimeType = mimeType,
+            bytes = bytes,
+        )
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: HermesConnectionException) {
+        throw error
+    } catch (error: Exception) {
+        throw HermesConnectionException("Could not download host file", error)
     }
 
     override suspend fun loadHostDirectories(
@@ -918,6 +1100,111 @@ private fun validManagedDirectoryEntryName(name: String): String? {
     if (name.isEmpty() || name.length > 255 || name in setOf(".", "..")) return null
     if (name.any(Char::isISOControl) || '/' in name || '\\' in name) return null
     return name
+}
+
+private fun parseHostFileListing(body: String): HostFileListing {
+    val root = Json.parseToJsonElement(body) as? JsonObject
+        ?: throw HermesConnectionException("Hermes host file response was invalid")
+    val path = validCanonicalHostFilePath(root.managedText("path"))
+        ?: throw HermesConnectionException("Hermes host file response was incomplete")
+    val entries = (root["entries"] as? JsonArray)
+        ?.take(MAX_HOST_FILE_ENTRIES)
+        ?.mapNotNull(::parseHostFileEntry)
+        .orEmpty()
+    return HostFileListing(
+        path = path,
+        entries = entries,
+        parentPath = root.managedText("parent")?.let(::validCanonicalHostFilePath),
+        root = root.managedText("root")?.let(::validCanonicalHostFilePath),
+        lockedRoot = root.managedText("locked_root")?.let(::validCanonicalHostFilePath),
+        canChangePath = root["can_change_path"]?.jsonPrimitive?.booleanOrNull ?: true,
+    )
+}
+
+private fun parseHostFileEntry(element: kotlinx.serialization.json.JsonElement): HostFileEntry? {
+    val row = element as? JsonObject ?: return null
+    val name = validHostFileName(row.managedText("name")) ?: return null
+    val path = validCanonicalHostFilePath(row.managedText("path")) ?: return null
+    val isDirectory = row["is_directory"]?.jsonPrimitive?.booleanOrNull ?: return null
+    val declaredType = row.managedText("type")?.lowercase()
+    if (declaredType != null && declaredType !in setOf("file", "directory", "dir")) return null
+    if (declaredType == "file" && isDirectory || declaredType in setOf("directory", "dir") && !isDirectory) return null
+    val size = row["size"]?.jsonPrimitive?.longOrNull
+    if (size != null && size !in 0..MAX_HOST_FILE_BYTES.toLong()) return null
+    val declaredMimeType = row.managedText("mime_type")
+    val mimeType = declaredMimeType?.let { validHostFileMimeType(it) }
+    if (declaredMimeType != null && mimeType == null) return null
+    val modified = row["mtime"]?.jsonPrimitive?.doubleOrNull
+    if (modified != null && !modified.isFinite()) return null
+    return HostFileEntry(
+        name = name,
+        path = path,
+        isDirectory = isDirectory,
+        size = if (isDirectory) null else size,
+        mimeType = if (isDirectory) null else mimeType,
+        modifiedEpochSeconds = modified,
+    )
+}
+
+private fun parseHostFileContent(body: String): HostFileContent {
+    val root = Json.parseToJsonElement(body) as? JsonObject
+        ?: throw HermesConnectionException("Hermes host file read response was invalid")
+    val name = validHostFileName(root.managedText("name"))
+        ?: throw HermesConnectionException("Hermes host file read response was incomplete")
+    val path = validCanonicalHostFilePath(root.managedText("path"))
+        ?: throw HermesConnectionException("Hermes host file read response was incomplete")
+    val mimeType = validHostFileMimeType(root.managedText("mime_type"))
+        ?: throw HermesConnectionException("Hermes host file MIME type was invalid")
+    val declaredSize = root["size"]?.jsonPrimitive?.longOrNull
+        ?: throw HermesConnectionException("Hermes host file size was invalid")
+    if (declaredSize !in 0..MAX_HOST_FILE_BYTES.toLong()) {
+        throw HermesConnectionException("Hermes host file was too large")
+    }
+    val dataUrl = root.managedText("data_url")
+        ?: throw HermesConnectionException("Hermes host file data was incomplete")
+    val comma = dataUrl.indexOf(',')
+    if (!dataUrl.startsWith("data:") || comma <= 5 || !dataUrl.substring(0, comma).contains(";base64")) {
+        throw HermesConnectionException("Hermes host file data was invalid")
+    }
+    val dataMime = validHostFileMimeType(dataUrl.substring(5, comma).substringBefore(';'))
+        ?: throw HermesConnectionException("Hermes host file MIME type was invalid")
+    if (dataMime != mimeType) throw HermesConnectionException("Hermes host file MIME type did not match")
+    val encoded = dataUrl.substring(comma + 1)
+    val bytes = try {
+        Base64.getDecoder().decode(encoded)
+    } catch (_: IllegalArgumentException) {
+        throw HermesConnectionException("Hermes host file data was invalid")
+    }
+    if (bytes.size.toLong() != declaredSize || bytes.size > MAX_HOST_FILE_BYTES) {
+        throw HermesConnectionException("Hermes host file size did not match")
+    }
+    return HostFileContent(name, path, mimeType, bytes)
+}
+
+private fun JsonObject.managedText(key: String): String? =
+    (this[key] as? JsonPrimitive)?.contentOrNull
+
+private suspend fun HttpResponse.readBytesBounded(maxBytes: Int): ByteArray {
+    require(maxBytes in 1..MAX_HOST_FILE_BYTES)
+    val channel = bodyAsChannel()
+    return try {
+        val source = channel.readRemaining(maxBytes + 1L)
+        try {
+            val bytes = ByteArray(maxBytes + 1)
+            var count = 0
+            while (!source.exhausted()) {
+                val read = source.readAtMostTo(bytes, count, bytes.size)
+                if (read <= 0) break
+                count += read
+                if (count > maxBytes) throw HermesConnectionException("Hermes host file was too large")
+            }
+            bytes.copyOf(count)
+        } finally {
+            source.close()
+        }
+    } finally {
+        channel.cancel(null)
+    }
 }
 
 private fun joinManagedHostPath(parent: String, child: String): String {

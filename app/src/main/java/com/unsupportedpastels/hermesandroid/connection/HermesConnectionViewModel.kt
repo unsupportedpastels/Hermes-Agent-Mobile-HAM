@@ -24,12 +24,19 @@ import com.unsupportedpastels.hermesandroid.attachment.AttachmentPolicy
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentReadException
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentStager
 import com.unsupportedpastels.hermesandroid.attachment.ContentAttachmentByteReader
+import com.unsupportedpastels.hermesandroid.cache.CacheScope
+import com.unsupportedpastels.hermesandroid.cache.CachedSession
+import com.unsupportedpastels.hermesandroid.cache.EncryptedOfflineCacheRepository
+import com.unsupportedpastels.hermesandroid.cache.OfflineCacheRepository
+import com.unsupportedpastels.hermesandroid.files.HostFileContent
+import com.unsupportedpastels.hermesandroid.files.HostFileListing
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ChatBillingNotice
 import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
+import com.unsupportedpastels.hermesandroid.gateway.CacheSource
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatConnector
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatEvent
@@ -62,6 +69,7 @@ import com.unsupportedpastels.hermesandroid.gateway.SessionContextBreakdown
 import com.unsupportedpastels.hermesandroid.gateway.SessionUsage
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionResult
+import com.unsupportedpastels.hermesandroid.gateway.UnsupportedBlockingKind
 import com.unsupportedpastels.hermesandroid.gateway.canonicalReasoningEffort
 import com.unsupportedpastels.hermesandroid.ui.isSlashCommandContext
 import io.ktor.client.HttpClient
@@ -215,6 +223,7 @@ private data class ControllerOperation(
     val chatOperationGeneration: Long,
     val requestId: String? = null,
     val advertisedChoices: List<String> = emptyList(),
+    val blockingKind: UnsupportedBlockingKind? = null,
 )
 
 private fun HermesGatewaySnapshot.mapSession(
@@ -257,6 +266,7 @@ class HermesConnectionViewModel(
     private val refreshClient: NativeRefreshClient? = null,
     private val chatConnector: HermesChatConnector? = null,
     private val projectConnector: HermesChatConnector? = null,
+    private val cacheRepository: OfflineCacheRepository? = null,
     private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1_000L },
     private val attachmentReader: AttachmentByteReader =
         AttachmentByteReader { throw AttachmentReadException("Attachment reading is not available") },
@@ -269,6 +279,11 @@ class HermesConnectionViewModel(
     private val _homeRefreshing = MutableStateFlow(false)
     val homeRefreshing: StateFlow<Boolean> = _homeRefreshing.asStateFlow()
 
+    val transcriptCachingEnabled: StateFlow<Boolean> = cacheRepository?.transcriptCachingEnabled
+        ?: MutableStateFlow(false)
+
+    private var cacheLoadJob: Job? = null
+    private var profileGeneration = 0L
     private var activeOrigin: ServerOrigin? = null
     private var activeTokens: ActiveTokenRecord? = null
 
@@ -336,6 +351,14 @@ class HermesConnectionViewModel(
         viewModelScope.launch {
             settingsStates.collect { settingsState ->
                 val currentGeneration = ++generation
+                val previousOrigin = activeOrigin
+                val nextOrigin = (settingsState as? ServerSettingsState.Ready)?.serverOrigin
+                if (previousOrigin != null && previousOrigin != nextOrigin) {
+                    viewModelScope.launch {
+                        cacheRepository?.clearTranscriptTailsForOrigin(previousOrigin)
+                    }
+                }
+                cacheLoadJob?.cancel()
                 connectionJob?.cancel()
                 projectLoadJob?.cancel()
                 projectLoadJob = null
@@ -360,7 +383,8 @@ class HermesConnectionViewModel(
                 serverDurableIds.clear()
                 mutableAttachments.value = emptyMap()
                 activeTokens = null
-                activeOrigin = (settingsState as? ServerSettingsState.Ready)?.serverOrigin
+                activeOrigin = nextOrigin
+                profileGeneration += 1
                 when (settingsState) {
                     ServerSettingsState.Loading -> mutableSnapshots.value = HermesGatewaySnapshot()
                     ServerSettingsState.Unavailable -> {
@@ -369,11 +393,94 @@ class HermesConnectionViewModel(
                         )
                     }
                     is ServerSettingsState.Ready -> {
+                        cacheLoadJob = viewModelScope.launch {
+                            loadCachedMetadata(
+                                serverOrigin = settingsState.serverOrigin,
+                                profile = "default",
+                                originGeneration = currentGeneration,
+                                expectedProfileGeneration = profileGeneration,
+                            )
+                        }
                         connectionJob = viewModelScope.launch {
                             connect(settingsState.serverOrigin, currentGeneration)
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private suspend fun loadCachedMetadata(
+        serverOrigin: ServerOrigin?,
+        profile: String,
+        originGeneration: Long,
+        expectedProfileGeneration: Long,
+    ) {
+        val repository = cacheRepository ?: return
+        val origin = serverOrigin ?: return
+        val cached = repository.read(CacheScope(origin, profile), nowEpochSeconds())
+        currentCoroutineContext().ensureActive()
+        if (
+            activeOrigin != origin || generation != originGeneration ||
+            profileGeneration != expectedProfileGeneration || cached.sessions.isEmpty()
+        ) return
+        mutableSnapshots.value = mutableSnapshots.value.copy(
+            durableSessions = cached.sessions.map(CachedSession::summary),
+            sessionMetadataSource = CacheSource.Cached,
+            chatSessions = cached.sessions.fold(mutableSnapshots.value.chatSessions) { chats, session ->
+                if (session.messages.isEmpty()) chats else chats + (
+                    session.summary.id to ChatSessionSnapshot(
+                        messages = session.messages,
+                        transcriptSource = CacheSource.Cached,
+                    )
+                )
+            },
+        )
+    }
+
+    fun setTranscriptCachingEnabled(enabled: Boolean): Job = viewModelScope.launch {
+        cacheRepository?.setTranscriptCachingEnabled(enabled)
+    }
+
+    fun clearOfflineCache(): Job = viewModelScope.launch {
+        val expectedOrigin = activeOrigin
+        val expectedGeneration = generation
+        cacheRepository?.clear(null)
+        if (expectedOrigin != null && activeOrigin == expectedOrigin && generation == expectedGeneration) {
+            mutableSnapshots.value = mutableSnapshots.value.copy(
+                durableSessions = emptyList(),
+                sessionMetadataSource = CacheSource.Live,
+            )
+        }
+    }
+
+    private fun persistCachedMetadata(
+        origin: ServerOrigin,
+        profile: String,
+        sessions: List<SessionSummary>,
+        expectedGeneration: Long,
+    ) {
+        viewModelScope.launch {
+            cacheRepository?.writeMetadata(CacheScope(origin, profile), sessions, nowEpochSeconds())
+            if (activeOrigin == origin && generation == expectedGeneration) {
+                // The write is local bookkeeping; the server remains authoritative.
+            }
+        }
+    }
+
+    private fun persistCachedTranscript(
+        origin: ServerOrigin,
+        profile: String,
+        summary: SessionSummary,
+        messages: List<ChatMessage>,
+        expectedGeneration: Long,
+    ) {
+        viewModelScope.launch {
+            cacheRepository?.writeTranscript(
+                CacheScope(origin, profile), summary, messages, nowEpochSeconds(),
+            )
+            if (activeOrigin == origin && generation == expectedGeneration) {
+                updateChat(summary.id) { it.copy(transcriptSource = CacheSource.Live) }
             }
         }
     }
@@ -409,7 +516,9 @@ class HermesConnectionViewModel(
                     nativeOAuthSupported = info.nativeOAuthSupported,
                     authProviders = info.providers,
                     durableSessions = info.sessions,
+                    sessionMetadataSource = CacheSource.Live,
                 )
+                persistCachedMetadata(serverOrigin, "default", info.sessions, currentGeneration)
                 return
             }
 
@@ -464,6 +573,13 @@ class HermesConnectionViewModel(
                     nativeOAuthSupported = info.nativeOAuthSupported,
                     authProviders = info.providers,
                     durableSessions = authenticated.sessions,
+                    sessionMetadataSource = CacheSource.Live,
+                )
+                persistCachedMetadata(
+                    serverOrigin,
+                    mutableSnapshots.value.selectedProfile,
+                    authenticated.sessions,
+                    currentGeneration,
                 )
                 prefetchedSession?.let { candidate ->
                     adoptProjectMetadataSessionCandidate(
@@ -1024,9 +1140,15 @@ class HermesConnectionViewModel(
         managementJob?.cancel()
         val origin = activeOrigin ?: return viewModelScope.launch { }
         val expectedGeneration = generation
+        val previousProfile = mutableSnapshots.value.selectedProfile
+        val requestedProfile = profile.take(64)
+        if (previousProfile != requestedProfile) {
+            profileGeneration += 1
+            viewModelScope.launch { cacheRepository?.clearTranscriptTails(null) }
+        }
         return viewModelScope.launch {
             mutableSnapshots.value = mutableSnapshots.value.copy(
-                selectedProfile = profile.take(64),
+                selectedProfile = requestedProfile,
                 managementLoading = true,
                 managementError = null,
             )
@@ -1043,6 +1165,7 @@ class HermesConnectionViewModel(
                         defaultModelOptions = options,
                         managementLoading = false,
                     )
+                    loadCachedMetadata(origin, selected, expectedGeneration, profileGeneration)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -1078,6 +1201,7 @@ class HermesConnectionViewModel(
     suspend fun logout() {
         val origin = activeOrigin ?: return
         val expectedGeneration = generation
+        cacheRepository?.clearTranscriptTailsForOrigin(origin)
         tokenStore?.clear(origin)
         currentCoroutineContext().ensureActive()
         if (generation != expectedGeneration || activeOrigin != origin) return
@@ -1153,6 +1277,10 @@ class HermesConnectionViewModel(
         val expectedGeneration = generation
         val token = checkNotNull(accessTokenForRequest(origin, expectedGeneration)) { "Sign in required" }
         client.deleteSession(origin, token, sessionId, mutableSnapshots.value.selectedProfile)
+        cacheRepository?.deleteSession(
+            CacheScope(origin, mutableSnapshots.value.selectedProfile),
+            sessionId,
+        )
         detachFailedRuntime(sessionId)
         mutableSnapshots.value = mutableSnapshots.value.removeSession(sessionId)
     }
@@ -1308,6 +1436,16 @@ class HermesConnectionViewModel(
     ): HostDirectoryListing = withHermesRestOperation { serverOrigin, accessToken ->
         client.loadHostDirectories(serverOrigin, accessToken, path)
     }
+
+    suspend fun loadHostFiles(path: String? = null): HostFileListing =
+        withHermesRestOperation { serverOrigin, accessToken ->
+            client.loadHostFiles(serverOrigin, accessToken, path)
+        }
+
+    suspend fun loadManagedFile(path: String): HostFileContent =
+        withHermesRestOperation { serverOrigin, accessToken ->
+            client.downloadManagedFile(serverOrigin, accessToken, path)
+        }
 
     suspend fun createHostDirectory(
         parentPath: String,
@@ -1559,8 +1697,30 @@ class HermesConnectionViewModel(
         val job = viewModelScope.launch {
             val origin = activeOrigin ?: return@launch
             val originGeneration = generation
+            val expectedProfileGeneration = profileGeneration
+            val profile = mutableSnapshots.value.selectedProfile
             if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
-            updateChat(durableSessionId) { it.copy(isLoading = true, error = null) }
+            val cached = cacheRepository?.read(
+                CacheScope(origin, profile),
+                nowEpochSeconds(),
+            )?.sessions?.firstOrNull { it.summary.id == durableSessionId }
+            if (
+                activeOrigin != origin || generation != originGeneration ||
+                profileGeneration != expectedProfileGeneration ||
+                mutableSnapshots.value.selectedProfile != profile
+            ) return@launch
+            val hasCachedMessages = cached?.messages?.isNotEmpty() == true
+            if (cached != null) {
+                updateChat(durableSessionId) {
+                    it.copy(
+                        messages = cached.messages,
+                        isLoading = false,
+                        error = null,
+                        transcriptSource = if (hasCachedMessages) CacheSource.Cached else CacheSource.Live,
+                    )
+                }
+            }
+            updateChat(durableSessionId) { it.copy(isLoading = !hasCachedMessages, error = null) }
             try {
                 val accessToken = accessTokenForRequest(origin, originGeneration)
                 if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
@@ -1569,9 +1729,21 @@ class HermesConnectionViewModel(
                     accessToken,
                     serverDurableId(durableSessionId),
                 )
-                if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
+                if (
+                    !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+                    profileGeneration != expectedProfileGeneration ||
+                    mutableSnapshots.value.selectedProfile != profile
+                ) return@launch
                 updateChat(durableSessionId) {
-                    it.copy(messages = messages, isLoading = false, error = null)
+                    it.copy(
+                        messages = messages,
+                        isLoading = false,
+                        error = null,
+                        transcriptSource = CacheSource.Live,
+                    )
+                }
+                cachedSummary(durableSessionId)?.let { summary ->
+                    persistCachedTranscript(origin, profile, summary, messages, originGeneration)
                 }
                 if (
                     accessToken != null &&
@@ -1798,6 +1970,39 @@ class HermesConnectionViewModel(
             } catch (_: Exception) {
                 publishClarificationResponse(operation, RunInteractionLifecycle.Failed)
                 publishControllerError(operation, "Could not respond to clarification")
+            }
+        }
+    }
+
+    /** Responds once to the exact pending sudo, secret, or renderer-read bridge request. */
+    fun respondToBlockingPrompt(
+        durableSessionId: DurableSessionId,
+        kind: UnsupportedBlockingKind,
+        requestId: String,
+        value: String,
+    ): Job {
+        val operation = beginBlockingResponse(durableSessionId, kind, requestId)
+            ?: return viewModelScope.launch { }
+        return viewModelScope.launch {
+            try {
+                val response = operation.session.respondToBlockingPrompt(kind, requestId, value)
+                currentCoroutineContext().ensureActive()
+                val lifecycle = when (response.status) {
+                    HermesChatResponseStatus.Ok,
+                    HermesChatResponseStatus.Resolved,
+                    -> RunInteractionLifecycle.Resolved
+                    HermesChatResponseStatus.Expired -> RunInteractionLifecycle.Expired
+                    HermesChatResponseStatus.Interrupted,
+                    HermesChatResponseStatus.Unknown,
+                    -> RunInteractionLifecycle.Failed
+                }
+                publishBlockingResponse(operation, lifecycle)
+                if (lifecycle == RunInteractionLifecycle.Failed) publishBlockingError(operation)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                publishBlockingResponse(operation, RunInteractionLifecycle.Failed)
+                publishBlockingError(operation)
             }
         }
     }
@@ -2457,6 +2662,12 @@ class HermesConnectionViewModel(
     private fun serverDurableId(localId: DurableSessionId): DurableSessionId =
         serverDurableIds[localId] ?: localId
 
+    private fun cachedSummary(durableSessionId: DurableSessionId): SessionSummary? =
+        mutableSnapshots.value.durableSessions.firstOrNull { it.id == durableSessionId }
+            ?: mutableSnapshots.value.projectSessions.values.asSequence()
+                .flatten()
+                .firstOrNull { it.id == durableSessionId }
+
     private fun localDraftSession(durableSessionId: DurableSessionId): SessionSummary? =
         mutableSnapshots.value.durableSessions.firstOrNull {
             it.id == durableSessionId && it.isLocalDraft
@@ -2864,11 +3075,20 @@ class HermesConnectionViewModel(
                     is HermesChatEvent.ApprovalExpire -> updateRunState(durableSessionId, event)
                     is HermesChatEvent.UnsupportedBlockingRequest -> {
                         updateRunState(durableSessionId, event)
-                        notifications.unsupportedInputRequired(
-                            durableSessionId,
-                            sessionTitle(durableSessionId),
-                            event.prompt ?: "Open a controlling Hermes client to continue",
-                        )
+                        if (event.kind == UnsupportedBlockingKind.TerminalRead ||
+                            event.kind == UnsupportedBlockingKind.PreviewRead ||
+                            event.kind == UnsupportedBlockingKind.WindowRead
+                        ) {
+                            // Android owns none of Desktop's terminal/preview/window surfaces.
+                            // The released bridge contract defines an empty response as unavailable.
+                            respondToBlockingPrompt(durableSessionId, event.kind, event.requestId, "")
+                        } else {
+                            notifications.unsupportedInputRequired(
+                                durableSessionId,
+                                sessionTitle(durableSessionId),
+                                event.prompt ?: "Secure input is required to continue",
+                            )
+                        }
                     }
                     is HermesChatEvent.UnsupportedBlockingExpire -> updateRunState(durableSessionId, event)
                 }
@@ -3233,6 +3453,50 @@ class HermesConnectionViewModel(
             originGeneration = originGeneration,
             chatOperationGeneration = operationGeneration,
             requestId = requestId,
+        )
+    }
+
+    private fun beginBlockingResponse(
+        durableSessionId: DurableSessionId,
+        kind: UnsupportedBlockingKind,
+        requestId: String,
+    ): ControllerOperation? = synchronized(controllerLock) {
+        val origin = activeOrigin ?: return@synchronized null
+        val controller = liveControllers[durableSessionId] ?: return@synchronized null
+        val snapshot = mutableSnapshots.value
+        val chat = snapshot.chatSessions[durableSessionId] ?: return@synchronized null
+        val interaction = chat.runState.unsupportedBlocking ?: return@synchronized null
+        val operationGeneration = controller.operationGeneration
+        val originGeneration = generation
+        if (
+            !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+            interaction.runtimeSessionId != controller.runtimeSessionId ||
+            interaction.kind != kind ||
+            interaction.requestId != requestId ||
+            interaction.lifecycle != RunInteractionLifecycle.Pending
+        ) return@synchronized null
+
+        mutableSnapshots.value = snapshot.copy(
+            chatSessions = snapshot.chatSessions + (
+                durableSessionId to chat.copy(
+                    runState = chat.runState.transitionUnsupportedBlockingLifecycle(
+                        controller.runtimeSessionId,
+                        kind,
+                        requestId,
+                        RunInteractionLifecycle.Responding,
+                    ),
+                )
+                ),
+        )
+        ControllerOperation(
+            durableSessionId = durableSessionId,
+            session = controller.session,
+            runtimeSessionId = controller.runtimeSessionId,
+            origin = origin,
+            originGeneration = originGeneration,
+            chatOperationGeneration = operationGeneration,
+            requestId = requestId,
+            blockingKind = kind,
         )
     }
 
@@ -3818,6 +4082,56 @@ class HermesConnectionViewModel(
         }
     }
 
+    private fun publishBlockingResponse(
+        operation: ControllerOperation,
+        lifecycle: RunInteractionLifecycle,
+    ) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            val current = chat.runState.unsupportedBlocking ?: return
+            val kind = operation.blockingKind ?: return
+            if (
+                current.runtimeSessionId != operation.runtimeSessionId ||
+                current.requestId != operation.requestId ||
+                current.kind != kind ||
+                current.lifecycle != RunInteractionLifecycle.Responding
+            ) return
+            mutableSnapshots.value = snapshot.copy(
+                chatSessions = snapshot.chatSessions + (
+                    operation.durableSessionId to chat.copy(
+                        error = null,
+                        runState = chat.runState.transitionUnsupportedBlockingLifecycle(
+                            operation.runtimeSessionId,
+                            kind,
+                            checkNotNull(operation.requestId),
+                            lifecycle,
+                        ),
+                    )
+                    ),
+            )
+        }
+    }
+
+    private fun publishBlockingError(operation: ControllerOperation) {
+        synchronized(controllerLock) {
+            if (!isCurrentControllerOperation(operation)) return
+            val snapshot = mutableSnapshots.value
+            val chat = snapshot.chatSessions[operation.durableSessionId] ?: return
+            val current = chat.runState.unsupportedBlocking ?: return
+            if (
+                current.runtimeSessionId != operation.runtimeSessionId ||
+                current.requestId != operation.requestId ||
+                current.kind != operation.blockingKind ||
+                current.lifecycle != RunInteractionLifecycle.Failed
+            ) return
+            updateChat(operation.durableSessionId) {
+                it.copy(error = "Could not respond to secure input request")
+            }
+        }
+    }
+
     private fun publishApprovalResponse(
         operation: ControllerOperation,
         lifecycle: RunInteractionLifecycle,
@@ -4207,6 +4521,7 @@ class HermesConnectionViewModel(
         private val refreshClient: NativeRefreshClient? = null,
         private val chatConnector: HermesChatConnector? = null,
         private val projectConnector: HermesChatConnector? = null,
+        private val cacheRepository: OfflineCacheRepository? = null,
         private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1_000L },
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
@@ -4221,6 +4536,7 @@ class HermesConnectionViewModel(
                 refreshClient = refreshClient,
                 chatConnector = chatConnector,
                 projectConnector = projectConnector,
+                cacheRepository = cacheRepository,
                 nowEpochSeconds = nowEpochSeconds,
             ) as T
         }
@@ -4264,6 +4580,7 @@ class HermesConnectionViewModel(
                 refreshClient = HttpHermesNativeRefreshClient(httpClient),
                 chatConnector = chatConnector,
                 projectConnector = projectConnector,
+                cacheRepository = EncryptedOfflineCacheRepository(context),
                 attachmentReader = ContentAttachmentByteReader(context),
                 appForegroundStates = HermesAppForeground.states,
                 notifications = AndroidTurnNotificationController(context),

@@ -1264,6 +1264,65 @@ class HermesChatIntegrationTest {
     }
 
     @Test
+    fun blockingPromptControllerCorrelatesSecretsAndAutoAnswersUnavailableReadSurfaces() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        session.emit(
+            HermesChatEvent.UnsupportedBlockingRequest(
+                session.runtimeSessionId,
+                UnsupportedBlockingKind.Secret,
+                "secret-1",
+                "Enter credential",
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.respondToBlockingPrompt(durableId, UnsupportedBlockingKind.Secret, "wrong", "ignored").join()
+        assertTrue(session.blockingCalls.isEmpty())
+
+        val response = viewModel.respondToBlockingPrompt(
+            durableId,
+            UnsupportedBlockingKind.Secret,
+            "secret-1",
+            "opaque-value",
+        )
+        runCurrent()
+        assertEquals(
+            listOf(Triple(UnsupportedBlockingKind.Secret, "secret-1", "opaque-value")),
+            session.blockingCalls,
+        )
+        assertEquals(
+            RunInteractionLifecycle.Responding,
+            viewModel.snapshots.value.chatSessions.getValue(durableId).runState.unsupportedBlocking?.lifecycle,
+        )
+        session.blockingResponse.complete(HermesChatResponse(HermesChatResponseStatus.Resolved))
+        response.join()
+        assertEquals(
+            RunInteractionLifecycle.Resolved,
+            viewModel.snapshots.value.chatSessions.getValue(durableId).runState.unsupportedBlocking?.lifecycle,
+        )
+
+        session.blockingResponse = CompletableDeferred(HermesChatResponse(HermesChatResponseStatus.Ok))
+        session.emit(
+            HermesChatEvent.UnsupportedBlockingRequest(
+                session.runtimeSessionId,
+                UnsupportedBlockingKind.TerminalRead,
+                "read-1",
+                null,
+            ),
+        )
+        advanceUntilIdle()
+        assertEquals(Triple(UnsupportedBlockingKind.TerminalRead, "read-1", ""), session.blockingCalls.last())
+        assertEquals(
+            RunInteractionLifecycle.Resolved,
+            viewModel.snapshots.value.chatSessions.getValue(durableId).runState.unsupportedBlocking?.lifecycle,
+        )
+    }
+
+    @Test
     fun approvalControllerRequiresAdvertisedChoiceTargetsRuntimeOnceAndMapsExpiredResponse() = runTest(dispatcher) {
         val session = ControllerChatSession()
         val viewModel = chatViewModel(session)
@@ -2787,6 +2846,7 @@ private class ControllerChatSession(
     val clarificationCalls = mutableListOf<Pair<String, String>>()
     val approvalCalls = mutableListOf<Triple<RuntimeSessionId, String, Boolean>>()
     val approvalRequestIds = mutableListOf<String?>()
+    val blockingCalls = mutableListOf<Triple<UnsupportedBlockingKind, String, String>>()
     val interruptCalls = mutableListOf<RuntimeSessionId>()
     val steerCalls = mutableListOf<Pair<RuntimeSessionId, String>>()
     val usageCalls = mutableListOf<RuntimeSessionId>()
@@ -2799,6 +2859,7 @@ private class ControllerChatSession(
     val subagentSteerCalls = mutableListOf<Triple<RuntimeSessionId, String, String>>()
     var clarificationResponse = CompletableDeferred<HermesChatResponse>()
     var approvalResponse = CompletableDeferred<HermesChatResponse>()
+    var blockingResponse = CompletableDeferred<HermesChatResponse>()
     var interruptResponse = CompletableDeferred<HermesChatResponse>()
     var clarificationNonCooperative = false
     var approvalNonCooperative = false
@@ -2847,6 +2908,15 @@ private class ControllerChatSession(
         } else {
             approvalResponse.await()
         }
+    }
+
+    override suspend fun respondToBlockingPrompt(
+        kind: UnsupportedBlockingKind,
+        requestId: String,
+        value: String,
+    ): HermesChatResponse {
+        blockingCalls += Triple(kind, requestId, value)
+        return blockingResponse.await()
     }
 
     override suspend fun interruptSession(
