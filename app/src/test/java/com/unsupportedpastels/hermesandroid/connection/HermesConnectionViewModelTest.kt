@@ -1,5 +1,11 @@
 package com.unsupportedpastels.hermesandroid.connection
 
+import com.unsupportedpastels.hermesandroid.cache.CacheScope
+import com.unsupportedpastels.hermesandroid.cache.CachedSession
+import com.unsupportedpastels.hermesandroid.cache.OfflineCacheRepository
+import com.unsupportedpastels.hermesandroid.cache.OfflineCacheSnapshot
+import com.unsupportedpastels.hermesandroid.gateway.CacheSource
+import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatConnector
@@ -145,6 +151,90 @@ class HermesConnectionViewModelTest {
             listOf("First session"),
             viewModel.snapshots.value.durableSessions.map { it.title },
         )
+    }
+
+    @Test
+    fun failedConnectionPreservesSessionsLoadedFromOfflineCache() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val cached = SessionSummary(DurableSessionId("cached-1"), "Cached session")
+        val cache = RecordingOfflineCacheRepository(
+            snapshots = mapOf(
+                CacheScope(origin, "default") to OfflineCacheSnapshot(
+                    listOf(CachedSession(cached, updatedAtEpochSeconds = 10)),
+                ),
+            ),
+        )
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = object : HermesConnectionClient {
+                override suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo =
+                    throw HermesConnectionException("offline")
+            },
+            cacheRepository = cache,
+            nowEpochSeconds = { 11 },
+        )
+
+        advanceUntilIdle()
+
+        assertEquals(ConnectionState.Disconnected, viewModel.snapshots.value.connectionState)
+        assertEquals(CacheSource.Cached, viewModel.snapshots.value.sessionMetadataSource)
+        assertEquals(listOf(cached), viewModel.snapshots.value.durableSessions)
+    }
+
+    @Test
+    fun clearingOfflineCachePreservesLiveServerSessions() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val live = SessionSummary(DurableSessionId("live-1"), "Live session")
+        val client = FakeHermesConnectionClient()
+        val cache = RecordingOfflineCacheRepository()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            cacheRepository = cache,
+        )
+        runCurrent()
+        client.response.complete(
+            HermesConnectionInfo(
+                version = "0.20.0",
+                authRequired = false,
+                nativeOAuthSupported = false,
+                providers = emptyList(),
+                sessions = listOf(live),
+            ),
+        )
+        advanceUntilIdle()
+
+        viewModel.clearOfflineCache().join()
+
+        assertEquals(CacheSource.Live, viewModel.snapshots.value.sessionMetadataSource)
+        assertEquals(listOf(live), viewModel.snapshots.value.durableSessions)
+        assertEquals(listOf<CacheScope?>(null), cache.clearedScopes)
+    }
+
+    @Test
+    fun changingProfileClearsOnlyThePreviousProfileTranscriptTail() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val client = AuthenticatingHermesConnectionClient().apply {
+            profiles = listOf("default", "work")
+        }
+        val cache = RecordingOfflineCacheRepository()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = FixedTokenStore(),
+            cacheRepository = cache,
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        viewModel.loadManagementSettings("work").join()
+        advanceUntilIdle()
+
+        assertEquals(listOf(CacheScope(origin, "default")), cache.clearedTranscriptScopes)
     }
 
     @Test
@@ -2608,6 +2698,44 @@ private class FakeHermesConnectionClient : HermesConnectionClient {
     override suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo {
         probedOrigins += serverOrigin
         return response.await()
+    }
+}
+
+private class RecordingOfflineCacheRepository(
+    private val snapshots: Map<CacheScope, OfflineCacheSnapshot> = emptyMap(),
+) : OfflineCacheRepository {
+    override val transcriptCachingEnabled = MutableStateFlow(false)
+    val clearedScopes = mutableListOf<CacheScope?>()
+    val clearedTranscriptScopes = mutableListOf<CacheScope?>()
+
+    override suspend fun read(scope: CacheScope, nowEpochSeconds: Long): OfflineCacheSnapshot =
+        snapshots[scope] ?: OfflineCacheSnapshot()
+
+    override suspend fun writeMetadata(
+        scope: CacheScope,
+        sessions: List<SessionSummary>,
+        nowEpochSeconds: Long,
+    ) = Unit
+
+    override suspend fun writeTranscript(
+        scope: CacheScope,
+        summary: SessionSummary,
+        messages: List<ChatMessage>,
+        nowEpochSeconds: Long,
+    ) = Unit
+
+    override suspend fun deleteSession(scope: CacheScope, durableSessionId: DurableSessionId) = Unit
+
+    override suspend fun clearTranscriptTails(scope: CacheScope?) {
+        clearedTranscriptScopes += scope
+    }
+
+    override suspend fun clear(scope: CacheScope?) {
+        clearedScopes += scope
+    }
+
+    override suspend fun setTranscriptCachingEnabled(enabled: Boolean) {
+        transcriptCachingEnabled.value = enabled
     }
 }
 

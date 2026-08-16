@@ -45,6 +45,11 @@ enum class AuthenticationState {
     Authenticated,
 }
 
+enum class CacheSource {
+    Live,
+    Cached,
+}
+
 data class ActiveRuntimeSession(
     val runtimeSessionId: RuntimeSessionId,
     val durableSessionId: DurableSessionId? = null,
@@ -95,6 +100,7 @@ data class ChatSessionSnapshot(
     val insightsError: String? = null,
     val maintenanceLoading: Boolean = false,
     val maintenanceError: String? = null,
+    val transcriptSource: CacheSource = CacheSource.Live,
 ) {
     init {
         require(processRows.size <= MAX_PROCESS_ROWS) { "Process rows exceed the bounded limit" }
@@ -109,6 +115,7 @@ data class HermesGatewaySnapshot(
     val authProviders: List<HermesAuthProvider> = emptyList(),
     val connectionError: String? = null,
     val durableSessions: List<SessionSummary> = emptyList(),
+    val sessionMetadataSource: CacheSource = CacheSource.Live,
     val projects: List<ProjectSummary> = emptyList(),
     val projectState: ProjectLoadState = ProjectLoadState.Loaded(emptyList()),
     val activeProjectId: ProjectId? = null,

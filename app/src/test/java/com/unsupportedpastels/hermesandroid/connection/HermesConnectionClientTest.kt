@@ -353,6 +353,36 @@ class HermesConnectionClientTest {
     }
 
     @Test
+    fun oversizedTranscriptRetriesWithSmallerLatestPage() = runTest {
+        val requestedLimits = mutableListOf<String?>()
+        val engine = MockEngine { request ->
+            assertEquals("/api/sessions/durable-large/messages", request.url.encodedPath)
+            assertEquals("latest", request.url.parameters["order"])
+            requestedLimits += request.url.parameters["limit"]
+            if (request.url.parameters["limit"] == "100") {
+                respond(
+                    content = "x".repeat(1024 * 1024 + 1),
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            } else {
+                respond(
+                    content = """{"messages":[{"role":"assistant","content":"Recovered tail"}]}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            }
+        }
+
+        val messages = HttpHermesConnectionClient(HttpClient(engine)).loadTranscript(
+            ServerOrigin.parse("https://hermes.example"),
+            accessToken = null,
+            DurableSessionId("durable-large"),
+        )
+
+        assertEquals(listOf("100", "50"), requestedLimits)
+        assertEquals("Recovered tail", messages.single().text)
+    }
+
+    @Test
     fun productionHttpConfigurationRejectsRedirects() = runTest {
         var requestCount = 0
         val engine = MockEngine {
