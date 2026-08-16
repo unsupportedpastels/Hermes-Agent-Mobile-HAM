@@ -5,11 +5,14 @@ import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.UnsupportedBlockingKind
 
 const val MAX_RUN_TOOL_ROWS = 50
+const val MAX_RUN_TODO_ITEMS = 50
 
 private const val MAX_RUN_TOOL_ID_CHARS = 256
 private const val MAX_RUN_TOOL_NAME_CHARS = 256
 private const val MAX_RUN_TOOL_CONTEXT_CHARS = 4_096
 private const val MAX_RUN_TOOL_SUMMARY_CHARS = 4_096
+private const val MAX_RUN_TODO_ID_CHARS = 256
+private const val MAX_RUN_TODO_CONTENT_CHARS = 4_096
 private const val MAX_RUN_STATUS_KIND_CHARS = 256
 private const val MAX_RUN_STATUS_TEXT_CHARS = 4_096
 private const val MAX_RUN_INTERACTION_ID_CHARS = 256
@@ -28,6 +31,19 @@ data class RunToolRow(
     val context: String? = null,
     val summary: String? = null,
     val state: RunToolState,
+)
+
+enum class RunTodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+data class RunTodoItem(
+    val id: String,
+    val content: String,
+    val status: RunTodoStatus,
 )
 
 data class RunStatus(
@@ -71,6 +87,7 @@ data class UnsupportedBlockingInteraction(
 
 data class RunEventState(
     val tools: List<RunToolRow> = emptyList(),
+    val todos: List<RunTodoItem> = emptyList(),
     val status: RunStatus? = null,
     val clarification: ClarificationInteraction? = null,
     val approval: ApprovalInteraction? = null,
@@ -78,11 +95,15 @@ data class RunEventState(
 ) {
     init {
         require(tools.size <= MAX_RUN_TOOL_ROWS) { "Run tool rows exceed the bounded limit" }
+        require(todos.size <= MAX_RUN_TODO_ITEMS) { "Run todo items exceed the bounded limit" }
     }
 
     fun reduce(event: HermesChatEvent): RunEventState = when (event) {
-        is HermesChatEvent.ToolStart -> reduceToolStart(event)
-        is HermesChatEvent.ToolComplete -> reduceToolComplete(event)
+        is HermesChatEvent.ToolStart -> {
+            val next = reduceToolStart(event)
+            if (next === this) this else next.reduceTodoUpdate(event.todos)
+        }
+        is HermesChatEvent.ToolComplete -> reduceToolComplete(event).reduceTodoUpdate(event.todos)
         is HermesChatEvent.MessageComplete,
         is HermesChatEvent.Error,
         -> finishRunningTools()
@@ -259,6 +280,23 @@ data class RunEventState(
         return copy(
             unsupportedBlocking = current.copy(lifecycle = RunInteractionLifecycle.Expired),
         )
+    }
+
+    private fun reduceTodoUpdate(items: List<RunTodoItem>?): RunEventState {
+        if (items == null) return this
+        val normalized = items
+            .asSequence()
+            .map { item ->
+                item.copy(
+                    id = item.id.take(MAX_RUN_TODO_ID_CHARS),
+                    content = item.content.take(MAX_RUN_TODO_CONTENT_CHARS),
+                )
+            }
+            .filter { it.id.isNotBlank() && it.content.isNotBlank() }
+            .distinctBy(RunTodoItem::id)
+            .take(MAX_RUN_TODO_ITEMS)
+            .toList()
+        return if (normalized == todos) this else copy(todos = normalized)
     }
 
     private fun reduceToolStart(event: HermesChatEvent.ToolStart): RunEventState {

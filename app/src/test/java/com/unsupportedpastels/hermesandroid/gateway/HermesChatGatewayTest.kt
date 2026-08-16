@@ -61,6 +61,35 @@ class HermesChatGatewayTest {
     }
 
     @Test
+    fun appliesCanonicalSessionScopedFastMode() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            val id = request["id"]!!.jsonPrimitive.content
+            socket.offer(
+                """{"jsonrpc":"2.0","id":$id,"result":{"key":"fast","value":"fast","scope":"session"}}""",
+            )
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        connection.setFast(RuntimeSessionId("runtime-1"), fast = true)
+
+        val request = Json.parseToJsonElement(socket.sentFrames.single()).jsonObject
+        assertEquals("config.set", request["method"]!!.jsonPrimitive.content)
+        val params = request["params"]!!.jsonObject
+        assertEquals("runtime-1", params["session_id"]!!.jsonPrimitive.content)
+        assertEquals("fast", params["key"]!!.jsonPrimitive.content)
+        assertEquals("fast", params["value"]!!.jsonPrimitive.content)
+        connection.close()
+    }
+
+    @Test
     fun loadsConfiguredModelOptionsAndAppliesCanonicalSessionScopedSelection() = runTest {
         val socket = ScriptedSocket()
         socket.onSend = { frame ->
@@ -68,7 +97,7 @@ class HermesChatGatewayTest {
             val id = request["id"]!!.jsonPrimitive.content
             when (request["method"]!!.jsonPrimitive.content) {
                 "model.options" -> socket.offer(
-                    """{"jsonrpc":"2.0","id":$id,"result":{"provider":"nous","model":"Hermes-4-405B","providers":[{"slug":"nous","name":"Nous Research","is_current":true,"authenticated":true,"models":["Hermes-4-405B","gpt-5.6-luna"]},{"slug":"openrouter","name":"OpenRouter","authenticated":false,"models":["anthropic/claude-sonnet-4.6"]}]}}""",
+                    """{"jsonrpc":"2.0","id":$id,"result":{"provider":"nous","model":"Hermes-4-405B","providers":[{"slug":"nous","name":"Nous Research","is_current":true,"authenticated":true,"models":["Hermes-4-405B","gpt-5.6-luna"],"capabilities":{"Hermes-4-405B":{"fast":true,"reasoning":false},"gpt-5.6-luna":{"fast":"true","reasoning":true}}},{"slug":"openrouter","name":"OpenRouter","authenticated":false,"models":["anthropic/claude-sonnet-4.6"]}]}}""",
                 )
                 "config.set" -> socket.offer(
                     """{"jsonrpc":"2.0","id":$id,"result":{"key":"model","value":"gpt-5.6-luna","scope":"session","deferred":false,"confirm_required":false}}""",
@@ -92,6 +121,10 @@ class HermesChatGatewayTest {
 
         assertEquals(ModelSelection("nous", "Hermes-4-405B"), options.current)
         assertEquals(listOf("Hermes-4-405B", "gpt-5.6-luna"), options.providers.single().models)
+        assertEquals(true, options.providers.single().capabilities["Hermes-4-405B"]?.fast)
+        assertEquals(false, options.providers.single().capabilities["Hermes-4-405B"]?.reasoning)
+        assertEquals(null, options.providers.single().capabilities["gpt-5.6-luna"]?.fast)
+        assertEquals(true, options.providers.single().capabilities["gpt-5.6-luna"]?.reasoning)
         assertTrue(result.accepted)
         assertFalse(result.deferred)
         assertFalse(result.confirmationRequired)

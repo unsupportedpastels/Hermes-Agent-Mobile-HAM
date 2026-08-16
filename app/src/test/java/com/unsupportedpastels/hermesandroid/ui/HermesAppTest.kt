@@ -61,6 +61,8 @@ import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryEntry
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryListing
 import com.unsupportedpastels.hermesandroid.gateway.ModelOptions
+import com.unsupportedpastels.hermesandroid.gateway.ModelCapabilities
+import com.unsupportedpastels.hermesandroid.gateway.CurrentModelInfo
 import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
@@ -106,6 +108,56 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("Delete session?").assertIsDisplayed()
+    }
+
+    @Test
+    fun sessionSelectionShowsBoundedCountAndRequiresBulkConfirmation() {
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(snapshot = connectedSnapshot)
+            }
+        }
+
+        composeRule.onNodeWithText("Select").performClick()
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNodeWithContentDescription("1 sessions selected").assertIsDisplayed()
+        composeRule.onNodeWithText("Delete selected").performClick()
+
+        composeRule.onNodeWithText("Delete 1 sessions?").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Confirm delete selected sessions").assertIsDisplayed()
+    }
+
+    @Test
+    fun selectionModeShowsNoSelectableControlForLocalDrafts() {
+        val draft = SessionSummary(DurableSessionId("local-draft"), "Local draft", isLocalDraft = true)
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(durableSessions = sessions + draft),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Select").performClick()
+        composeRule.onAllNodesWithContentDescription("Select Local draft").assertCountEquals(0)
+        composeRule.onAllNodesWithContentDescription("Deselect Local draft").assertCountEquals(0)
+    }
+
+    @Test
+    fun unsupportedBulkCapabilityDoesNotExposeDeleteAction() {
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(
+                        bulkDeleteCapability = com.unsupportedpastels.hermesandroid.connection.SessionBulkDeleteCapability.Unsupported,
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Select").performClick()
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onAllNodesWithText("Delete selected").assertCountEquals(0)
     }
 
     @Test
@@ -222,12 +274,14 @@ class HermesAppTest {
     }
 
     @Test
-    fun newDraftShowsResolvedModelAndProviderDefaultReasoningBeforeFirstSend() {
+    fun newDraftShowsAdvertisedReasoningLevelWithoutLiveRuntime() {
         val draft = SessionSummary(
             id = DurableSessionId("draft-preview"),
             title = "New chat",
             isLocalDraft = true,
         )
+        var selectedReasoning: Pair<DurableSessionId, String>? = null
+        var selectedFast: Pair<DurableSessionId, Boolean>? = null
         composeRule.setContent {
             HermesAndroidTheme {
                 HermesApp(
@@ -238,17 +292,80 @@ class HermesAppTest {
                             draft.id to ChatSessionSnapshot(
                                 model = "openai/gpt-5.6-sol",
                                 provider = "openai-codex",
+                                modelCapabilities = ModelCapabilities(fast = true, reasoning = true),
+                                reasoningEffort = "medium",
                                 draftDefaultsLoaded = true,
                             ),
                         ),
                     ),
                     initialRoute = SessionDetailRoute(draft.id),
+                    onReasoningSelected = { id, effort -> selectedReasoning = id to effort },
+                    onFastSelected = { id, fast -> selectedFast = id to fast },
                 )
             }
         }
 
         composeRule.onNodeWithText("gpt-5.6-sol").assertIsDisplayed()
-        composeRule.onNodeWithText("Provider default").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Change reasoning effort").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("high").performClick()
+        assertEquals(draft.id to "high", selectedReasoning)
+        composeRule.onNodeWithContentDescription("Change fast mode").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Fast").performClick()
+        assertEquals(draft.id to true, selectedFast)
+    }
+
+    @Test
+    fun observedSessionKeepsReportedReasoningLevelVisibleWhenCapabilitiesAreUnavailable() {
+        val sessionId = sessions.first().id
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(
+                        chatSessions = mapOf(
+                            sessionId to ChatSessionSnapshot(
+                                model = "openai/gpt-5.6-terra",
+                                provider = "openai-codex",
+                                reasoningEffort = "high",
+                            ),
+                        ),
+                    ),
+                    initialRoute = SessionDetailRoute(sessionId),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("high").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Reported reasoning effort")
+            .assertIsDisplayed()
+        composeRule.onAllNodesWithContentDescription("Change reasoning effort").assertCountEquals(0)
+    }
+
+    @Test
+    fun durableSessionWithAdvertisedReasoningShowsEditableReasoningWithoutLiveRuntime() {
+        val sessionId = sessions.first().id
+        var selectedReasoning: Pair<DurableSessionId, String>? = null
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(
+                        chatSessions = mapOf(
+                            sessionId to ChatSessionSnapshot(
+                                model = "openai/gpt-5.6-sol",
+                                provider = "openai-codex",
+                                modelCapabilities = ModelCapabilities(reasoning = true),
+                                reasoningEffort = "medium",
+                            ),
+                        ),
+                    ),
+                    initialRoute = SessionDetailRoute(sessionId),
+                    onReasoningSelected = { id, effort -> selectedReasoning = id to effort },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Change reasoning effort").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("high").performClick()
+        assertEquals(sessionId to "high", selectedReasoning)
     }
 
     @Test
@@ -308,14 +425,25 @@ class HermesAppTest {
     }
 
     @Test
-    fun chatPageKeepsModelAndReasoningEffortVisible() {
+    fun chatPageUsesSpeedometerForFastModeAndKeepsModelAndReasoningVisible() {
         val sessionId = sessions.first().id
+        var selectedFast: Pair<DurableSessionId, Boolean>? = null
         var snapshot by mutableStateOf(
             connectedSnapshot.copy(
+                activeRuntimes = listOf(
+                    ActiveRuntimeSession(
+                        runtimeSessionId = RuntimeSessionId("runtime-visible"),
+                        durableSessionId = sessionId,
+                        title = "First session",
+                        access = RuntimeAccess.Controller,
+                    ),
+                ),
                 chatSessions = mapOf(
                     sessionId to ChatSessionSnapshot(
                         model = "gpt-5.6-sol",
                         provider = "openai-codex",
+                        modelCapabilities = ModelCapabilities(fast = true, reasoning = true),
+                        fastMode = "fast",
                         reasoningEffort = "medium",
                     ),
                 ),
@@ -323,12 +451,28 @@ class HermesAppTest {
         )
         composeRule.setContent {
             HermesAndroidTheme {
-                HermesApp(snapshot = snapshot, initialRoute = SessionDetailRoute(sessionId))
+                HermesApp(
+                    snapshot = snapshot,
+                    initialRoute = SessionDetailRoute(sessionId),
+                    onFastSelected = { id, fast -> selectedFast = id to fast },
+                )
             }
         }
 
         composeRule.onNodeWithText("gpt-5.6-sol").assertIsDisplayed()
         composeRule.onNodeWithText("medium").assertIsDisplayed()
+        composeRule.onNodeWithText("Fast").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Change fast mode")
+            .assertIsDisplayed()
+            .assert(
+                SemanticsMatcher.expectValue(
+                    SemanticsProperties.StateDescription,
+                    "Fast mode enabled",
+                ),
+            )
+            .performClick()
+        composeRule.onNodeWithText("Normal").performClick()
+        assertEquals(sessionId to false, selectedFast)
 
         composeRule.runOnIdle {
             snapshot = snapshot.copy(
@@ -477,11 +621,36 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithText("New task").performClick()
+        composeRule.onNodeWithContentDescription("New task").performClick()
         composeRule.onNodeWithText("New chat").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Settings").performClick()
         assertEquals(1, taskStarts)
         composeRule.onNodeWithText("Hermes server").assertIsDisplayed()
+    }
+
+    @Test
+    @Config(sdk = [35], qualifiers = "w400dp-h900dp")
+    fun compactHomeKeepsOperationalOverviewInSettingsAndUsesSquareNewTaskFab() {
+        var taskStarts = 0
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(
+                        authenticationState = AuthenticationState.Authenticated,
+                    ),
+                    onCreateSession = {
+                        taskStarts += 1
+                        null
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Operational overview").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("New task").assertIsDisplayed().performClick()
+        assertEquals(1, taskStarts)
+        composeRule.onNodeWithContentDescription("Settings").performClick()
+        composeRule.onNodeWithContentDescription("Operational overview").assertIsDisplayed()
     }
 
     @Test
@@ -2164,8 +2333,10 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("Configure server").performClick()
         composeRule.onNodeWithText("Server origin").assertIsDisplayed()
-        composeRule.onNode(hasSetTextAction()).performTextInput("HTTPS://Example.COM/")
-        composeRule.onNodeWithText("Save").performClick()
+        composeRule.onNodeWithContentDescription("Server origin input")
+            .performTextInput("HTTPS://Example.COM/")
+        composeRule.onNodeWithText("Save").performScrollTo().performClick()
+        composeRule.waitForIdle()
 
         assertEquals("https://example.com", savedOrigin?.value)
     }
@@ -2183,10 +2354,52 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("Configure server").performClick()
-        composeRule.onNode(hasSetTextAction()).performTextInput("http://example.com")
+        composeRule.onNodeWithContentDescription("Server origin input")
+            .performTextInput("http://example.com")
 
         composeRule.onNodeWithText("Server origin must use HTTPS").assertIsDisplayed()
         composeRule.onNodeWithText("Save").assertIsNotEnabled()
+    }
+
+    @Test
+    fun settingsShowsCurrentProfileContextAndKeepsFutureReasoningDefaultSeparate() {
+        val snapshot = HermesGatewaySnapshot(
+            connectionState = ConnectionState.Connected,
+            authenticationState = AuthenticationState.Authenticated,
+            profiles = listOf("default", "work"),
+            selectedProfile = "default",
+            defaultModelOptions = ModelOptions(
+                current = ModelSelection("nous", "Hermes-4-405B"),
+                providers = emptyList(),
+                profile = "default",
+            ),
+            currentModelInfo = CurrentModelInfo(
+                profile = "default",
+                provider = "nous",
+                model = "Hermes-4-405B",
+                effectiveContextLength = 131072,
+                capabilities = ModelCapabilities(reasoning = true, fast = true),
+            ),
+            profileReasoningEffort = "medium",
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                ServerSettingsScreen(
+                    serverOrigin = ServerOrigin.parse("https://hermes.example"),
+                    snapshot = snapshot,
+                    showBack = false,
+                    onBack = {},
+                    onSave = { Result.success(Unit) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Current profile model").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Effective context: 131072 tokens").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Reasoning default for future chats").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "This changes future chats only; it does not change the active runtime.",
+        ).performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -2297,7 +2510,7 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithText("New task").performClick()
+        composeRule.onNodeWithContentDescription("New task").performClick()
         composeRule.onNode(hasSetTextAction()).performTextInput("Unscoped task")
         composeRule.onNodeWithContentDescription("Send message").performClick()
 

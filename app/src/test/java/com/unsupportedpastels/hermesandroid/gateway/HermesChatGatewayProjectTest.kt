@@ -1,8 +1,12 @@
 package com.unsupportedpastels.hermesandroid.gateway
 
 import com.unsupportedpastels.hermesandroid.app.ProjectId
+import com.unsupportedpastels.hermesandroid.app.MAX_PROCESS_ROWS
+import com.unsupportedpastels.hermesandroid.app.RunTodoItem
+import com.unsupportedpastels.hermesandroid.app.RunTodoStatus
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -14,6 +18,74 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HermesChatGatewayProjectTest {
+    @Test
+    fun todoPayloadInOfficialToolEventIsParsedAsBoundedLiveState() = runTest {
+        val socket = MetadataSocket()
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "access-token",
+            ticketClient = object : WsTicketClient {
+                override suspend fun mintTicket(origin: ServerOrigin, accessToken: String) =
+                    WsTicket("ticket", 30)
+            },
+            socketFactory = object : ChatWebSocketFactory { override suspend fun connect(url: String) = socket },
+            parentScope = backgroundScope,
+        ).connect()
+
+        socket.offer(
+            """{"jsonrpc":"2.0","method":"event","params":{"session_id":"runtime-1","type":"tool.complete","payload":{"tool_id":"todo-tool","name":"todo","summary":"updated","todos":[{"id":"one","content":"Inspect gateway","status":"completed"},{"id":"two","content":"Render UI","status":"in_progress"},{"id":"bad","content":"ignored","status":"unknown"}]}}}""",
+        )
+
+        val event = connection.events.first()
+
+        assertTrue(event is HermesChatEvent.ToolComplete)
+        val todoEvent = event as HermesChatEvent.ToolComplete
+        assertEquals("todo", todoEvent.name)
+        assertEquals(
+            listOf(RunTodoStatus.Completed, RunTodoStatus.InProgress),
+            todoEvent.todos?.map(RunTodoItem::status),
+        )
+        connection.close()
+    }
+
+    @Test
+    fun processListUsesTheSelectedRuntimeAndBoundsOfficialRows() = runTest {
+        val socket = MetadataSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            assertEquals("process.list", request["method"]!!.jsonPrimitive.content)
+            assertEquals(
+                "runtime-1",
+                request["params"]!!.jsonObject["session_id"]!!.jsonPrimitive.content,
+            )
+            val rows = (1..(MAX_PROCESS_ROWS + 4)).joinToString(",") { index ->
+                """{"session_id":"process-$index","command":"python server.py --port $index","status":"running","uptime_seconds":12,"output_tail":"tail-$index"}"""
+            }
+            socket.offer(
+                """{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{"processes":[$rows],"future":true}}""",
+            )
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "access-token",
+            ticketClient = object : WsTicketClient {
+                override suspend fun mintTicket(origin: ServerOrigin, accessToken: String) =
+                    WsTicket("ticket", 30)
+            },
+            socketFactory = object : ChatWebSocketFactory { override suspend fun connect(url: String) = socket },
+            parentScope = backgroundScope,
+        ).connect()
+
+        val rows = connection.loadProcessList(RuntimeSessionId("runtime-1"))
+
+        assertEquals(MAX_PROCESS_ROWS, rows.size)
+        assertEquals("process-1", rows.first().processId)
+        assertEquals("python server.py --port 1", rows.first().command)
+        assertEquals("tail-1", rows.first().outputTail)
+        assertEquals(12L, rows.first().uptimeSeconds)
+        connection.close()
+    }
+
     @Test
     fun delegationStatusReturnsBoundedAuthoritativeActiveChildren() = runTest {
         val socket = MetadataSocket()

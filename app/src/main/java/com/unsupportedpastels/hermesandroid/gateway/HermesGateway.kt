@@ -6,11 +6,16 @@ import com.unsupportedpastels.hermesandroid.app.ProjectId
 import com.unsupportedpastels.hermesandroid.app.ProjectLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSessionLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSummary
+import com.unsupportedpastels.hermesandroid.app.ProcessRow
+import com.unsupportedpastels.hermesandroid.app.MAX_PROCESS_ROWS
 import com.unsupportedpastels.hermesandroid.app.RunEventState
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.connection.HermesAuthProvider
+import com.unsupportedpastels.hermesandroid.connection.SessionBulkDeleteCapability
 import com.unsupportedpastels.hermesandroid.connection.SessionSearchResult
 import com.unsupportedpastels.hermesandroid.gateway.ModelOptions
+import com.unsupportedpastels.hermesandroid.gateway.CurrentModelInfo
+import com.unsupportedpastels.hermesandroid.gateway.ModelCapabilities
 import kotlinx.coroutines.flow.StateFlow
 
 @JvmInline
@@ -77,8 +82,11 @@ data class ChatSessionSnapshot(
     val notice: String? = null,
     val billingNotice: ChatBillingNotice? = null,
     val runState: RunEventState = RunEventState(),
+    val processRows: List<ProcessRow> = emptyList(),
     val model: String? = null,
     val provider: String? = null,
+    val modelCapabilities: ModelCapabilities? = null,
+    val fastMode: String? = null,
     val reasoningEffort: String? = null,
     val draftDefaultsLoaded: Boolean = false,
     val sessionUsage: SessionUsage? = null,
@@ -87,7 +95,11 @@ data class ChatSessionSnapshot(
     val insightsError: String? = null,
     val maintenanceLoading: Boolean = false,
     val maintenanceError: String? = null,
-)
+) {
+    init {
+        require(processRows.size <= MAX_PROCESS_ROWS) { "Process rows exceed the bounded limit" }
+    }
+}
 
 data class HermesGatewaySnapshot(
     val connectionState: ConnectionState = ConnectionState.Disconnected,
@@ -106,12 +118,22 @@ data class HermesGatewaySnapshot(
     val activeRuntimes: List<ActiveRuntimeSession> = emptyList(),
     val chatSessions: Map<DurableSessionId, ChatSessionSnapshot> = emptyMap(),
     val delegationStatus: DelegationStatus = DelegationStatus(),
+    val delegationStatusAvailable: Boolean = false,
+    val operationalStatusState: OperationalStatusState = OperationalStatusState.Unavailable,
     val cronJobsState: CronJobsState = CronJobsState.Idle,
     val cronJobActionJobId: String? = null,
     val cronJobActionError: String? = null,
+    val cronTriggerCapability: CronRestCapability = CronRestCapability.Unknown,
+    val cronHistoryCapability: CronRestCapability = CronRestCapability.Unknown,
+    val cronRunLoadingScopes: Set<CronJobScope> = emptySet(),
+    val cronRunErrors: Map<CronJobScope, String> = emptyMap(),
+    val cronRunsByScope: Map<CronJobScope, CronJobRunsState> = emptyMap(),
+    val bulkDeleteCapability: SessionBulkDeleteCapability = SessionBulkDeleteCapability.Unknown,
     val profiles: List<String> = emptyList(),
     val selectedProfile: String = "default",
     val defaultModelOptions: ModelOptions? = null,
+    val currentModelInfo: CurrentModelInfo? = null,
+    val profileReasoningEffort: String? = null,
     val managementLoading: Boolean = false,
     val managementError: String? = null,
     val searchQuery: String = "",

@@ -6,12 +6,23 @@ import com.unsupportedpastels.hermesandroid.app.validHostFolderName
 import com.unsupportedpastels.hermesandroid.app.validProjectWorkspacePath
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
+import com.unsupportedpastels.hermesandroid.gateway.CronJob
+import com.unsupportedpastels.hermesandroid.gateway.CronJobRun
+import com.unsupportedpastels.hermesandroid.gateway.CronJobScope
+import com.unsupportedpastels.hermesandroid.gateway.parseCronJob
+import com.unsupportedpastels.hermesandroid.gateway.parseCronJobRuns
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryEntry
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryListing
 import com.unsupportedpastels.hermesandroid.gateway.ModelOptions
 import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
+import com.unsupportedpastels.hermesandroid.gateway.CurrentModelInfo
+import com.unsupportedpastels.hermesandroid.gateway.ModelCapabilities
+import com.unsupportedpastels.hermesandroid.gateway.parseExplicitModelCapabilities
+import com.unsupportedpastels.hermesandroid.gateway.parseModelCapabilities
+import com.unsupportedpastels.hermesandroid.gateway.OperationalStatus
+import com.unsupportedpastels.hermesandroid.gateway.parseOperationalStatus
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.request.bearerAuth
@@ -20,6 +31,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.parameter
 import io.ktor.client.request.patch
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
@@ -36,11 +48,14 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 @Serializable
@@ -172,6 +187,29 @@ private data class SessionUpdateRequest(
     val profile: String? = null,
 )
 
+@Serializable
+private data class BulkDeleteSessionsRequest(
+    val ids: List<String>,
+    val profile: String? = null,
+)
+
+@Serializable
+private data class BulkDeleteSessionsResponse(
+    val ok: Boolean = false,
+    val deleted: Int? = null,
+)
+
+data class BulkDeleteResult(
+    val ok: Boolean,
+    val deleted: Int,
+)
+
+enum class SessionBulkDeleteCapability {
+    Unknown,
+    Supported,
+    Unsupported,
+}
+
 data class HermesConnectionInfo(
     val version: String?,
     val authRequired: Boolean,
@@ -190,16 +228,45 @@ open class HermesConnectionException(
     cause: Throwable? = null,
 ) : Exception(message, cause)
 
+class HermesSessionBulkDeleteUnsupportedException(
+    val statusCode: Int,
+) : HermesConnectionException("Bulk session deletion is not supported by this Hermes server")
+
 class HermesAuthenticationRejectedException(
     message: String,
 ) : HermesConnectionException(message)
 
+enum class CronRestEndpoint {
+    Trigger,
+    Runs,
+}
+
+/** A released server explicitly rejected an audited cron REST route. */
+class HermesCronRestUnsupportedException(
+    val endpoint: CronRestEndpoint,
+    val statusCode: Int,
+) : HermesConnectionException("Cron ${endpoint.name.lowercase()} endpoint is not supported")
+
+/** An older client implementation has no cron REST method at all. */
+class HermesCronRestLegacyUnsupportedException(
+    val endpoint: CronRestEndpoint,
+) : HermesConnectionException("Cron ${endpoint.name.lowercase()} endpoint is not available")
+
+/** HTTP 409 means another scheduler owns this run; it is not a retryable transport failure. */
+class HermesCronJobClaimedException(
+    val jobId: String,
+) : HermesConnectionException("Cron job is already running or was claimed by another scheduler")
+
 private const val MAX_RESPONSE_BODY_BYTES = 64 * 1024
 private const val MAX_TRANSCRIPT_BODY_BYTES = 1024 * 1024
+private const val MAX_CRON_RESPONSE_BODY_BYTES = 128 * 1024
+private const val MAX_MODEL_OPTIONS_RESPONSE_BODY_BYTES = 1024 * 1024
 private const val MAX_TRANSCRIPT_REASONING_CHARS = 1024 * 1024
 private const val MAX_DURABLE_SESSIONS = 20
 private const val MAX_HOST_DIRECTORY_ENTRIES = 500
+internal const val MAX_CRON_RUNS = 20
 private const val MAX_MANAGED_IMAGE_BYTES = 10 * 1024 * 1024
+internal const val MAX_EFFECTIVE_CONTEXT_LENGTH = 100_000_000
 
 internal fun HttpClientConfig<*>.configureHermesHttpClient() {
     followRedirects = false
@@ -238,10 +305,23 @@ internal suspend fun HttpResponse.readBodyTextBounded(
 interface HermesConnectionClient {
     suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo
 
+    /** Public, profile-scoped operational status; this never uses `/api/system/stats`. */
+    suspend fun loadOperationalStatus(
+        serverOrigin: ServerOrigin,
+        profile: String,
+    ): OperationalStatus = throw UnsupportedOperationException()
+
     suspend fun authenticate(
         serverOrigin: ServerOrigin,
         accessToken: String,
     ): AuthenticatedHermesConnection = throw UnsupportedOperationException()
+
+    /** Reload only the selected profile's durable rows after a scoped mutation. */
+    suspend fun loadSessionsForProfile(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): List<SessionSummary> = authenticate(serverOrigin, accessToken).sessions
 
     suspend fun loadTranscript(
         serverOrigin: ServerOrigin,
@@ -285,6 +365,13 @@ interface HermesConnectionClient {
         profile: String? = null,
     ): Unit = throw UnsupportedOperationException()
 
+    suspend fun bulkDeleteSessions(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        durableSessionIds: Collection<DurableSessionId>,
+        profile: String? = null,
+    ): BulkDeleteResult = throw UnsupportedOperationException()
+
     suspend fun searchSessions(
         serverOrigin: ServerOrigin,
         accessToken: String,
@@ -301,6 +388,12 @@ interface HermesConnectionClient {
         profile: String,
     ): ModelOptions = throw UnsupportedOperationException()
 
+    suspend fun loadCurrentModelInfo(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): CurrentModelInfo = throw UnsupportedOperationException()
+
     suspend fun loadProfileReasoningEffort(
         serverOrigin: ServerOrigin,
         accessToken: String,
@@ -309,6 +402,13 @@ interface HermesConnectionClient {
         model: String,
     ): String? = null
 
+    suspend fun setProfileReasoningEffort(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        effort: String,
+    ): Unit = throw UnsupportedOperationException()
+
     suspend fun setDefaultModel(
         serverOrigin: ServerOrigin,
         accessToken: String,
@@ -316,6 +416,21 @@ interface HermesConnectionClient {
         selection: ModelSelection,
         confirmExpensiveModel: Boolean = false,
     ): ModelSwitchResult = throw UnsupportedOperationException()
+
+    suspend fun triggerCronJob(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        jobId: String,
+    ): CronJob = throw HermesCronRestLegacyUnsupportedException(CronRestEndpoint.Trigger)
+
+    suspend fun loadCronJobRuns(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        jobId: String,
+        limit: Int = MAX_CRON_RUNS,
+    ): List<CronJobRun> = throw HermesCronRestLegacyUnsupportedException(CronRestEndpoint.Runs)
 }
 
 internal suspend fun authenticatedConnectionConcurrently(
@@ -383,6 +498,54 @@ class HttpHermesConnectionClient(
         }
     }
 
+    override suspend fun bulkDeleteSessions(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        durableSessionIds: Collection<DurableSessionId>,
+        profile: String?,
+    ): BulkDeleteResult = try {
+        val ids = durableSessionIds.map { sessionId ->
+            sessionId.value.takeIf { it.isNotBlank() && it.length <= 256 }
+                ?: throw IllegalArgumentException("Session ID is invalid")
+        }.distinct()
+        require(ids.isNotEmpty()) { "Bulk session deletion requires at least one ID" }
+        require(ids.size <= 500) { "Bulk session deletion is limited to 500 sessions" }
+        val boundedProfile = profile?.trim()?.takeIf { it.isNotEmpty() && it.length <= 64 }
+        if (profile != null && boundedProfile == null) {
+            throw IllegalArgumentException("Session profile is invalid")
+        }
+        val response = client.post("${serverOrigin.value}/api/sessions/bulk-delete") {
+            bearerAuth(accessToken)
+            contentType(ContentType.Application.Json)
+            setBody(
+                json.encodeToString(
+                    BulkDeleteSessionsRequest(
+                        ids = ids,
+                        profile = boundedProfile?.takeIf { it != "default" },
+                    ),
+                ),
+            )
+        }
+        val body = response.readBodyTextBounded()
+        if (response.status.value == 404 || response.status.value == 405) {
+            throw HermesSessionBulkDeleteUnsupportedException(response.status.value)
+        }
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException(
+                "Hermes bulk session deletion returned HTTP ${response.status.value}",
+            )
+        }
+        parseBulkDeleteResponse(body, ids.size)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: HermesConnectionException) {
+        throw error
+    } catch (error: IllegalArgumentException) {
+        throw error
+    } catch (error: Exception) {
+        throw HermesConnectionException("Could not bulk delete sessions", error)
+    }
+
     override suspend fun searchSessions(
         serverOrigin: ServerOrigin,
         accessToken: String,
@@ -441,12 +604,14 @@ class HttpHermesConnectionClient(
         accessToken: String,
         profile: String,
     ): ModelOptions {
+        val boundedProfile = profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
+            ?: throw HermesConnectionException("Hermes model options profile is invalid")
         val response = client.get("${serverOrigin.value}/api/model/options") {
             bearerAuth(accessToken)
-            parameter("profile", profile.take(64))
+            parameter("profile", boundedProfile)
             parameter("explicit_only", 1)
         }
-        val body = response.readBodyTextBounded()
+        val body = response.readBodyTextBounded(MAX_MODEL_OPTIONS_RESPONSE_BODY_BYTES)
         if (!response.status.isSuccess()) {
             throw HermesConnectionException("Hermes model options returned HTTP ${response.status.value}")
         }
@@ -465,13 +630,55 @@ class HttpHermesConnectionClient(
             val models = (row["models"] as? JsonArray).orEmpty().mapNotNull { model ->
                 model.jsonPrimitive.contentOrNull?.takeIf(String::isNotBlank)?.take(256)
             }.distinct().take(200)
-            if (models.isEmpty()) null else ModelProviderOption(slug.take(64), name.take(128), models)
+            if (models.isEmpty()) null else ModelProviderOption(
+                slug = slug.take(64),
+                name = name.take(128),
+                models = models,
+                capabilities = parseModelCapabilities(row["capabilities"]),
+            )
         }.take(32)
         return ModelOptions(
             current = if (!provider.isNullOrBlank() && !model.isNullOrBlank()) {
                 ModelSelection(provider.take(64), model.take(256))
             } else null,
             providers = providers,
+            profile = boundedProfile,
+        )
+    }
+
+    override suspend fun loadCurrentModelInfo(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): CurrentModelInfo {
+        val boundedProfile = profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
+            ?: throw HermesConnectionException("Hermes model info profile is invalid")
+        val response = client.get("${serverOrigin.value}/api/model/info") {
+            bearerAuth(accessToken)
+            parameter("profile", boundedProfile)
+        }
+        val body = response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException("Hermes model info returned HTTP ${response.status.value}")
+        }
+        val root = json.parseToJsonElement(body) as? JsonObject
+            ?: throw HermesConnectionException("Hermes model info response was invalid")
+        val responseProfile = root["profile"]?.jsonPrimitive?.contentOrNull
+            ?.trim()?.takeIf(String::isNotEmpty)
+        if (responseProfile != null && responseProfile != boundedProfile) {
+            throw HermesConnectionException("Hermes model info returned the wrong profile")
+        }
+        val provider = boundedModelInfoField(root["provider"], 128)
+        val model = boundedModelInfoField(root["model"], 512)
+        val contextLength = root["effective_context_length"]?.jsonPrimitive?.longOrNull
+            ?.takeIf { it in 1..MAX_EFFECTIVE_CONTEXT_LENGTH }
+            ?.toInt()
+        return CurrentModelInfo(
+            profile = boundedProfile,
+            model = model,
+            provider = provider,
+            effectiveContextLength = contextLength,
+            capabilities = parseExplicitModelCapabilities(root["capabilities"]),
         )
     }
 
@@ -517,6 +724,34 @@ class HttpHermesConnectionClient(
             )
     }
 
+    override suspend fun setProfileReasoningEffort(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        effort: String,
+    ) {
+        val boundedProfile = profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
+            ?: throw HermesConnectionException("Hermes reasoning profile is invalid")
+        val canonicalEffort = canonicalProfileReasoningEffort(effort)
+            ?: throw HermesConnectionException("Hermes reasoning effort is invalid")
+        val response = client.put("${serverOrigin.value}/api/config") {
+            bearerAuth(accessToken)
+            parameter("profile", boundedProfile)
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonObject {
+                put("config", buildJsonObject {
+                    put("agent", buildJsonObject {
+                        put("reasoning_effort", canonicalEffort)
+                    })
+                })
+            }.toString())
+        }
+        response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException("Hermes reasoning default update returned HTTP ${response.status.value}")
+        }
+    }
+
     override suspend fun setDefaultModel(
         serverOrigin: ServerOrigin,
         accessToken: String,
@@ -545,6 +780,121 @@ class HttpHermesConnectionClient(
             confirmationRequired = result.confirmRequired,
             confirmationMessage = result.confirmMessage?.take(1_000),
         )
+    }
+
+    override suspend fun triggerCronJob(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        jobId: String,
+    ): CronJob = try {
+        val boundedProfile = boundedCronProfile(profile)
+        val boundedJobId = boundedCronJobId(jobId)
+        val response = client.post(
+            "${serverOrigin.value}/api/cron/jobs/${boundedJobId.encodeURLPathPart()}/trigger",
+        ) {
+            bearerAuth(accessToken)
+            parameter("profile", boundedProfile)
+        }
+        val body = response.readBodyTextBounded(MAX_CRON_RESPONSE_BODY_BYTES)
+        ensureCronRestSuccess(response, CronRestEndpoint.Trigger, boundedJobId)
+        val root = json.parseToJsonElement(body) as? JsonObject
+            ?: throw HermesConnectionException("Cron trigger response was invalid")
+        parseCronJob(root)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: HermesConnectionException) {
+        throw error
+    } catch (error: Exception) {
+        throw HermesConnectionException("Could not trigger cron job", error)
+    }
+
+    override suspend fun loadCronJobRuns(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        jobId: String,
+        limit: Int,
+    ): List<CronJobRun> = try {
+        val boundedProfile = boundedCronProfile(profile)
+        val boundedJobId = boundedCronJobId(jobId)
+        val boundedLimit = limit.coerceIn(1, MAX_CRON_RUNS)
+        val response = client.get(
+            "${serverOrigin.value}/api/cron/jobs/${boundedJobId.encodeURLPathPart()}/runs",
+        ) {
+            bearerAuth(accessToken)
+            parameter("profile", boundedProfile)
+            parameter("limit", boundedLimit)
+        }
+        val body = response.readBodyTextBounded(MAX_CRON_RESPONSE_BODY_BYTES)
+        ensureCronRestSuccess(response, CronRestEndpoint.Runs, boundedJobId)
+        val root = json.parseToJsonElement(body) as? JsonObject
+            ?: throw HermesConnectionException("Cron runs response was invalid")
+        parseCronJobRuns(
+            result = root,
+            scope = CronJobScope(serverOrigin.value, boundedProfile, boundedJobId),
+            limit = boundedLimit,
+        )
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: HermesConnectionException) {
+        throw error
+    } catch (error: Exception) {
+        throw HermesConnectionException("Could not load cron job runs", error)
+    }
+
+    private fun ensureCronRestSuccess(
+        response: HttpResponse,
+        endpoint: CronRestEndpoint,
+        jobId: String,
+    ) {
+        if (response.status.isSuccess()) return
+        when (response.status.value) {
+            404, 405 -> throw HermesCronRestUnsupportedException(endpoint, response.status.value)
+            409 -> if (endpoint == CronRestEndpoint.Trigger) {
+                throw HermesCronJobClaimedException(jobId)
+            } else {
+                throw HermesConnectionException("Cron runs request was rejected")
+            }
+            else -> throw HermesConnectionException(
+                "Cron ${endpoint.name.lowercase()} request returned HTTP ${response.status.value}",
+            )
+        }
+    }
+
+    private fun boundedCronProfile(profile: String): String =
+        profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
+            ?: throw HermesConnectionException("Cron profile is invalid")
+
+    private fun boundedCronJobId(jobId: String): String =
+        jobId.trim().takeIf { it.isNotEmpty() && it.length <= 256 }
+            ?: throw HermesConnectionException("Cron job ID is invalid")
+
+    override suspend fun loadOperationalStatus(
+        serverOrigin: ServerOrigin,
+        profile: String,
+    ): OperationalStatus = try {
+        val boundedProfile = profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
+            ?: throw HermesConnectionException("Operational status profile is invalid")
+        val response = client.get("${serverOrigin.value}/api/status") {
+            parameter("profile", boundedProfile)
+        }
+        val body = response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException(
+                "Hermes operational status returned HTTP ${response.status.value}",
+            )
+        }
+        parseOperationalStatus(
+            Json.parseToJsonElement(body).jsonObject,
+            boundedProfile,
+        )
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: HermesConnectionException) {
+        throw error
+    } catch (error: Exception) {
+        throw HermesConnectionException("Could not load Hermes operational status", error)
     }
 
     override suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo = try {
@@ -610,6 +960,12 @@ class HttpHermesConnectionClient(
             error,
         )
     }
+
+    override suspend fun loadSessionsForProfile(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): List<SessionSummary> = loadSessions(serverOrigin, accessToken, profile)
 
     private suspend fun loadAuthenticatedUser(
         serverOrigin: ServerOrigin,
@@ -841,13 +1197,16 @@ class HttpHermesConnectionClient(
     private suspend fun loadSessions(
         serverOrigin: ServerOrigin,
         accessToken: String?,
+        profile: String = "default",
     ): List<SessionSummary> {
+        val boundedProfile = profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
+            ?: throw HermesConnectionException("Hermes session profile is invalid")
         val sessionsResponse = client.get("${serverOrigin.value}/api/profiles/sessions") {
             accessToken?.let { bearerAuth(it) }
             parameter("limit", MAX_DURABLE_SESSIONS)
             parameter("order", "recent")
             parameter("archived", "exclude")
-            parameter("profile", "default")
+            parameter("profile", boundedProfile)
         }
         if (!sessionsResponse.status.isSuccess()) {
             sessionsResponse.readBodyTextBounded()
@@ -884,6 +1243,27 @@ class HttpHermesConnectionClient(
         return sessions
     }
 }
+
+internal fun parseBulkDeleteResponse(
+    body: String,
+    requestedCount: Int,
+): BulkDeleteResult {
+    require(requestedCount in 1..500) { "Bulk delete request count is invalid" }
+    val response = Json { ignoreUnknownKeys = true }
+        .decodeFromString<BulkDeleteSessionsResponse>(body)
+    val deleted = response.deleted
+        ?.takeIf { it in 0..requestedCount }
+        ?: throw HermesConnectionException("Hermes bulk session deletion response was incomplete")
+    if (!response.ok) {
+        throw HermesConnectionException("Hermes bulk session deletion was not accepted")
+    }
+    return BulkDeleteResult(ok = true, deleted = deleted)
+}
+
+private fun boundedModelInfoField(element: JsonElement?, maxChars: Int): String? =
+    (element as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf {
+        it.isNotEmpty() && it.length <= maxChars && it.none(Char::isISOControl)
+    }
 
 private val profileReasoningEfforts = setOf(
     "minimal",

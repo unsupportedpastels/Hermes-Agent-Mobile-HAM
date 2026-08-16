@@ -2,6 +2,7 @@ package com.unsupportedpastels.hermesandroid.connection
 
 import com.unsupportedpastels.hermesandroid.app.ComposerAttachment
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
+import com.unsupportedpastels.hermesandroid.app.ProcessRow
 import com.unsupportedpastels.hermesandroid.app.RunEventState
 import com.unsupportedpastels.hermesandroid.app.RunInteractionLifecycle
 import com.unsupportedpastels.hermesandroid.app.RunToolRow
@@ -1494,6 +1495,70 @@ class HermesChatIntegrationTest {
     }
 
     @Test
+    fun openingASelectedControllerLoadsOnlyItsProcessLocalRows() = runTest(dispatcher) {
+        val session = ControllerChatSession()
+        session.processListResponse = listOf(
+            ProcessRow("process-1", "python server.py", "running", outputTail = "ready"),
+        )
+        val viewModel = chatViewModel(session)
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertEquals(session.processListResponse, chat.processRows)
+        assertEquals(listOf(session.runtimeSessionId), session.processListCalls)
+    }
+
+    @Test
+    fun staleProcessRowsCannotBleedAcrossOriginAndRuntimeReplacement() = runTest(dispatcher) {
+        val replacementOrigin = ServerOrigin.parse("https://replacement.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val old = ControllerChatSession("runtime-old").apply {
+            processListResponse = listOf(ProcessRow("old", "old server", "running"))
+            processListGate = CompletableDeferred()
+            processListNonCooperative = true
+        }
+        val replacement = ControllerChatSession("runtime-new").apply {
+            processListResponse = listOf(ProcessRow("new", "new server", "running"))
+        }
+        val sessions = ArrayDeque<HermesChatSession>().apply {
+            add(old)
+            add(replacement)
+        }
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = ChatConnectionClient(),
+            tokenStore = MemoryTokenStore(tokens),
+            chatConnector = HermesChatConnector { _, _ -> sessions.removeFirst() },
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+
+        viewModel.openSession(durableId)
+        runCurrent()
+        assertTrue(old.processListStarted.isCompleted)
+
+        settings.value = ServerSettingsState.Ready(replacementOrigin)
+        advanceUntilIdle()
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+        assertEquals(
+            listOf(replacement.processListResponse),
+            listOf(viewModel.snapshots.value.chatSessions.getValue(durableId).processRows),
+        )
+
+        old.processListGate!!.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            replacement.processListResponse,
+            viewModel.snapshots.value.chatSessions.getValue(durableId).processRows,
+        )
+    }
+
+    @Test
     fun subagentControlsUseParentControllerAndUpdateProcessLocalStatus() = runTest(dispatcher) {
         val session = ControllerChatSession()
         val viewModel = chatViewModel(session)
@@ -2797,6 +2862,11 @@ private class ControllerChatSession(
     val pauseDelegationCalls = mutableListOf<Boolean>()
     val subagentInterruptCalls = mutableListOf<String>()
     val subagentSteerCalls = mutableListOf<Triple<RuntimeSessionId, String, String>>()
+    val processListCalls = mutableListOf<RuntimeSessionId>()
+    val processListStarted = CompletableDeferred<Unit>()
+    var processListGate: CompletableDeferred<Unit>? = null
+    var processListNonCooperative = false
+    var processListResponse: List<ProcessRow> = emptyList()
     var clarificationResponse = CompletableDeferred<HermesChatResponse>()
     var approvalResponse = CompletableDeferred<HermesChatResponse>()
     var interruptResponse = CompletableDeferred<HermesChatResponse>()
@@ -2821,6 +2891,19 @@ private class ControllerChatSession(
         runtimeSessionId: RuntimeSessionId,
         text: String,
     ) = PromptSubmission("streaming")
+
+    override suspend fun loadProcessList(runtimeSessionId: RuntimeSessionId): List<ProcessRow> {
+        processListCalls += runtimeSessionId
+        processListGate?.let { gate ->
+            if (!processListStarted.isCompleted) processListStarted.complete(Unit)
+            if (processListNonCooperative) {
+                withContext(NonCancellable) { gate.await() }
+            } else {
+                gate.await()
+            }
+        }
+        return processListResponse
+    }
 
     override suspend fun respondToClarification(
         requestId: String,

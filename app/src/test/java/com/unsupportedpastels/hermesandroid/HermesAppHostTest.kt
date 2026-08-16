@@ -1,8 +1,8 @@
 package com.unsupportedpastels.hermesandroid
 
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -57,8 +57,10 @@ class HermesAppHostTest {
         }
 
         composeRule.onNodeWithText("Configure server").performClick()
-        composeRule.onNode(hasSetTextAction()).performTextInput("https://hermes.example/")
-        composeRule.onNodeWithText("Save").performClick()
+        composeRule.onNodeWithContentDescription("Server origin input")
+            .performTextInput("https://hermes.example/")
+        composeRule.onNodeWithText("Save").performScrollTo().performClick()
+        composeRule.waitForIdle()
 
         composeRule.onNodeWithText("Server configured").assertIsDisplayed()
         composeRule.onNodeWithText("https://hermes.example").assertIsDisplayed()

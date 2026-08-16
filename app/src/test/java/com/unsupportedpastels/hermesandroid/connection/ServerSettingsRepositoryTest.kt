@@ -26,15 +26,22 @@ class ServerSettingsRepositoryTest {
             assertEquals(ServerSettingsState.Ready(null), awaitItem())
 
             repository.save(ServerOrigin.parse("https://FIRST.example/"))
+            val firstState = awaitItem() as ServerSettingsState.Ready
+            assertEquals(ServerOrigin.parse("https://first.example"), firstState.activeOrigin)
             assertEquals(
-                ServerSettingsState.Ready(ServerOrigin.parse("https://first.example")),
-                awaitItem(),
+                listOf(ServerOrigin.parse("https://first.example")),
+                firstState.catalog.entries.map(ServerCatalogEntry::origin),
             )
 
             repository.save(ServerOrigin.parse("https://second.example:8443"))
+            val secondState = awaitItem() as ServerSettingsState.Ready
+            assertEquals(ServerOrigin.parse("https://second.example:8443"), secondState.activeOrigin)
             assertEquals(
-                ServerSettingsState.Ready(ServerOrigin.parse("https://second.example:8443")),
-                awaitItem(),
+                listOf(
+                    ServerOrigin.parse("https://first.example"),
+                    ServerOrigin.parse("https://second.example:8443"),
+                ),
+                secondState.catalog.entries.map(ServerCatalogEntry::origin),
             )
             cancelAndIgnoreRemainingEvents()
         }

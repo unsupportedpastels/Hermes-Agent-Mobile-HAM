@@ -7,6 +7,10 @@ import com.unsupportedpastels.hermesandroid.app.ProjectId
 import com.unsupportedpastels.hermesandroid.app.ProjectSessionsResult
 import com.unsupportedpastels.hermesandroid.app.ProjectSummary
 import com.unsupportedpastels.hermesandroid.app.ProjectTreeResult
+import com.unsupportedpastels.hermesandroid.app.ProcessRow
+import com.unsupportedpastels.hermesandroid.app.MAX_PROCESS_ROWS
+import com.unsupportedpastels.hermesandroid.app.RunTodoItem
+import com.unsupportedpastels.hermesandroid.app.RunTodoStatus
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.app.validProjectWorkspacePath
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
@@ -202,16 +206,68 @@ data class ModelSelection(
     val model: String,
 )
 
+/** Explicit per-model capabilities. A null field means the server did not advertise it. */
+data class ModelCapabilities(
+    val fast: Boolean? = null,
+    val reasoning: Boolean? = null,
+) {
+    val hasExplicitCapability: Boolean
+        get() = fast != null || reasoning != null
+}
+
 data class ModelProviderOption(
     val slug: String,
     val name: String,
     val models: List<String>,
+    /** Explicit capabilities keyed by the exact model identifier; absent fields are unavailable. */
+    val capabilities: Map<String, ModelCapabilities> = emptyMap(),
 )
 
 data class ModelOptions(
     val current: ModelSelection?,
     val providers: List<ModelProviderOption>,
+    /** Non-null only for profile-scoped REST model options responses. */
+    val profile: String? = null,
+) {
+    fun capabilitiesFor(selection: ModelSelection?): ModelCapabilities? = selection?.let { wanted ->
+        providers.firstOrNull { it.slug == wanted.provider }?.capabilities?.get(wanted.model)
+    }
+}
+
+/** Profile-scoped metadata for the one model currently effective on the host. */
+data class CurrentModelInfo(
+    val profile: String,
+    val model: String?,
+    val provider: String?,
+    val effectiveContextLength: Int?,
+    val capabilities: ModelCapabilities,
 )
+
+internal fun parseExplicitModelCapabilities(element: kotlinx.serialization.json.JsonElement?): ModelCapabilities {
+    val objectValue = element as? JsonObject ?: return ModelCapabilities()
+    fun booleanField(name: String): Boolean? =
+        (objectValue[name] as? JsonPrimitive)
+            ?.takeUnless(JsonPrimitive::isString)
+            ?.booleanOrNull
+    return ModelCapabilities(
+        fast = booleanField("fast"),
+        reasoning = booleanField("reasoning"),
+    )
+}
+
+internal fun parseModelCapabilities(element: kotlinx.serialization.json.JsonElement?): Map<String, ModelCapabilities> {
+    val objectValue = element as? JsonObject ?: return emptyMap()
+    return objectValue.entries.asSequence()
+        .take(MAX_MODELS_PER_PROVIDER)
+        .mapNotNull { (rawModel, rawCapabilities) ->
+            val model = rawModel.trim().takeIf {
+                it.isNotEmpty() && it.length <= MAX_MODEL_ID_CHARS && !it.hasControlCharacters()
+            } ?: return@mapNotNull null
+            val capabilities = parseExplicitModelCapabilities(rawCapabilities)
+            model to capabilities
+        }
+        .toMap()
+}
 
 data class ModelSwitchResult(
     val accepted: Boolean,
@@ -319,6 +375,7 @@ interface HermesChatEvent {
         val toolId: String,
         val name: String,
         val context: String?,
+        val todos: List<RunTodoItem>? = null,
     ) : HermesChatEvent
 
     data class ToolComplete(
@@ -326,6 +383,7 @@ interface HermesChatEvent {
         val toolId: String,
         val name: String,
         val summary: String?,
+        val todos: List<RunTodoItem>? = null,
     ) : HermesChatEvent
 
     data class StatusUpdate(
@@ -412,6 +470,10 @@ interface HermesChatSession {
     suspend fun loadDelegationStatus(): DelegationStatus =
         throw HermesChatMethodNotFoundException("delegation.status")
 
+    /** Session-scoped background processes owned by this exact runtime. */
+    suspend fun loadProcessList(runtimeSessionId: RuntimeSessionId): List<ProcessRow> =
+        throw HermesChatMethodNotFoundException("process.list")
+
     /** Creates and activates a project rooted at an existing host directory. */
     suspend fun createProject(
         name: String,
@@ -473,6 +535,9 @@ interface HermesChatSession {
     suspend fun loadCronJobs(): List<CronJob> =
         throw HermesChatMethodNotFoundException("cron.manage")
 
+    /** Profile-aware overload; legacy fakes and gateways remain source-compatible. */
+    suspend fun loadCronJobsForProfile(profile: String): List<CronJob> = loadCronJobs()
+
     suspend fun manageCronJob(jobId: String, action: CronJobAction): Unit =
         throw HermesChatMethodNotFoundException("cron.manage")
 
@@ -528,6 +593,11 @@ interface HermesChatSession {
         runtimeSessionId: RuntimeSessionId,
         effort: String,
     ): Unit = throw HermesChatProtocolException("Reasoning selection is not available")
+
+    suspend fun setFast(
+        runtimeSessionId: RuntimeSessionId,
+        fast: Boolean,
+    ): Unit = throw HermesChatProtocolException("Fast mode selection is not available")
 
     suspend fun close()
 }
@@ -625,6 +695,33 @@ class HermesChatConnection internal constructor(
             maxSpawnDepth = result.longValue("max_spawn_depth")?.coerceIn(0, 32)?.toInt(),
             maxConcurrentChildren = result.longValue("max_concurrent_children")?.coerceIn(0, 128)?.toInt(),
         )
+    }
+
+    override suspend fun loadProcessList(runtimeSessionId: RuntimeSessionId): List<ProcessRow> {
+        val result = request(
+            "process.list",
+            buildJsonObject { put("session_id", runtimeSessionId.value) },
+        )
+        return (result["processes"] as? JsonArray)
+            .orEmpty()
+            .mapNotNull { element ->
+                val row = element as? JsonObject ?: return@mapNotNull null
+                val processId = row.boundedProcessRequired("session_id", 256) ?: return@mapNotNull null
+                val command = row.boundedProcessRequired("command", 4_096) ?: return@mapNotNull null
+                val status = row.boundedProcessRequired("status", 64) ?: return@mapNotNull null
+                ProcessRow(
+                    processId = processId,
+                    command = command,
+                    status = status,
+                    outputTail = row.boundedProcessOptional("output_tail", 4_000),
+                    exitCode = row.longValue("exit_code")
+                        ?.coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
+                        ?.toInt(),
+                    uptimeSeconds = row.longValue("uptime_seconds")?.coerceAtLeast(0),
+                )
+            }
+            .distinctBy(ProcessRow::processId)
+            .take(MAX_PROCESS_ROWS)
     }
     private val closed = AtomicBoolean(false)
     private val lifecycleLock = Any()
@@ -801,10 +898,15 @@ class HermesChatConnection internal constructor(
         return SubagentSteerResult(status, result.stringValue("text")?.take(HERMES_CHAT_MAX_EVENT_TEXT_CHARS))
     }
 
-    override suspend fun loadCronJobs(): List<CronJob> {
+    override suspend fun loadCronJobs(): List<CronJob> = loadCronJobsForProfile("default")
+
+    override suspend fun loadCronJobsForProfile(profile: String): List<CronJob> {
+        val boundedProfile = profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
+            ?: throw HermesChatProtocolException("Cron profile is invalid")
         val result = request("cron.manage", buildJsonObject {
             put("action", "list")
             put("include_disabled", true)
+            put("profile", boundedProfile)
         })
         return parseCronJobs(result)
     }
@@ -997,6 +1099,7 @@ class HermesChatConnection internal constructor(
                     ?.takeIf { it.none(Char::isWhitespace) && !it.startsWith('-') }
                     ?: return@mapNotNull null
                 val name = row.boundedModelField("name", MAX_MODEL_PROVIDER_CHARS) ?: slug
+                val capabilities = parseModelCapabilities(row["capabilities"])
                 val seen = linkedSetOf<String>()
                 val models = (row["models"] as? JsonArray)
                     .orEmpty()
@@ -1015,7 +1118,7 @@ class HermesChatConnection internal constructor(
                     }
                     .filter(seen::add)
                 if (models.isEmpty()) return@mapNotNull null
-                ModelProviderOption(slug = slug, name = name, models = models)
+                ModelProviderOption(slug = slug, name = name, models = models, capabilities = capabilities)
             }
         val currentProvider = result.boundedModelField("provider", MAX_MODEL_PROVIDER_CHARS)
         val currentModel = result.boundedModelField("model", MAX_MODEL_ID_CHARS)
@@ -1082,6 +1185,33 @@ class HermesChatConnection internal constructor(
         val key = result.stringValue("key")
         if (key != null && key != "reasoning") {
             throw HermesChatProtocolException("Hermes reasoning switch returned the wrong key")
+        }
+    }
+
+    override suspend fun setFast(
+        runtimeSessionId: RuntimeSessionId,
+        fast: Boolean,
+    ) {
+        val params = buildJsonObject {
+            put(
+                "session_id",
+                boundedRpcInput(runtimeSessionId.value, HERMES_CHAT_MAX_EVENT_ID_CHARS, "runtime session ID"),
+            )
+            put("key", "fast")
+            put("value", if (fast) "fast" else "normal")
+        }
+        val result = request("config.set", params)
+        val scope = result.stringValue("scope")
+        if (scope != null && scope != "session") {
+            throw HermesChatProtocolException("Hermes fast switch returned an unsafe scope")
+        }
+        val key = result.stringValue("key")
+        if (key != null && key != "fast") {
+            throw HermesChatProtocolException("Hermes fast switch returned the wrong key")
+        }
+        val value = result.stringValue("value")
+        if (value != null && value != "fast" && value != "normal") {
+            throw HermesChatProtocolException("Hermes fast switch returned an unsafe value")
         }
     }
 
@@ -1316,6 +1446,7 @@ class HermesChatConnection internal constructor(
                         toolId = toolId,
                         name = name,
                         context = payload.boundedOptional("context", HERMES_CHAT_MAX_EVENT_CONTEXT_CHARS),
+                        todos = payload.boundedTodoItems(),
                     )
                 }
             }
@@ -1331,6 +1462,7 @@ class HermesChatConnection internal constructor(
                         toolId = toolId,
                         name = name,
                         summary = payload.boundedOptional("summary", HERMES_CHAT_MAX_EVENT_TEXT_CHARS),
+                        todos = payload.boundedTodoItems(),
                     )
                 }
             }
@@ -1636,6 +1768,69 @@ private fun JsonObject.boundedChoices(): List<String> =
         .distinct()
         .take(HERMES_CHAT_MAX_EVENT_CHOICES)
 
+private const val MAX_TODO_PARSE_DEPTH = 2
+private val todoJson = Json { ignoreUnknownKeys = true }
+
+/**
+ * `todo` is an ordinary official tool event. Its live list has appeared as
+ * `todos`, and older released payloads wrap the same list in `result`/`args`.
+ * Parse only that bounded, typed shape; never turn arbitrary tool text into
+ * activity state.
+ */
+private fun JsonObject.boundedTodoItems(): List<RunTodoItem>? {
+    val name = stringValue("name")
+    if (name != "todo" && !(name == null && containsKey("todos"))) return null
+
+    for (key in listOf("todos", "result", "args")) {
+        val value = this[key] ?: continue
+        parseTodoElement(value, depth = 0)?.let { return it }
+    }
+    return null
+}
+
+private fun parseTodoElement(
+    value: kotlinx.serialization.json.JsonElement,
+    depth: Int,
+): List<RunTodoItem>? {
+    if (depth > MAX_TODO_PARSE_DEPTH) return null
+    return when (value) {
+        is JsonArray -> {
+            if (value.isEmpty()) return emptyList()
+            val parsed = value.mapNotNull { (it as? JsonObject)?.boundedTodoItem() }
+            parsed.takeIf { it.isNotEmpty() }
+                ?.distinctBy(RunTodoItem::id)
+                ?.take(50)
+        }
+        is JsonObject -> (value["todos"] ?: return null).let {
+            parseTodoElement(it, depth + 1)
+        }
+        is JsonPrimitive -> value.contentOrNull
+            ?.takeIf { it.isNotBlank() && it.length <= HERMES_CHAT_MAX_EVENT_TEXT_CHARS }
+            ?.let { encoded ->
+                runCatching { todoJson.parseToJsonElement(encoded) }
+                    .getOrNull()
+                    ?.let { parsed -> parseTodoElement(parsed, depth + 1) }
+            }
+    }
+}
+
+private fun JsonObject.boundedTodoItem(): RunTodoItem? {
+    val id = stringValue("id")?.trim()
+        ?.takeIf { it.isNotEmpty() && it.length <= 256 && !it.hasControlCharacters() }
+        ?: return null
+    val content = stringValue("content")?.trim()
+        ?.takeIf { it.isNotEmpty() && it.length <= 4_096 && !it.hasControlCharacters() }
+        ?: return null
+    val status = when (stringValue("status")?.trim()?.lowercase()) {
+        "pending" -> RunTodoStatus.Pending
+        "in_progress", "in-progress", "in progress" -> RunTodoStatus.InProgress
+        "completed", "complete", "done" -> RunTodoStatus.Completed
+        "cancelled", "canceled" -> RunTodoStatus.Cancelled
+        else -> return null
+    }
+    return RunTodoItem(id = id, content = content, status = status)
+}
+
 private fun sameHostPath(first: String, second: String): Boolean {
     fun normalized(value: String): String {
         val slashed = value.replace('\\', '/')
@@ -1681,6 +1876,19 @@ private fun JsonObject.boundedOptional(name: String, maxChars: Int): String? =
         ?.trim()
         ?.takeIf(String::isNotEmpty)
         ?.take(maxChars)
+
+private fun JsonObject.boundedProcessRequired(name: String, maxChars: Int): String? =
+    stringValue(name)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && it.length <= maxChars && it.isSafeProcessText() }
+
+private fun JsonObject.boundedProcessOptional(name: String, maxChars: Int): String? =
+    stringValue(name)
+        ?.takeIf { it.isNotEmpty() && it.length <= maxChars && it.isSafeProcessText() }
+
+private fun String.isSafeProcessText(): Boolean = all {
+    !it.isISOControl() || it == '\n' || it == '\r' || it == '\t'
+}
 
 /**
  * Bounded read for message TEXT fields (message.start/delta/complete).

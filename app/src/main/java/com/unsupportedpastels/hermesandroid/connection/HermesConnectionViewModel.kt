@@ -12,6 +12,8 @@ import com.unsupportedpastels.hermesandroid.app.ProjectSessionLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSessionsResult
 import com.unsupportedpastels.hermesandroid.app.ProjectSummary
 import com.unsupportedpastels.hermesandroid.app.ProjectTreeResult
+import com.unsupportedpastels.hermesandroid.app.ProcessListIdentity
+import com.unsupportedpastels.hermesandroid.app.ProcessRowsState
 import com.unsupportedpastels.hermesandroid.app.RunEventState
 import com.unsupportedpastels.hermesandroid.app.RunInteractionLifecycle
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
@@ -52,17 +54,33 @@ import com.unsupportedpastels.hermesandroid.gateway.KtorWsTicketClient
 import com.unsupportedpastels.hermesandroid.gateway.ModelOptions
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
+import com.unsupportedpastels.hermesandroid.gateway.OperationalSnapshot
+import com.unsupportedpastels.hermesandroid.gateway.OperationalStatusState
+import com.unsupportedpastels.hermesandroid.gateway.lastGoodOrNull
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
 import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
+import com.unsupportedpastels.hermesandroid.gateway.CronJobRunsState
+import com.unsupportedpastels.hermesandroid.gateway.CronJobScope
 import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
+import com.unsupportedpastels.hermesandroid.gateway.CronRestCapability
 import com.unsupportedpastels.hermesandroid.gateway.SessionBranchResult
 import com.unsupportedpastels.hermesandroid.gateway.SessionContextBreakdown
 import com.unsupportedpastels.hermesandroid.gateway.SessionUsage
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionResult
 import com.unsupportedpastels.hermesandroid.gateway.canonicalReasoningEffort
+import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
+import com.unsupportedpastels.hermesandroid.session.BulkDeleteSelectionDecision
+import com.unsupportedpastels.hermesandroid.session.DataStoreSessionFilterRepository
+import com.unsupportedpastels.hermesandroid.session.MAX_BULK_SELECTION
+import com.unsupportedpastels.hermesandroid.session.SavedSessionFilter
+import com.unsupportedpastels.hermesandroid.session.SessionFilterRepository
+import com.unsupportedpastels.hermesandroid.session.SessionFilterScope
+import com.unsupportedpastels.hermesandroid.session.evaluateBulkDeleteSelection
+import com.unsupportedpastels.hermesandroid.session.SessionListFilter
+import com.unsupportedpastels.hermesandroid.session.toggleBulkSelection
 import com.unsupportedpastels.hermesandroid.ui.isSlashCommandContext
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -180,6 +198,13 @@ private data class ActiveTokenRecord(
     val tokens: NativeTokenSet,
 )
 
+private data class OperationalStatusFetch(
+    val origin: ServerOrigin,
+    val generation: Long,
+    val profile: String,
+    val attemptedAtEpochSeconds: Long,
+)
+
 private data class ProjectMetadataSessionRecord(
     val origin: ServerOrigin,
     val generation: Long,
@@ -262,9 +287,17 @@ class HermesConnectionViewModel(
         AttachmentByteReader { throw AttachmentReadException("Attachment reading is not available") },
     private val appForegroundStates: StateFlow<Boolean> = MutableStateFlow(true),
     private val notifications: TurnNotificationController = NoOpTurnNotificationController,
+    private val sessionFilterRepository: SessionFilterRepository? = null,
 ) : ViewModel() {
     private val mutableSnapshots = MutableStateFlow(HermesGatewaySnapshot())
     val snapshots: StateFlow<HermesGatewaySnapshot> = mutableSnapshots.asStateFlow()
+
+    private val mutableSavedSessionFilters = MutableStateFlow<List<SavedSessionFilter>>(emptyList())
+    val savedSessionFilters: StateFlow<List<SavedSessionFilter>> = mutableSavedSessionFilters.asStateFlow()
+    private val mutableSessionFilterScope = MutableStateFlow<SessionFilterScope?>(null)
+    val sessionFilterScope: StateFlow<SessionFilterScope?> = mutableSessionFilterScope.asStateFlow()
+    private var sessionFilterLoadJob: Job? = null
+    private var sessionFilterScopeGeneration = 0L
 
     private val _homeRefreshing = MutableStateFlow(false)
     val homeRefreshing: StateFlow<Boolean> = _homeRefreshing.asStateFlow()
@@ -281,6 +314,9 @@ class HermesConnectionViewModel(
     private var projectLoadJob: Job? = null
     private var refreshHomeJob: Job? = null
     private var managementJob: Job? = null
+    private var managementRequestGeneration = 0L
+    private var operationalStatusJob: Job? = null
+    private var lastOperationalStatusFetch: OperationalStatusFetch? = null
     private var searchJob: Job? = null
     private val projectSessionJobs = mutableMapOf<ProjectId, Job>()
     private val projectSessionGenerations = mutableMapOf<ProjectId, Long>()
@@ -332,13 +368,75 @@ class HermesConnectionViewModel(
     private val pendingDraftSessions = mutableSetOf<DurableSessionId>()
     private var draftCounter = 0L
 
+    private fun setSessionFilterScope(serverOrigin: ServerOrigin?, profile: String?) {
+        val nextScope = if (serverOrigin != null && !profile.isNullOrBlank()) {
+            runCatching { SessionFilterScope(serverOrigin, profile.trim().take(64)) }.getOrNull()
+        } else {
+            null
+        }
+        if (mutableSessionFilterScope.value == nextScope) return
+        sessionFilterScopeGeneration += 1
+        sessionFilterLoadJob?.cancel()
+        sessionFilterLoadJob = null
+        mutableSessionFilterScope.value = nextScope
+        mutableSavedSessionFilters.value = emptyList()
+        val repository = sessionFilterRepository ?: return
+        if (nextScope == null) return
+        val expectedScopeGeneration = sessionFilterScopeGeneration
+        sessionFilterLoadJob = viewModelScope.launch {
+            val loaded = runCatching { repository.list(nextScope) }.getOrDefault(emptyList())
+            if (sessionFilterScopeGeneration == expectedScopeGeneration &&
+                mutableSessionFilterScope.value == nextScope
+            ) {
+                mutableSavedSessionFilters.value = loaded
+            }
+        }
+    }
+
+    suspend fun saveSessionFilter(filter: SavedSessionFilter) {
+        val scope = mutableSessionFilterScope.value ?: return
+        val repository = sessionFilterRepository ?: return
+        repository.save(scope, filter)
+        if (mutableSessionFilterScope.value == scope) {
+            mutableSavedSessionFilters.value = repository.list(scope)
+        }
+    }
+
+    suspend fun removeSessionFilter(name: String) {
+        val scope = mutableSessionFilterScope.value ?: return
+        val repository = sessionFilterRepository ?: return
+        repository.remove(scope, name)
+        if (mutableSessionFilterScope.value == scope) {
+            mutableSavedSessionFilters.value = repository.list(scope)
+        }
+    }
+
     init {
         viewModelScope.launch {
+            var hasAppliedReadySettings = false
             settingsStates.collect { settingsState ->
+                val nextOrigin = (settingsState as? ServerSettingsState.Ready)?.activeOrigin
+                // Label edits and catalog metadata updates must not tear down a live transport when
+                // the active origin is unchanged. Only an actual active-origin transition resets
+                // client state and starts a new connection generation.
+                if (hasAppliedReadySettings && settingsState is ServerSettingsState.Ready && nextOrigin == activeOrigin) {
+                    return@collect
+                }
+                hasAppliedReadySettings = settingsState is ServerSettingsState.Ready
                 val currentGeneration = ++generation
                 connectionJob?.cancel()
                 projectLoadJob?.cancel()
                 projectLoadJob = null
+                refreshHomeJob?.cancel()
+                refreshHomeJob = null
+                managementJob?.cancel()
+                managementJob = null
+                managementRequestGeneration += 1
+                operationalStatusJob?.cancel()
+                operationalStatusJob = null
+                lastOperationalStatusFetch = null
+                searchJob?.cancel()
+                searchJob = null
                 projectSessionJobs.values.forEach(Job::cancel)
                 projectSessionJobs.clear()
                 projectSessionGenerations.clear()
@@ -357,20 +455,26 @@ class HermesConnectionViewModel(
                 disconnectProjectMetadata()
                 disconnectChat()
 
+                pendingDraftSessions.clear()
                 serverDurableIds.clear()
                 mutableAttachments.value = emptyMap()
                 activeTokens = null
-                activeOrigin = (settingsState as? ServerSettingsState.Ready)?.serverOrigin
+                setSessionFilterScope(null, null)
+                activeOrigin = nextOrigin
                 when (settingsState) {
-                    ServerSettingsState.Loading -> mutableSnapshots.value = HermesGatewaySnapshot()
+                    ServerSettingsState.Loading -> {
+                        mutableSnapshots.value = HermesGatewaySnapshot()
+                    }
                     ServerSettingsState.Unavailable -> {
                         mutableSnapshots.value = HermesGatewaySnapshot(
                             connectionError = "Server settings unavailable",
                         )
                     }
                     is ServerSettingsState.Ready -> {
+                        mutableSnapshots.value = HermesGatewaySnapshot()
+                        setSessionFilterScope(settingsState.activeOrigin, "default")
                         connectionJob = viewModelScope.launch {
-                            connect(settingsState.serverOrigin, currentGeneration)
+                            connect(settingsState.activeOrigin, currentGeneration)
                         }
                     }
                 }
@@ -479,6 +583,7 @@ class HermesConnectionViewModel(
                     accessToken = usableTokens.accessToken,
                     durableSessions = authenticated.sessions,
                 )
+                refreshOperationalStatus(force = true)
             } else {
                 mutableSnapshots.value = HermesGatewaySnapshot(
                     connectionState = ConnectionState.Connected,
@@ -948,6 +1053,79 @@ class HermesConnectionViewModel(
         openProject(projectId, profile)
 
     /**
+     * Refreshes the public profile-scoped status at most once per 60 seconds unless
+     * explicitly forced by an authenticated Home refresh. Old origin/profile results
+     * are discarded, and a transient failure retains the last good snapshot.
+     */
+    fun refreshOperationalStatus(
+        profile: String = mutableSnapshots.value.selectedProfile,
+        force: Boolean = false,
+    ): Job {
+        val origin = activeOrigin
+        val expectedGeneration = generation
+        val boundedProfile = profile.trim().take(64).ifEmpty { "default" }
+        if (origin == null || !isCurrentOperationalScope(origin, expectedGeneration, boundedProfile)) {
+            return viewModelScope.launch { }
+        }
+        val now = nowEpochSeconds()
+        val last = lastOperationalStatusFetch
+        if (
+            !force && last != null &&
+            last.origin == origin &&
+            last.generation == expectedGeneration &&
+            last.profile == boundedProfile &&
+            now - last.attemptedAtEpochSeconds < 60L
+        ) {
+            return operationalStatusJob?.takeIf(Job::isActive) ?: viewModelScope.launch { }
+        }
+        if (force) operationalStatusJob?.cancel()
+        val fetch = OperationalStatusFetch(origin, expectedGeneration, boundedProfile, now)
+        lastOperationalStatusFetch = fetch
+        val previous = mutableSnapshots.value.operationalStatusState.lastGoodOrNull()
+            ?.takeIf { it.origin == origin.value && it.profile == boundedProfile }
+        val job = viewModelScope.launch {
+            if (!isCurrentOperationalScope(origin, expectedGeneration, boundedProfile)) return@launch
+            mutableSnapshots.value = mutableSnapshots.value.copy(
+                operationalStatusState = OperationalStatusState.Loading(previous),
+            )
+            try {
+                val status = client.loadOperationalStatus(origin, boundedProfile)
+                currentCoroutineContext().ensureActive()
+                if (isCurrentOperationalScope(origin, expectedGeneration, boundedProfile)) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(
+                        operationalStatusState = OperationalStatusState.Ready(
+                            OperationalSnapshot(
+                                origin = origin.value,
+                                profile = boundedProfile,
+                                status = status,
+                                fetchedAtEpochSeconds = nowEpochSeconds(),
+                            ),
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (isCurrentOperationalScope(origin, expectedGeneration, boundedProfile)) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(
+                        operationalStatusState = OperationalStatusState.TransientError(previous),
+                    )
+                }
+            }
+        }
+        operationalStatusJob = job
+        return job
+    }
+
+    private fun isCurrentOperationalScope(
+        origin: ServerOrigin,
+        expectedGeneration: Long,
+        profile: String,
+    ): Boolean = activeOrigin == origin &&
+        generation == expectedGeneration &&
+        mutableSnapshots.value.selectedProfile == profile
+
+    /**
      * Manually refreshes the Home snapshot: re-reads the durable REST sessions
      * and reloads the project tree through the official contracts. The tree
      * reload preserves the existing list while it is in flight so a pull-to-
@@ -983,6 +1161,14 @@ class HermesConnectionViewModel(
                     preserveContent = true,
                 )
                 projectLoadJob?.join()
+                loadManagementSettings(
+                    profile = mutableSnapshots.value.selectedProfile,
+                    refreshStatus = false,
+                ).join()
+                refreshOperationalStatus(
+                    profile = mutableSnapshots.value.selectedProfile,
+                    force = true,
+                ).join()
                 val delegationStatus = try {
                     withProjectMetadataSession(HermesChatSession::loadDelegationStatus)
                 } catch (_: HermesChatMethodNotFoundException) {
@@ -992,6 +1178,7 @@ class HermesConnectionViewModel(
                 if (delegationStatus != null && isCurrentProjectLoad(serverOrigin, originGeneration)) {
                     mutableSnapshots.value = mutableSnapshots.value.copy(
                         delegationStatus = delegationStatus,
+                        delegationStatusAvailable = true,
                     )
                 }
             } catch (cancelled: CancellationException) {
@@ -1020,42 +1207,122 @@ class HermesConnectionViewModel(
         return job
     }
 
-    fun loadManagementSettings(profile: String = mutableSnapshots.value.selectedProfile): Job {
+    fun loadManagementSettings(
+        profile: String = mutableSnapshots.value.selectedProfile,
+        refreshStatus: Boolean = true,
+    ): Job {
         managementJob?.cancel()
         val origin = activeOrigin ?: return viewModelScope.launch { }
+        val boundedProfile = profile.trim().take(64).ifEmpty { "default" }
+        setSessionFilterScope(origin, boundedProfile)
         val expectedGeneration = generation
-        return viewModelScope.launch {
+        val requestGeneration = ++managementRequestGeneration
+        val job = viewModelScope.launch {
             mutableSnapshots.value = mutableSnapshots.value.copy(
-                selectedProfile = profile.take(64),
+                selectedProfile = boundedProfile,
+                defaultModelOptions = null,
+                currentModelInfo = null,
+                profileReasoningEffort = null,
                 managementLoading = true,
                 managementError = null,
             )
             try {
-                val token = accessTokenForRequest(origin, expectedGeneration) ?: return@launch
+                val token = accessTokenForRequest(origin, expectedGeneration)
+                    ?: throw HermesConnectionException("Hermes profile settings require authentication")
                 val profiles = client.loadProfiles(origin, token)
-                val selected = profile.takeIf(profiles::contains) ?: profiles.firstOrNull() ?: "default"
+                if (!isCurrentManagementRequest(origin, expectedGeneration, requestGeneration)) {
+                    return@launch
+                }
+                val selected = boundedProfile.takeIf(profiles::contains) ?: profiles.firstOrNull() ?: "default"
+                if (selected != boundedProfile) setSessionFilterScope(origin, selected)
                 val options = client.loadDefaultModelOptions(origin, token, selected)
                 currentCoroutineContext().ensureActive()
-                if (generation == expectedGeneration && activeOrigin == origin) {
-                    mutableSnapshots.value = mutableSnapshots.value.copy(
+                if (options.profile != null && options.profile != selected) {
+                    throw HermesConnectionException("Hermes model options returned the wrong profile")
+                }
+                val currentInfo = try {
+                    client.loadCurrentModelInfo(origin, token, selected)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
+                currentCoroutineContext().ensureActive()
+                if (isCurrentManagementRequest(origin, expectedGeneration, requestGeneration)) {
+                    val profileReasoningEffort = options.current?.let { current ->
+                        try {
+                            client.loadProfileReasoningEffort(
+                                serverOrigin = origin,
+                                accessToken = token,
+                                profile = selected,
+                                provider = current.provider,
+                                model = current.model,
+                            )
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    val currentSnapshot = mutableSnapshots.value
+                    val effectiveModel = currentInfo
+                        ?.takeIf { it.profile == selected && it.model != null && it.provider != null }
+                        ?.let { ModelSelection(checkNotNull(it.provider), checkNotNull(it.model)) }
+                        ?: options.current
+                    val effectiveCapabilities = currentInfo
+                        ?.takeIf { it.profile == selected && it.model != null && it.provider != null }
+                        ?.capabilities
+                        ?: options.capabilitiesFor(effectiveModel)
+                    val updatedChats = currentSnapshot.chatSessions.mapValues { (_, chat) ->
+                        if (
+                            effectiveModel != null &&
+                            chat.model == effectiveModel.model &&
+                            chat.provider == effectiveModel.provider
+                        ) {
+                            chat.copy(
+                                modelCapabilities = effectiveCapabilities,
+                                reasoningEffort = chat.reasoningEffort ?: profileReasoningEffort,
+                            )
+                        } else {
+                            chat
+                        }
+                    }
+                    mutableSnapshots.value = currentSnapshot.copy(
                         profiles = profiles,
                         selectedProfile = selected,
                         defaultModelOptions = options,
+                        currentModelInfo = currentInfo?.takeIf { it.profile == selected },
+                        profileReasoningEffort = profileReasoningEffort,
+                        chatSessions = updatedChats,
                         managementLoading = false,
                     )
+                    if (refreshStatus) {
+                        refreshOperationalStatus(profile = selected, force = false)
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                if (generation == expectedGeneration) {
+                if (isCurrentManagementRequest(origin, expectedGeneration, requestGeneration)) {
                     mutableSnapshots.value = mutableSnapshots.value.copy(
+                        defaultModelOptions = null,
                         managementLoading = false,
                         managementError = "Could not load profile settings",
                     )
                 }
             }
-        }.also { managementJob = it }
+        }
+        managementJob = job
+        return job
     }
+
+    private fun isCurrentManagementRequest(
+        origin: ServerOrigin,
+        expectedGeneration: Long,
+        requestGeneration: Long,
+    ): Boolean = activeOrigin == origin &&
+        generation == expectedGeneration &&
+        managementRequestGeneration == requestGeneration
 
     suspend fun setProfileDefaultModel(
         selection: ModelSelection,
@@ -1063,16 +1330,43 @@ class HermesConnectionViewModel(
     ): ModelSwitchResult {
         val origin = checkNotNull(activeOrigin) { "No Hermes server configured" }
         val expectedGeneration = generation
+        val profile = mutableSnapshots.value.selectedProfile
         val token = checkNotNull(accessTokenForRequest(origin, expectedGeneration)) { "Sign in required" }
         val result = client.setDefaultModel(
             origin,
             token,
-            mutableSnapshots.value.selectedProfile,
+            profile,
             selection,
             confirmExpensiveModel,
         )
-        if (result.accepted) loadManagementSettings().join()
+        currentCoroutineContext().ensureActive()
+        if (!isCurrentOrigin(origin, expectedGeneration) || mutableSnapshots.value.selectedProfile != profile) {
+            return ModelSwitchResult(accepted = false)
+        }
+        if (result.accepted) loadManagementSettings(profile).join()
         return result
+    }
+
+    suspend fun setProfileReasoningEffort(effort: String): Result<Unit> {
+        return try {
+            val canonicalEffort = canonicalReasoningEffort(effort)
+                ?: throw HermesConnectionException("Reasoning effort is invalid")
+            val origin = checkNotNull(activeOrigin) { "No Hermes server configured" }
+            val expectedGeneration = generation
+            val profile = mutableSnapshots.value.selectedProfile
+            val token = checkNotNull(accessTokenForRequest(origin, expectedGeneration)) { "Sign in required" }
+            client.setProfileReasoningEffort(origin, token, profile, canonicalEffort)
+            currentCoroutineContext().ensureActive()
+            check(isCurrentOrigin(origin, expectedGeneration) && mutableSnapshots.value.selectedProfile == profile) {
+                "Profile settings changed while saving reasoning default"
+            }
+            mutableSnapshots.value = mutableSnapshots.value.copy(profileReasoningEffort = canonicalEffort)
+            Result.success(Unit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
+        }
     }
 
     suspend fun logout() {
@@ -1155,6 +1449,85 @@ class HermesConnectionViewModel(
         client.deleteSession(origin, token, sessionId, mutableSnapshots.value.selectedProfile)
         detachFailedRuntime(sessionId)
         mutableSnapshots.value = mutableSnapshots.value.removeSession(sessionId)
+    }
+
+    suspend fun bulkDeleteSessions(sessionIds: Collection<DurableSessionId>): BulkDeleteResult {
+        val snapshot = mutableSnapshots.value
+        val origin = checkNotNull(activeOrigin) { "No Hermes server configured" }
+        val expectedGeneration = generation
+        val selected = sessionIds.distinct()
+        val controllerRuntimeIds = snapshot.activeRuntimes
+            .filter { it.access == RuntimeAccess.Controller }
+            .mapNotNull { it.durableSessionId }
+            .toSet()
+        val activeTurns = snapshot.chatSessions
+            .filterValues { it.isSending }
+            .keys + activeTurnIds
+        val decision = evaluateBulkDeleteSelection(
+            selectedIds = selected,
+            sessions = snapshot.durableSessions,
+            controllerRuntimeSessionIds = controllerRuntimeIds,
+            activeTurnSessionIds = activeTurns,
+        )
+        check(decision.canDelete) { bulkDeletePolicyError(decision) }
+        val profile = snapshot.selectedProfile
+        val token = checkNotNull(accessTokenForRequest(origin, expectedGeneration)) { "Sign in required" }
+        val result = try {
+            client.bulkDeleteSessions(origin, token, decision.selectedSessionIds, profile)
+        } catch (unsupported: HermesSessionBulkDeleteUnsupportedException) {
+            if (generation == expectedGeneration && activeOrigin == origin &&
+                mutableSnapshots.value.selectedProfile == profile
+            ) {
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    bulkDeleteCapability = SessionBulkDeleteCapability.Unsupported,
+                )
+            }
+            throw unsupported
+        }
+        currentCoroutineContext().ensureActive()
+        check(generation == expectedGeneration && activeOrigin == origin &&
+            mutableSnapshots.value.selectedProfile == profile
+        ) { "Server scope changed while deleting sessions" }
+        check(result.ok) { "Hermes did not confirm bulk session deletion" }
+        mutableSnapshots.value = mutableSnapshots.value.copy(
+            bulkDeleteCapability = SessionBulkDeleteCapability.Supported,
+        )
+        reconcileAfterBulkDelete(origin, expectedGeneration, token, profile)
+        return result
+    }
+
+    private suspend fun reconcileAfterBulkDelete(
+        origin: ServerOrigin,
+        expectedGeneration: Long,
+        accessToken: String,
+        profile: String,
+    ) {
+        val durableSessions = client.loadSessionsForProfile(origin, accessToken, profile)
+        currentCoroutineContext().ensureActive()
+        check(generation == expectedGeneration && activeOrigin == origin &&
+            mutableSnapshots.value.selectedProfile == profile
+        ) { "Server scope changed while refreshing sessions" }
+        mutableSnapshots.value = mutableSnapshots.value.copy(durableSessions = durableSessions)
+        startProjectTreeLoad(
+            serverOrigin = origin,
+            originGeneration = expectedGeneration,
+            accessToken = accessToken,
+            durableSessions = durableSessions,
+            profile = profile,
+            preserveContent = true,
+        )
+        projectLoadJob?.join()
+        currentCoroutineContext().ensureActive()
+        check(generation == expectedGeneration && activeOrigin == origin &&
+            mutableSnapshots.value.selectedProfile == profile
+        ) { "Server scope changed while refreshing sessions" }
+    }
+
+    private fun bulkDeletePolicyError(decision: BulkDeleteSelectionDecision): String = when {
+        decision.tooMany -> "Select at most 500 sessions"
+        decision.invalidSessionIds.isNotEmpty() -> "Selection contains a session that is no longer visible"
+        decision.blockedSessionIds.isNotEmpty() -> "Stop active work before bulk deleting sessions"
+        else -> "Select at least one durable session"
     }
 
     private suspend fun updateSession(
@@ -1444,6 +1817,7 @@ class HermesConnectionViewModel(
                     chat.copy(
                         model = selection?.model,
                         provider = selection?.provider,
+                        modelCapabilities = options.capabilitiesFor(selection),
                         reasoningEffort = reasoningEffort,
                         draftDefaultsLoaded = true,
                     )
@@ -1585,7 +1959,18 @@ class HermesConnectionViewModel(
                         accessToken = accessToken,
                         durableSessionId = durableSessionId,
                         closeWhenIdle = true,
-                    )
+                    ).let { session ->
+                        liveControllers[durableSessionId]?.let { controller ->
+                            loadProcessRowsIfCurrent(
+                                durableSessionId = durableSessionId,
+                                session = session,
+                                runtimeSessionId = controller.runtimeSessionId,
+                                origin = origin,
+                                originGeneration = originGeneration,
+                                operationGeneration = operationGeneration,
+                            )
+                        }
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 if (isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) {
@@ -1651,6 +2036,14 @@ class HermesConnectionViewModel(
                 )
                 val runtimeId = checkNotNull(liveControllers[durableSessionId]?.runtimeSessionId)
                 if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
+                loadProcessRowsIfCurrent(
+                    durableSessionId = durableSessionId,
+                    session = session,
+                    runtimeSessionId = runtimeId,
+                    origin = origin,
+                    originGeneration = originGeneration,
+                    operationGeneration = operationGeneration,
+                )
 
                 // Stage attachments on the host BEFORE the optimistic bubble: bytes
                 // live on this device, so nothing can be sent without uploading
@@ -2088,7 +2481,12 @@ class HermesConnectionViewModel(
     fun refreshCronJobs(): Job {
         val origin = activeOrigin
         val originGeneration = generation
-        if (origin == null || !isCurrentProjectLoad(origin, originGeneration)) {
+        val profile = mutableSnapshots.value.selectedProfile.trim().take(64).ifEmpty { "default" }
+        if (
+            origin == null ||
+            !isCurrentProjectLoad(origin, originGeneration) ||
+            mutableSnapshots.value.selectedProfile != profile
+        ) {
             return viewModelScope.launch {
                 mutableSnapshots.value = mutableSnapshots.value.copy(
                     cronJobsState = CronJobsState.Error(
@@ -2103,7 +2501,11 @@ class HermesConnectionViewModel(
         return viewModelScope.launch {
             val state = try {
                 CronJobsState.Ready(
-                    withProjectMetadataSession(HermesChatSession::loadCronJobs),
+                    withProjectMetadataSession { session ->
+                        if (profile == "default") session.loadCronJobs()
+                        else session.loadCronJobsForProfile(profile)
+                    },
+                    profile = profile,
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -2113,7 +2515,10 @@ class HermesConnectionViewModel(
                 CronJobsState.Error("Could not load cron jobs")
             }
             currentCoroutineContext().ensureActive()
-            if (isCurrentProjectLoad(origin, originGeneration)) {
+            if (
+                isCurrentProjectLoad(origin, originGeneration) &&
+                mutableSnapshots.value.selectedProfile == profile
+            ) {
                 mutableSnapshots.value = mutableSnapshots.value.copy(cronJobsState = state)
             }
         }
@@ -2158,6 +2563,166 @@ class HermesConnectionViewModel(
                     cronJobActionError = error,
                 )
                 if (error == null) refreshCronJobs()
+            }
+        }
+    }
+
+    /**
+     * Triggers one cron job through the audited dashboard REST route. The returned job is
+     * deliberately not applied optimistically; the existing JSON-RPC list is refreshed after a
+     * successful trigger so the server remains authoritative.
+     */
+    fun triggerCronJob(jobId: String): Job {
+        val origin = activeOrigin
+        val originGeneration = generation
+        val profile = mutableSnapshots.value.selectedProfile.take(64).ifBlank { "default" }
+        val scope = origin?.let { CronJobScope(it.value, profile, jobId) }
+        if (
+            origin == null ||
+                scope == null ||
+                !isCurrentRestOperation(origin, originGeneration) ||
+                mutableSnapshots.value.cronTriggerCapability == CronRestCapability.Unsupported
+        ) {
+            return viewModelScope.launch { }
+        }
+        if (scope in mutableSnapshots.value.cronRunLoadingScopes) return viewModelScope.launch { }
+        mutableSnapshots.value = mutableSnapshots.value.copy(
+            cronRunLoadingScopes = mutableSnapshots.value.cronRunLoadingScopes + scope,
+            cronRunErrors = mutableSnapshots.value.cronRunErrors - scope,
+        )
+        return viewModelScope.launch {
+            try {
+                val token = accessTokenForRequest(origin, originGeneration)
+                    ?: throw HermesConnectionException("Cron job controls require authentication")
+                client.triggerCronJob(origin, token, profile, jobId)
+                currentCoroutineContext().ensureActive()
+                if (!isCurrentRestOperation(origin, originGeneration)) return@launch
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    cronTriggerCapability = CronRestCapability.Supported,
+                    cronRunLoadingScopes = mutableSnapshots.value.cronRunLoadingScopes - scope,
+                    cronRunErrors = mutableSnapshots.value.cronRunErrors - scope,
+                )
+                refreshCronJobs().join()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: HermesCronRestUnsupportedException) {
+                if (isCurrentRestOperation(origin, originGeneration)) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(
+                        cronTriggerCapability = CronRestCapability.Unsupported,
+                        cronRunLoadingScopes = mutableSnapshots.value.cronRunLoadingScopes - scope,
+                        cronRunErrors = mutableSnapshots.value.cronRunErrors - scope,
+                    )
+                }
+            } catch (_: HermesCronRestLegacyUnsupportedException) {
+                if (isCurrentRestOperation(origin, originGeneration)) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(
+                        cronTriggerCapability = CronRestCapability.Unsupported,
+                        cronRunLoadingScopes = mutableSnapshots.value.cronRunLoadingScopes - scope,
+                        cronRunErrors = mutableSnapshots.value.cronRunErrors - scope,
+                    )
+                }
+            } catch (_: HermesCronJobClaimedException) {
+                if (isCurrentRestOperation(origin, originGeneration)) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(
+                        cronRunLoadingScopes = mutableSnapshots.value.cronRunLoadingScopes - scope,
+                        cronRunErrors = mutableSnapshots.value.cronRunErrors + (
+                            scope to "Cron job is already running or was claimed by another scheduler"
+                        ),
+                    )
+                }
+            } catch (_: Exception) {
+                if (isCurrentRestOperation(origin, originGeneration)) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(
+                        cronRunLoadingScopes = mutableSnapshots.value.cronRunLoadingScopes - scope,
+                        cronRunErrors = mutableSnapshots.value.cronRunErrors + (
+                            scope to "Could not run the job"
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /** Expand/collapse one bounded run history and fetch it only on first expansion. */
+    fun toggleCronJobRuns(jobId: String): Job {
+        val origin = activeOrigin
+        val originGeneration = generation
+        val profile = mutableSnapshots.value.selectedProfile.take(64).ifBlank { "default" }
+        val scope = origin?.let { CronJobScope(it.value, profile, jobId) }
+        if (
+            origin == null ||
+                scope == null ||
+                !isCurrentRestOperation(origin, originGeneration) ||
+                mutableSnapshots.value.cronHistoryCapability == CronRestCapability.Unsupported
+        ) {
+            return viewModelScope.launch { }
+        }
+        return when (val current = mutableSnapshots.value.cronRunsByScope[scope]) {
+            is CronJobRunsState.Ready -> {
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    cronRunsByScope = mutableSnapshots.value.cronRunsByScope +
+                        (scope to CronJobRunsState.Cached(current.runs)),
+                )
+                viewModelScope.launch { }
+            }
+            is CronJobRunsState.Cached -> {
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    cronRunsByScope = mutableSnapshots.value.cronRunsByScope +
+                        (scope to CronJobRunsState.Ready(current.runs)),
+                )
+                viewModelScope.launch { }
+            }
+            CronJobRunsState.Loading -> viewModelScope.launch { }
+            CronJobRunsState.Unsupported -> viewModelScope.launch { }
+            else -> {
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    cronRunsByScope = mutableSnapshots.value.cronRunsByScope +
+                        (scope to CronJobRunsState.Loading),
+                )
+                viewModelScope.launch {
+                    try {
+                        val token = accessTokenForRequest(origin, originGeneration)
+                            ?: throw HermesConnectionException("Cron history requires authentication")
+                        val runs = client.loadCronJobRuns(
+                            serverOrigin = origin,
+                            accessToken = token,
+                            profile = profile,
+                            jobId = jobId,
+                        )
+                        currentCoroutineContext().ensureActive()
+                        if (!isCurrentRestOperation(origin, originGeneration)) return@launch
+                        mutableSnapshots.value = mutableSnapshots.value.copy(
+                            cronHistoryCapability = CronRestCapability.Supported,
+                            cronRunsByScope = mutableSnapshots.value.cronRunsByScope +
+                                (scope to CronJobRunsState.Ready(runs)),
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: HermesCronRestUnsupportedException) {
+                        if (isCurrentRestOperation(origin, originGeneration)) {
+                            mutableSnapshots.value = mutableSnapshots.value.copy(
+                                cronHistoryCapability = CronRestCapability.Unsupported,
+                                cronRunsByScope = mutableSnapshots.value.cronRunsByScope +
+                                    (scope to CronJobRunsState.Unsupported),
+                            )
+                        }
+                    } catch (_: HermesCronRestLegacyUnsupportedException) {
+                        if (isCurrentRestOperation(origin, originGeneration)) {
+                            mutableSnapshots.value = mutableSnapshots.value.copy(
+                                cronHistoryCapability = CronRestCapability.Unsupported,
+                                cronRunsByScope = mutableSnapshots.value.cronRunsByScope +
+                                    (scope to CronJobRunsState.Unsupported),
+                            )
+                        }
+                    } catch (_: Exception) {
+                        if (isCurrentRestOperation(origin, originGeneration)) {
+                            mutableSnapshots.value = mutableSnapshots.value.copy(
+                                cronRunsByScope = mutableSnapshots.value.cronRunsByScope +
+                                    (scope to CronJobRunsState.Error("Could not load job runs")),
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -2283,6 +2848,64 @@ class HermesConnectionViewModel(
         return job
     }
 
+    fun setFast(durableSessionId: DurableSessionId, fast: Boolean): Job {
+        val controller = liveControllers[durableSessionId]
+        val chat = mutableSnapshots.value.chatSessions[durableSessionId]
+        val runtimeSessionId = controller?.runtimeSessionId
+        if (
+            controller == null &&
+            durableSessionId in pendingDraftSessions &&
+            chat?.modelCapabilities?.fast == true
+        ) {
+            return viewModelScope.launch {
+                updateChat(durableSessionId) {
+                    it.copy(fastMode = if (fast) "fast" else "normal", error = null)
+                }
+            }
+        }
+        if (
+            controller == null ||
+            runtimeSessionId == null ||
+            chat?.modelCapabilities?.fast != true ||
+            activeOrigin == null ||
+            !isExactControllerRuntime(durableSessionId, controller.session, runtimeSessionId)
+        ) {
+            return viewModelScope.launch {
+                updateChat(durableSessionId) { it.copy(error = "Fast mode is unavailable for this model") }
+            }
+        }
+        val origin = checkNotNull(activeOrigin)
+        val originGeneration = generation
+        val operationGeneration = controller.operationGeneration
+        val session = controller.session
+        val job = viewModelScope.launch {
+            try {
+                if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+                    !isExactControllerRuntime(durableSessionId, session, runtimeSessionId)
+                ) return@launch
+                session.setFast(runtimeSessionId, fast)
+                currentCoroutineContext().ensureActive()
+                if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+                    !isExactControllerRuntime(durableSessionId, session, runtimeSessionId)
+                ) return@launch
+                updateChat(durableSessionId) {
+                    it.copy(fastMode = if (fast) "fast" else "normal", error = null)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+                    !isExactControllerRuntime(durableSessionId, session, runtimeSessionId)
+                ) return@launch
+                updateChat(durableSessionId) {
+                    it.copy(error = error.message?.take(160) ?: "Could not change fast mode")
+                }
+            }
+        }
+        chatJob = job
+        return job
+    }
+
     fun openModelPicker(durableSessionId: DurableSessionId): Job {
         val requestGeneration = ++modelPickerGeneration
         modelPickerJob?.cancel()
@@ -2312,6 +2935,18 @@ class HermesConnectionViewModel(
                     ?: throw HermesConnectionException("Hermes session is not ready")
                 val options = session.loadModelOptions(runtimeSessionId)
                 if (!isCurrentModelPicker(requestGeneration, durableSessionId)) return@launch
+                val chat = mutableSnapshots.value.chatSessions[durableSessionId]
+                val chatSelection = if (chat?.provider != null && chat.model != null) {
+                    ModelSelection(chat.provider, chat.model)
+                } else {
+                    options.current
+                }
+                val capabilities = options.capabilitiesFor(chatSelection)
+                if (capabilities != null && isCurrentModelPicker(requestGeneration, durableSessionId)) {
+                    updateChat(durableSessionId) { current ->
+                        current.copy(modelCapabilities = capabilities)
+                    }
+                }
                 mutableModelPickerState.value = ModelPickerState.Ready(
                     durableSessionId = durableSessionId,
                     options = options,
@@ -2403,6 +3038,16 @@ class HermesConnectionViewModel(
                     requestGeneration != modelPickerGeneration ||
                     current?.durableSessionId != state.durableSessionId
                 ) return@launch
+                if (result.accepted) {
+                    updateChat(state.durableSessionId) { chat ->
+                        chat.copy(
+                            model = selection.model,
+                            provider = selection.provider,
+                            modelCapabilities = state.options.capabilitiesFor(selection),
+                            error = null,
+                        )
+                    }
+                }
                 mutableModelPickerState.value = when {
                     result.confirmationRequired -> current.copy(
                         applying = false,
@@ -2472,6 +3117,71 @@ class HermesConnectionViewModel(
         mutableSlashCompletions.value = emptyMap()
     }
 
+    private fun isExactControllerRuntime(
+        durableSessionId: DurableSessionId,
+        session: HermesChatSession,
+        runtimeSessionId: RuntimeSessionId,
+    ): Boolean {
+        val controller = liveControllers[durableSessionId] ?: return false
+        return controller.session === session &&
+            controller.runtimeSessionId == runtimeSessionId &&
+            mutableSnapshots.value.activeRuntimes.any {
+                it.durableSessionId == durableSessionId &&
+                    it.runtimeSessionId == runtimeSessionId &&
+                    it.access == RuntimeAccess.Controller
+            }
+    }
+
+    private suspend fun loadProcessRowsIfCurrent(
+        durableSessionId: DurableSessionId,
+        session: HermesChatSession,
+        runtimeSessionId: RuntimeSessionId,
+        origin: ServerOrigin,
+        originGeneration: Long,
+        operationGeneration: Long,
+    ) {
+        if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+            !isExactControllerRuntime(durableSessionId, session, runtimeSessionId)
+        ) return
+
+        val identity = ProcessListIdentity(
+            durableSessionId = durableSessionId,
+            runtimeSessionId = runtimeSessionId,
+            origin = origin.value,
+            originGeneration = originGeneration,
+            operationGeneration = operationGeneration,
+        )
+        val rows = try {
+            session.loadProcessList(runtimeSessionId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // A process snapshot is auxiliary activity. Keep the last successful
+            // snapshot and never turn a missing optional method into chat failure.
+            return
+        }
+        if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+            !isExactControllerRuntime(durableSessionId, session, runtimeSessionId)
+        ) return
+
+        val current = mutableSnapshots.value.chatSessions[durableSessionId] ?: return
+        val next = ProcessRowsState(
+            durableSessionId = durableSessionId,
+            runtimeSessionId = runtimeSessionId,
+            origin = origin.value,
+            originGeneration = originGeneration,
+            operationGeneration = operationGeneration,
+            rows = current.processRows,
+        ).reduce(
+            expected = identity,
+            incoming = identity,
+            rows = rows,
+        )
+        updateChat(durableSessionId) { chat ->
+            if (chat.processRows == next.rows) chat else chat.copy(processRows = next.rows)
+        }
+    }
+
     private suspend fun ensureLiveSession(
         origin: ServerOrigin,
         originGeneration: Long,
@@ -2509,7 +3219,8 @@ class HermesConnectionViewModel(
         }
         val session = connector.connect(origin, accessToken)
         try {
-            val resumed = if (durableSessionId in pendingDraftSessions) {
+            val creatingDraft = durableSessionId in pendingDraftSessions
+            val resumed = if (creatingDraft) {
                 session.createSession(
                     durableSessionId = durableSessionId,
                     profile = localDraftSession(durableSessionId)?.profile ?: "default",
@@ -2527,6 +3238,12 @@ class HermesConnectionViewModel(
                 ?.takeIf { it != durableSessionId }
                 ?.let { serverDurableIds[durableSessionId] = it }
             applyResume(durableSessionId, resumed)
+            if (creatingDraft) {
+                val draftSettings = mutableSnapshots.value.chatSessions[durableSessionId]
+                if (draftSettings?.modelCapabilities?.fast == true && draftSettings.fastMode != null) {
+                    session.setFast(resumed.runtimeSessionId, draftSettings.fastMode == "fast")
+                }
+            }
             if (closeWhenIdle && !resumed.running) {
                 session.close()
                 return session
@@ -2946,6 +3663,7 @@ class HermesConnectionViewModel(
         val previous = liveControllers[durableSessionId]
         closeChatSessionNonCancellably(previous?.session)
         liveControllers.remove(durableSessionId)
+        clearProcessRows(durableSessionId)
 
         for (backoffMillis in listOf(500L, 1_000L, 2_000L)) {
             appForegroundStates.first { it }
@@ -3083,6 +3801,19 @@ class HermesConnectionViewModel(
                 model = resumed.model ?: current.model,
                 provider = resumed.provider ?: current.provider,
                 reasoningEffort = resumed.reasoningEffort ?: current.reasoningEffort,
+                modelCapabilities = resumed.model
+                    ?.takeIf(String::isNotBlank)
+                    ?.let { model ->
+                        resumed.provider?.takeIf(String::isNotBlank)?.let { provider ->
+                            val snapshot = mutableSnapshots.value
+                            snapshot.currentModelInfo
+                                ?.takeIf { it.model == model && it.provider == provider }
+                                ?.capabilities
+                                ?: snapshot.defaultModelOptions
+                                    ?.capabilitiesFor(ModelSelection(provider, model))
+                        }
+                    }
+                    ?: current.modelCapabilities,
             )
         }
     }
@@ -3989,6 +4720,12 @@ class HermesConnectionViewModel(
         }
     }
 
+    private fun clearProcessRows(durableSessionId: DurableSessionId) {
+        updateChat(durableSessionId) { chat ->
+            if (chat.processRows.isEmpty()) chat else chat.copy(processRows = emptyList())
+        }
+    }
+
     private fun updateChat(
         durableSessionId: DurableSessionId,
         transform: (ChatSessionSnapshot) -> ChatSessionSnapshot,
@@ -4143,6 +4880,7 @@ class HermesConnectionViewModel(
         liveControllers.remove(durableSessionId)
         chatOperationGenerations.remove(durableSessionId)
         chatJobs.remove(durableSessionId)
+        clearProcessRows(durableSessionId)
         syncActiveTurnNotifications()
         if (activeChatSession === expectedSession) {
             activeChatSession = null
@@ -4167,6 +4905,11 @@ class HermesConnectionViewModel(
             removeActiveRuntime(controller.runtimeSessionId)
             closeChatSessionNonCancellably(controller.session)
         }
+        mutableSnapshots.value = mutableSnapshots.value.copy(
+            chatSessions = mutableSnapshots.value.chatSessions.mapValues { (_, chat) ->
+                if (chat.processRows.isEmpty()) chat else chat.copy(processRows = emptyList())
+            },
+        )
         activeTurnIds.clear()
         lastPublishedActiveTurnCount = 0
         notifications.activeCountChanged(0)
@@ -4208,6 +4951,7 @@ class HermesConnectionViewModel(
         private val chatConnector: HermesChatConnector? = null,
         private val projectConnector: HermesChatConnector? = null,
         private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1_000L },
+        private val sessionFilterRepository: SessionFilterRepository? = null,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -4222,6 +4966,7 @@ class HermesConnectionViewModel(
                 chatConnector = chatConnector,
                 projectConnector = projectConnector,
                 nowEpochSeconds = nowEpochSeconds,
+                sessionFilterRepository = sessionFilterRepository,
             ) as T
         }
     }
@@ -4267,6 +5012,7 @@ class HermesConnectionViewModel(
                 attachmentReader = ContentAttachmentByteReader(context),
                 appForegroundStates = HermesAppForeground.states,
                 notifications = AndroidTurnNotificationController(context),
+                sessionFilterRepository = DataStoreSessionFilterRepository(context),
             ) as T
         }
     }

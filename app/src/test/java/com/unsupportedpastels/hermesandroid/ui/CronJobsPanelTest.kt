@@ -17,6 +17,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.unsupportedpastels.hermesandroid.gateway.CronJob
 import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
+import com.unsupportedpastels.hermesandroid.gateway.CronJobRun
+import com.unsupportedpastels.hermesandroid.gateway.CronJobRunsState
+import com.unsupportedpastels.hermesandroid.gateway.CronJobScope
+import com.unsupportedpastels.hermesandroid.gateway.CronRestCapability
 import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
@@ -105,10 +109,9 @@ class CronJobsPanelTest {
             )
         }
 
-        // Nothing beyond the gateway's pause/resume support is offered.
-        listOf("Create", "Edit", "Delete", "Run now", "Stop").forEach { forbiddenLabel ->
-            composeRule.onAllNodesWithText(forbiddenLabel, useUnmergedTree = true).assertCountEquals(0)
-        }
+        // REST controls require an authenticated server scope; this standalone
+        // JSON-RPC-only fixture has no origin and therefore exposes none.
+        composeRule.onAllNodesWithText("Run now", useUnmergedTree = true).assertCountEquals(0)
     }
 
     @Test
@@ -188,5 +191,129 @@ class CronJobsPanelTest {
         composeRule.onAllNodesWithText("Nightly monitor").assertCountEquals(1)
         composeRule.onAllNodesWithText("Status: Paused").assertCountEquals(1)
         composeRule.runOnIdle { assertEquals(1, refreshCount) }
+    }
+
+    @Test
+    fun runNowAndHistoryAreScopedPerJobAndExpandedHistoryIsBounded() {
+        val origin = "https://hermes.example"
+        val scope = CronJobScope(origin, "work", "job-1")
+        val runs = listOf(
+            CronJobRun(
+                id = "cron_job-1_2",
+                title = "Run two",
+                preview = "A returned run preview",
+                startedAt = 1_700_000_100.0,
+                endedAt = 1_700_000_110.0,
+                messageCount = 3,
+            ),
+        )
+        var runNowCount = 0
+        var toggleCount = 0
+        composeRule.setContent {
+            MaterialTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    CronJobsPanel(
+                        state = CronJobsState.Ready(
+                            listOf(CronJob("job-1", "Nightly monitor", "0 2 * * *", enabled = true)),
+                        ),
+                        onRefresh = {},
+                        cronServerOrigin = origin,
+                        cronProfile = "work",
+                        triggerCapability = CronRestCapability.Supported,
+                        historyCapability = CronRestCapability.Supported,
+                        runLoadingScopes = setOf(scope),
+                        runsByScope = mapOf(scope to CronJobRunsState.Ready(runs)),
+                        onRunNow = { runNowCount += 1 },
+                        onToggleRuns = { toggleCount += 1 },
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("Run now").performScrollTo().performClick()
+        composeRule.onNodeWithText("Run two").performScrollTo().assertIsDisplayed()
+        composeRule.onAllNodesWithText("Preview: A returned run preview").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Started: 1700000100").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Ended: 1700000110").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Scroll run details for more").assertCountEquals(0)
+        composeRule.onNodeWithText("Hide runs").performScrollTo().performClick()
+        composeRule.runOnIdle {
+            assertEquals(0, runNowCount)
+            assertEquals(1, toggleCount)
+        }
+    }
+
+    @Test
+    fun collapsedHistoryHasUsableSemanticToggleBeforeLoading() {
+        val scope = CronJobScope("https://hermes.example", "default", "job-1")
+        var toggleCount = 0
+        composeRule.setContent {
+            MaterialTheme {
+                CronJobsPanel(
+                    state = CronJobsState.Ready(
+                        listOf(CronJob("job-1", "Nightly monitor", "0 2 * * *", enabled = true)),
+                    ),
+                    onRefresh = {},
+                    cronServerOrigin = scope.serverOrigin,
+                    cronProfile = scope.profile,
+                    historyCapability = CronRestCapability.Supported,
+                    onToggleRuns = { toggleCount += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("View runs").assertIsDisplayed().performClick()
+        composeRule.runOnIdle { assertEquals(1, toggleCount) }
+    }
+
+    @Test
+    fun unsupportedRestCapabilitiesHideActions() {
+        val scope = CronJobScope("https://hermes.example", "default", "job-1")
+        composeRule.setContent {
+            MaterialTheme {
+                CronJobsPanel(
+                    state = CronJobsState.Ready(
+                        listOf(CronJob("job-1", "Nightly monitor", "0 2 * * *", enabled = true)),
+                    ),
+                    onRefresh = {},
+                    cronServerOrigin = scope.serverOrigin,
+                    cronProfile = scope.profile,
+                    triggerCapability = CronRestCapability.Unsupported,
+                    historyCapability = CronRestCapability.Unsupported,
+                    onRunNow = {},
+                    onToggleRuns = {},
+                )
+            }
+        }
+
+        composeRule.onAllNodesWithText("Run now", useUnmergedTree = true).assertCountEquals(0)
+        composeRule.onAllNodesWithText("View runs", useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun claimedRunFeedbackIsPerJob() {
+        val scope = CronJobScope("https://hermes.example", "default", "job-1")
+        composeRule.setContent {
+            MaterialTheme {
+                CronJobsPanel(
+                    state = CronJobsState.Ready(
+                        listOf(CronJob("job-1", "Nightly monitor", "0 2 * * *", enabled = true)),
+                    ),
+                    onRefresh = {},
+                    cronServerOrigin = scope.serverOrigin,
+                    cronProfile = scope.profile,
+                    triggerCapability = CronRestCapability.Supported,
+                    historyCapability = CronRestCapability.Unsupported,
+                    runErrors = mapOf(scope to "Job is already running or was claimed by another scheduler"),
+                    onRunNow = {},
+                    onToggleRuns = {},
+                )
+            }
+        }
+
+        composeRule.onAllNodesWithText("Run now", useUnmergedTree = true).assertCountEquals(1)
+        composeRule.onAllNodesWithText("View runs", useUnmergedTree = true).assertCountEquals(0)
+        composeRule.onNodeWithText("Job is already running or was claimed by another scheduler")
+            .assertIsDisplayed()
     }
 }

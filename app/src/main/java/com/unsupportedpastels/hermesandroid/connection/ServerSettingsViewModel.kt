@@ -23,6 +23,26 @@ class ServerSettingsViewModel(
         runCatching { repository.save(serverOrigin) }
     }
 
+    fun save(entry: ServerCatalogEntry): Deferred<Result<Unit>> = viewModelScope.async {
+        runCatching { repository.save(entry) }
+    }
+
+    fun select(serverOrigin: ServerOrigin): Deferred<Result<Unit>> = viewModelScope.async {
+        runCatching { repository.select(serverOrigin) }
+    }
+
+    fun updateLabel(entry: ServerCatalogEntry): Deferred<Result<Unit>> = viewModelScope.async {
+        runCatching { repository.updateLabel(entry) }
+    }
+
+    fun remove(serverOrigin: ServerOrigin): Deferred<Result<Unit>> = viewModelScope.async {
+        runCatching {
+            check(repository.remove(serverOrigin)) {
+                "Select another server before removing the active server"
+            }
+        }
+    }
+
     class Factory(context: Context) : ViewModelProvider.Factory {
         private val applicationContext = context.applicationContext
 

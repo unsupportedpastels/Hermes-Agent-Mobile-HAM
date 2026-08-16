@@ -103,6 +103,59 @@ class RunEventModelsTest {
     }
 
     @Test
+    fun todoToolPayloadIsBoundedAndReplacesTheLivePlan() {
+        val first = RunEventState().reduce(
+            HermesChatEvent.ToolStart(
+                sessionId = runtime,
+                toolId = "todo-tool",
+                name = "todo",
+                context = null,
+                todos = listOf(
+                    RunTodoItem("one", "Inspect the gateway", RunTodoStatus.InProgress),
+                    RunTodoItem("two", "Render the activity stack", RunTodoStatus.Pending),
+                ),
+            ),
+        )
+
+        val replaced = first.reduce(
+            HermesChatEvent.ToolComplete(
+                sessionId = runtime,
+                toolId = "todo-tool",
+                name = "todo",
+                summary = "Plan updated",
+                todos = listOf(
+                    RunTodoItem("one", "Inspect the gateway", RunTodoStatus.Completed),
+                    RunTodoItem("two", "Render the activity stack", RunTodoStatus.InProgress),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(RunTodoStatus.Completed, RunTodoStatus.InProgress),
+            replaced.todos.map(RunTodoItem::status),
+        )
+        assertEquals("Render the activity stack", replaced.todos[1].content)
+    }
+
+    @Test
+    fun malformedTodoUpdateDoesNotEraseTheLastKnownPlan() {
+        val state = RunEventState(
+            todos = listOf(RunTodoItem("one", "Keep this plan", RunTodoStatus.Pending)),
+        )
+        val unchanged = state.reduce(
+            HermesChatEvent.ToolStart(
+                sessionId = runtime,
+                toolId = "todo-tool",
+                name = "todo",
+                context = null,
+                todos = null,
+            ),
+        )
+
+        assertEquals(state.todos, unchanged.todos)
+    }
+
+    @Test
     fun chatSessionSnapshotDefaultsToEmptyRunState() {
         assertEquals(RunEventState(), ChatSessionSnapshot().runState)
     }

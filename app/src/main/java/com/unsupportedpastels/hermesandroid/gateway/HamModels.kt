@@ -74,12 +74,60 @@ data class CronJob(
     val nextRunAt: String? = null,
     val lastRunAt: String? = null,
     val lastStatus: String? = null,
+    val lastDeliveryError: String? = null,
 )
+
+/** Stable scope for REST cron data; results must never cross origins, profiles, or jobs. */
+data class CronJobScope(
+    val serverOrigin: String,
+    val profile: String,
+    val jobId: String,
+)
+
+data class CronJobRun(
+    val id: String,
+    val title: String? = null,
+    val preview: String? = null,
+    val source: String? = null,
+    val model: String? = null,
+    val provider: String? = null,
+    val profile: String? = null,
+    val cwd: String? = null,
+    val startedAt: Double? = null,
+    val endedAt: Double? = null,
+    val lastActive: Double? = null,
+    val isActive: Boolean? = null,
+    val status: String? = null,
+    val finishReason: String? = null,
+    val error: String? = null,
+    val messageCount: Long? = null,
+    val toolCallCount: Long? = null,
+    val inputTokens: Long? = null,
+    val outputTokens: Long? = null,
+)
+
+sealed interface CronJobRunsState {
+    data object Collapsed : CronJobRunsState
+    data object Loading : CronJobRunsState
+    data class Cached(val runs: List<CronJobRun>) : CronJobRunsState
+    data class Ready(val runs: List<CronJobRun>) : CronJobRunsState
+    data object Unsupported : CronJobRunsState
+    data class Error(val message: String) : CronJobRunsState
+}
+
+enum class CronRestCapability {
+    Unknown,
+    Supported,
+    Unsupported,
+}
 
 sealed interface CronJobsState {
     data object Idle : CronJobsState
     data object Loading : CronJobsState
-    data class Ready(val jobs: List<CronJob>) : CronJobsState
+    data class Ready(
+        val jobs: List<CronJob>,
+        val profile: String = "default",
+    ) : CronJobsState
     data object Unsupported : CronJobsState
     data class Error(val message: String) : CronJobsState
 }
@@ -112,9 +160,74 @@ fun parseCronJobs(result: JsonObject): List<CronJob> =
                 nextRunAt = row.scalarText("next_run_at"),
                 lastRunAt = row.scalarText("last_run_at"),
                 lastStatus = row.text("last_status", MAX_HAM_FIELD),
+                lastDeliveryError = row.text("last_delivery_error", MAX_HAM_FIELD)
+                    ?: row.text("delivery_error", MAX_HAM_FIELD),
             )
         }
         .distinctBy(CronJob::jobId)
+
+/** Parse the refreshed job returned by the official trigger endpoint. */
+fun parseCronJob(result: JsonObject): CronJob {
+    val id = result.text("job_id", MAX_HAM_FIELD)
+        ?: result.text("id", MAX_HAM_FIELD)
+        ?: throw IllegalArgumentException("Cron job response was incomplete")
+    val name = result.text("name", MAX_HAM_FIELD)
+        ?: throw IllegalArgumentException("Cron job response was incomplete")
+    val schedule = result.text("schedule", MAX_HAM_FIELD)
+        ?: throw IllegalArgumentException("Cron job response was incomplete")
+    return CronJob(
+        jobId = id,
+        name = name,
+        schedule = schedule,
+        enabled = result["enabled"].asBoolean(),
+        state = result.text("state", MAX_HAM_FIELD),
+        nextRunAt = result.scalarText("next_run_at"),
+        lastRunAt = result.scalarText("last_run_at"),
+        lastStatus = result.text("last_status", MAX_HAM_FIELD),
+        lastDeliveryError = result.text("last_delivery_error", MAX_HAM_FIELD)
+            ?: result.text("delivery_error", MAX_HAM_FIELD),
+    )
+}
+
+/** Parse the official `{runs, limit}` envelope with a client-side hard bound. */
+fun parseCronJobRuns(
+    result: JsonObject,
+    scope: CronJobScope,
+    limit: Int = MAX_HAM_ROWS,
+): List<CronJobRun> {
+    require(scope.serverOrigin.isNotBlank() && scope.profile.isNotBlank() && scope.jobId.isNotBlank()) {
+        "Cron run scope is incomplete"
+    }
+    val rows = result["runs"] as? JsonArray
+        ?: throw IllegalArgumentException("Cron runs response was incomplete")
+    return rows.take(limit.coerceIn(0, MAX_HAM_ROWS)).mapNotNull { element ->
+        val row = element as? JsonObject ?: return@mapNotNull null
+        val id = row.text("id", MAX_HAM_FIELD)
+            ?: row.text("session_key", MAX_HAM_FIELD)
+            ?: return@mapNotNull null
+        CronJobRun(
+            id = id,
+            title = row.text("title", MAX_HAM_FIELD),
+            preview = row.text("preview", MAX_HAM_TEXT),
+            source = row.text("source", MAX_HAM_FIELD),
+            model = row.text("model", MAX_HAM_FIELD),
+            provider = row.text("provider", MAX_HAM_FIELD),
+            profile = row.text("profile", MAX_HAM_FIELD),
+            cwd = row.text("cwd", MAX_HAM_FIELD),
+            startedAt = row.scalarDouble("started_at"),
+            endedAt = row.scalarDouble("ended_at"),
+            lastActive = row.scalarDouble("last_active"),
+            isActive = row["is_active"].asBoolean(),
+            status = row.text("status", MAX_HAM_FIELD),
+            finishReason = row.text("finish_reason", MAX_HAM_FIELD),
+            error = row.text("error", MAX_HAM_FIELD),
+            messageCount = row.long("message_count"),
+            toolCallCount = row.long("tool_call_count"),
+            inputTokens = row.long("input_tokens"),
+            outputTokens = row.long("output_tokens"),
+        )
+    }.distinctBy(CronJobRun::id)
+}
 
 internal fun parseSessionUsage(result: JsonObject): SessionUsage = SessionUsage(
     inputTokens = result.long("input_tokens", "input", "prompt_tokens"),
@@ -186,6 +299,8 @@ private fun JsonObject.text(key: String, max: Int): String? =
     (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.take(max)
 private fun JsonObject.scalarText(key: String): String? =
     (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)?.take(MAX_HAM_FIELD)
+private fun JsonObject.scalarDouble(key: String): Double? =
+    (this[key] as? JsonPrimitive)?.doubleOrNull?.takeIf(Double::isFinite)
 private fun JsonObject.long(vararg keys: String): Long? = keys.firstNotNullOfOrNull { key ->
     (this[key] as? JsonPrimitive)?.longOrNull?.coerceAtLeast(0)
 }

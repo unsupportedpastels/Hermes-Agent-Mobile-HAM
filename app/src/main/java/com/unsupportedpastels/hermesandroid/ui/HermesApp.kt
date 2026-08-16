@@ -70,6 +70,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -79,7 +80,6 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -124,6 +124,7 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
@@ -197,14 +198,20 @@ import com.unsupportedpastels.hermesandroid.app.ProjectLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSessionLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSummary
 import com.unsupportedpastels.hermesandroid.app.ProjectId
+import com.unsupportedpastels.hermesandroid.app.ProcessRow
 import com.unsupportedpastels.hermesandroid.app.SessionSummary
 import com.unsupportedpastels.hermesandroid.app.validHostFolderName
 import com.unsupportedpastels.hermesandroid.app.isNoProjectBucket
 import com.unsupportedpastels.hermesandroid.app.validProjectWorkspacePath
 import com.unsupportedpastels.hermesandroid.attachment.AttachmentPolicy
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
+import com.unsupportedpastels.hermesandroid.connection.ServerCatalog
+import com.unsupportedpastels.hermesandroid.connection.ServerCatalogEntry
+import com.unsupportedpastels.hermesandroid.connection.MAX_SERVER_LABEL_CHARS
 import com.unsupportedpastels.hermesandroid.connection.ModelPickerState
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
+import com.unsupportedpastels.hermesandroid.connection.SessionBulkDeleteCapability
+import com.unsupportedpastels.hermesandroid.connection.BulkDeleteResult
 import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
@@ -225,6 +232,12 @@ import com.unsupportedpastels.hermesandroid.navigation.HomeRoute
 import com.unsupportedpastels.hermesandroid.navigation.ProjectRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import com.unsupportedpastels.hermesandroid.navigation.ServerSettingsRoute
+import com.unsupportedpastels.hermesandroid.session.BulkDeleteSelectionDecision
+import com.unsupportedpastels.hermesandroid.session.MAX_BULK_SELECTION
+import com.unsupportedpastels.hermesandroid.session.SavedSessionFilter
+import com.unsupportedpastels.hermesandroid.session.SessionListFilter
+import com.unsupportedpastels.hermesandroid.session.evaluateBulkDeleteSelection
+import com.unsupportedpastels.hermesandroid.session.toggleBulkSelection
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.theme.LocalHermesSemanticColors
 import kotlinx.coroutines.launch
@@ -289,10 +302,20 @@ fun HermesApp(
     initialProjectCreatorListing: HostDirectoryListing? = null,
     serverSettingsState: ServerSettingsState = ServerSettingsState.Ready(null),
     onSaveServerOrigin: suspend (ServerOrigin) -> Result<Unit> = { Result.success(Unit) },
+    serverCatalog: ServerCatalog = ServerCatalog.empty(),
+    onSaveServerEntry: (suspend (ServerCatalogEntry) -> Result<Unit>)? = null,
+    onUpdateServerLabel: (suspend (ServerCatalogEntry) -> Result<Unit>)? = null,
+    onSelectServerOrigin: suspend (ServerOrigin) -> Result<Unit> = { origin ->
+        onSaveServerOrigin(origin)
+    },
+    onRemoveServerOrigin: suspend (ServerOrigin) -> Result<Unit> = { _ ->
+        Result.failure(UnsupportedOperationException("Removing servers is unavailable"))
+    },
     onLoadManagementSettings: (String) -> Unit = {},
     onSetProfileDefaultModel: suspend (ModelSelection, Boolean) -> ModelSwitchResult = { _, _ ->
         ModelSwitchResult(accepted = false)
     },
+    onSetProfileReasoningEffort: suspend (String) -> Result<Unit> = { Result.success(Unit) },
     onLogout: suspend () -> Unit = {},
     onSignIn: () -> Unit = {},
     onOpenProject: (ProjectId) -> Unit = {},
@@ -303,15 +326,24 @@ fun HermesApp(
     onBranchSession: (DurableSessionId, Int?, String?) -> Unit = { _, _, _ -> },
     onRefreshCronJobs: () -> Unit = {},
     onCronJobAction: (String, CronJobAction) -> Unit = { _, _ -> },
+    onRunCronJob: (String) -> Unit = {},
+    onToggleCronJobRuns: (String) -> Unit = {},
     isHomeRefreshing: Boolean = false,
     onRefreshHome: () -> Unit = {},
     onRenameSession: suspend (DurableSessionId, String) -> Result<Unit> = { _, _ -> Result.success(Unit) },
     onSetSessionPinned: suspend (DurableSessionId, Boolean) -> Result<Unit> = { _, _ -> Result.success(Unit) },
     onSetSessionArchived: suspend (DurableSessionId, Boolean) -> Result<Unit> = { _, _ -> Result.success(Unit) },
     onDeleteSession: suspend (DurableSessionId) -> Result<Unit> = { Result.success(Unit) },
+    savedSessionFilters: List<SavedSessionFilter> = emptyList(),
+    onSaveSessionFilter: suspend (SavedSessionFilter) -> Result<Unit> = { Result.success(Unit) },
+    onRemoveSessionFilter: suspend (String) -> Result<Unit> = { Result.success(Unit) },
+    onBulkDeleteSessions: suspend (Collection<DurableSessionId>) -> Result<BulkDeleteResult> = {
+        Result.failure(UnsupportedOperationException("Bulk session deletion unavailable"))
+    },
     onSearchTranscripts: (String) -> Unit = {},
     onSendMessage: (DurableSessionId, String) -> Unit = { _, _ -> },
     onReasoningSelected: (DurableSessionId, String) -> Unit = { _, _ -> },
+    onFastSelected: (DurableSessionId, Boolean) -> Unit = { _, _ -> },
     onClarificationResponse: (DurableSessionId, String, String) -> Unit = { _, _, _ -> },
     onApprovalResponse: (DurableSessionId, String, Boolean) -> Unit = { _, _, _ -> },
     onStopSession: (DurableSessionId) -> Unit = {},
@@ -376,7 +408,15 @@ fun HermesApp(
     } else {
         sessions.filterNot { it.id in scopedSessionIds }
     }
-    val serverOrigin = (serverSettingsState as? ServerSettingsState.Ready)?.serverOrigin
+    val serverOrigin = (serverSettingsState as? ServerSettingsState.Ready)?.activeOrigin
+    val effectiveServerCatalog = when (val ready = serverSettingsState) {
+        is ServerSettingsState.Ready -> if (serverCatalog.entries.isEmpty()) ready.catalog else serverCatalog
+        else -> serverCatalog
+    }
+    val saveServerEntry = onSaveServerEntry ?: { entry: ServerCatalogEntry ->
+        onSaveServerOrigin(entry.origin)
+    }
+    val updateServerLabel = onUpdateServerLabel ?: saveServerEntry
     var observedServerOrigin by remember { mutableStateOf(serverOrigin) }
     val initialBackStack = remember(initialRoute, sessions) {
         when (initialRoute) {
@@ -529,10 +569,20 @@ fun HermesApp(
         Unit
     }
     LaunchedEffect(serverOrigin) {
-        if (observedServerOrigin != serverOrigin &&
-            (backStack.lastOrNull() is SessionDetailRoute || backStack.lastOrNull() is ProjectRoute)
-        ) {
-            backStack.removeLastOrNull()
+        if (observedServerOrigin != serverOrigin) {
+            while (
+                backStack.size > 1 &&
+                backStack.lastOrNull() !is ServerSettingsRoute
+            ) {
+                backStack.removeLastOrNull()
+            }
+            drafts.clear()
+            observedSendingSessions.clear()
+            unreadCompletedSessions.clear()
+            handledRequestedSessionKey = null
+            handledBranchId = null
+            iconPickerProjectId = null
+            projectCreatorOpen = false
         }
         observedServerOrigin = serverOrigin
     }
@@ -613,7 +663,8 @@ fun HermesApp(
                     .fillMaxSize()
                     .onSizeChanged { workspaceWidthPx = it.width },
             ) {
-                NavDisplay(
+                key(serverOrigin?.value.orEmpty()) {
+                    NavDisplay(
         backStack = backStack,
         modifier = Modifier.fillMaxSize(),
         onBack = navigateBack,
@@ -637,6 +688,7 @@ fun HermesApp(
                     showDockOwnedActions = !supportsNavigationRail,
                     isRefreshing = isHomeRefreshing,
                     onRefresh = onRefreshHome,
+                    onLoadManagementSettings = onLoadManagementSettings,
                     onConfigureServer = openServerSettings,
                     onSignIn = onSignIn,
                     onProjectSelected = navigateToProject,
@@ -645,6 +697,10 @@ fun HermesApp(
                     onSetSessionPinned = onSetSessionPinned,
                     onSetSessionArchived = onSetSessionArchived,
                     onDeleteSession = onDeleteSession,
+                    savedSessionFilters = savedSessionFilters,
+                    onSaveSessionFilter = onSaveSessionFilter,
+                    onRemoveSessionFilter = onRemoveSessionFilter,
+                    onBulkDeleteSessions = onBulkDeleteSessions,
                     onSearchTranscripts = onSearchTranscripts,
                     onCreateProject = { projectCreatorOpen = true },
                     onNewSession = {
@@ -706,6 +762,8 @@ fun HermesApp(
                         .indexOfLast { it.role == ChatMessageRole.User }
                     val hasAcceptedRunActivity = chat.runState.status != null ||
                         chat.runState.tools.isNotEmpty() ||
+                        chat.runState.todos.isNotEmpty() ||
+                        chat.processRows.isNotEmpty() ||
                         chat.runState.clarification != null ||
                         chat.runState.approval != null ||
                         chat.runState.unsupportedBlocking != null ||
@@ -749,6 +807,7 @@ fun HermesApp(
                             onSendMessage(session.id, text)
                         },
                         onReasoningSelected = { effort -> onReasoningSelected(session.id, effort) },
+                        onFastSelected = { fast -> onFastSelected(session.id, fast) },
                         onOpenModelPicker = {
                             onSlashCompletionRequested(session.id, "")
                             onOpenModelPicker(session.id)
@@ -813,19 +872,28 @@ fun HermesApp(
             ) {
                 ServerSettingsScreen(
                     serverOrigin = serverOrigin,
+                    serverCatalog = effectiveServerCatalog,
                     snapshot = snapshot,
                     showBack = !supportsListDetail,
                     onBack = navigateBack,
                     onSave = onSaveServerOrigin,
+                    onSaveEntry = saveServerEntry,
+                    onUpdateServerLabel = updateServerLabel,
+                    onSelectServer = onSelectServerOrigin,
+                    onRemoveServer = onRemoveServerOrigin,
                     onLoadManagementSettings = onLoadManagementSettings,
                     onSetProfileDefaultModel = onSetProfileDefaultModel,
+                    onSetProfileReasoningEffort = onSetProfileReasoningEffort,
                     onRefreshCronJobs = onRefreshCronJobs,
                     onCronJobAction = onCronJobAction,
+                    onRunCronJob = onRunCronJob,
+                    onToggleCronJobRuns = onToggleCronJobRuns,
                     onLogout = onLogout,
                 )
             }
             },
                 )
+                }
             }
         }
         if (supportsNavigationRail && projectDockState == ProjectDockState.Hidden) {
@@ -1844,6 +1912,7 @@ private fun SessionListScreen(
     showDockOwnedActions: Boolean = true,
     isRefreshing: Boolean = false,
     onRefresh: () -> Unit = {},
+    onLoadManagementSettings: (String) -> Unit = {},
     onConfigureServer: () -> Unit,
     onSignIn: () -> Unit,
     onProjectSelected: (ProjectId) -> Unit,
@@ -1852,6 +1921,10 @@ private fun SessionListScreen(
     onSetSessionPinned: suspend (DurableSessionId, Boolean) -> Result<Unit>,
     onSetSessionArchived: suspend (DurableSessionId, Boolean) -> Result<Unit>,
     onDeleteSession: suspend (DurableSessionId) -> Result<Unit>,
+    savedSessionFilters: List<SavedSessionFilter>,
+    onSaveSessionFilter: suspend (SavedSessionFilter) -> Result<Unit>,
+    onRemoveSessionFilter: suspend (String) -> Result<Unit>,
+    onBulkDeleteSessions: suspend (Collection<DurableSessionId>) -> Result<BulkDeleteResult>,
     onSearchTranscripts: (String) -> Unit,
     onCreateProject: () -> Unit,
     onNewSession: () -> Unit = {},
@@ -1862,17 +1935,22 @@ private fun SessionListScreen(
     val canStartNewChat = snapshot.authenticationState == AuthenticationState.Authenticated
     var searchOpen by rememberSaveable { mutableStateOf(initialSearchOpen) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedSessionIds by remember { mutableStateOf<Set<DurableSessionId>>(emptySet()) }
+    var savedFilterMenuOpen by remember { mutableStateOf(false) }
+    var saveFilterDialogOpen by remember { mutableStateOf(false) }
+    var saveFilterName by remember { mutableStateOf("") }
+    var bulkDeleteConfirmation by remember { mutableStateOf<Set<DurableSessionId>?>(null) }
 
     var editingSession by remember { mutableStateOf<SessionSummary?>(null) }
     var deletingSession by remember { mutableStateOf<SessionSummary?>(null) }
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     val sessionActionScope = rememberCoroutineScope()
-    val pinnedOnly = searchQuery.contains("is:pinned", ignoreCase = true)
-    val archivedOnly = searchQuery.contains("is:archived", ignoreCase = true)
-    val normalizedSearch = searchQuery
-        .replace(Regex("(?i)\\bis:(pinned|archived)\\b"), " ")
-        .trim()
+    val currentFilter = SessionListFilter.fromSearchQuery(searchQuery)
+    val pinnedOnly = currentFilter.pinnedOnly
+    val archivedOnly = currentFilter.archivedOnly
+    val normalizedSearch = currentFilter.query
     val visibleProjects = projects.filter { project ->
         normalizedSearch.isEmpty() ||
             project.label.contains(normalizedSearch, ignoreCase = true) ||
@@ -1891,9 +1969,66 @@ private fun SessionListScreen(
                     session.workspacePath?.contains(normalizedSearch, ignoreCase = true) == true
             )
     }
+    val visibleDurableSessionIds = visibleSessions
+        .filterNot(SessionSummary::isLocalDraft)
+        .map(SessionSummary::id)
+        .toSet()
+    val activeControllerSessionIds = snapshot.activeRuntimes
+        .filter { it.access == RuntimeAccess.Controller }
+        .mapNotNull { it.durableSessionId }
+        .toSet()
+    val activeTurnSessionIds = snapshot.chatSessions
+        .filterValues(ChatSessionSnapshot::isSending)
+        .keys
+    val selectionDecision = evaluateBulkDeleteSelection(
+        selectedIds = selectedSessionIds,
+        sessions = sessions,
+        controllerRuntimeSessionIds = activeControllerSessionIds,
+        activeTurnSessionIds = activeTurnSessionIds,
+    )
+    var observedFilterScopeKey by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(serverOrigin, snapshot.authenticationState) {
+        if (
+            serverOrigin != null &&
+            snapshot.authenticationState == AuthenticationState.Authenticated
+        ) {
+            onLoadManagementSettings(snapshot.selectedProfile)
+        }
+    }
+    LaunchedEffect(serverOrigin, snapshot.selectedProfile) {
+        val scopeKey = "${serverOrigin?.value.orEmpty()}\u0000${snapshot.selectedProfile}"
+        if (observedFilterScopeKey != null && observedFilterScopeKey != scopeKey) {
+            selectionMode = false
+            selectedSessionIds = emptySet()
+            searchQuery = ""
+            searchOpen = false
+        }
+        observedFilterScopeKey = scopeKey
+    }
+    LaunchedEffect(visibleDurableSessionIds) {
+        selectedSessionIds = selectedSessionIds.intersect(visibleDurableSessionIds)
+        if (selectedSessionIds.isEmpty()) selectionMode = false
+    }
     Scaffold(
         modifier = modifier,
         contentWindowInsets = WindowInsets.safeDrawing,
+        floatingActionButton = {
+            if (showDockOwnedActions && canStartNewChat) {
+                Surface(
+                    onClick = dropUnlessResumed { onNewSession() },
+                    shape = MaterialTheme.shapes.small,
+                    color = semanticColors.active,
+                    contentColor = semanticColors.onActive,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .semantics { contentDescription = "New task" },
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.Add, contentDescription = null)
+                    }
+                }
+            }
+        },
         topBar = {
             Column {
                 TopAppBar(
@@ -1936,6 +2071,33 @@ private fun SessionListScreen(
                         }
                     },
                     actions = {
+                        if (selectionMode) {
+                            Text(
+                                "${selectedSessionIds.size} selected",
+                                modifier = Modifier.semantics {
+                                    contentDescription = "${selectedSessionIds.size} sessions selected"
+                                },
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                            TextButton(
+                                onClick = {
+                                    selectionMode = false
+                                    selectedSessionIds = emptySet()
+                                },
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Exit session selection"
+                                },
+                            ) { Text("Done") }
+                            if (snapshot.bulkDeleteCapability != SessionBulkDeleteCapability.Unsupported) {
+                                TextButton(
+                                    enabled = selectionDecision.canDelete,
+                                    onClick = { bulkDeleteConfirmation = selectedSessionIds },
+                                    modifier = Modifier.semantics {
+                                        contentDescription = "Delete selected sessions"
+                                    },
+                                ) { Text("Delete selected") }
+                            }
+                        }
                         TextButton(
                             onClick = {
                                 searchOpen = !searchOpen
@@ -1953,6 +2115,50 @@ private fun SessionListScreen(
                                 if (searchOpen) "×" else "⌕",
                                 style = MaterialTheme.typography.titleLarge,
                             )
+                        }
+                        if (!selectionMode && visibleDurableSessionIds.isNotEmpty()) {
+                            TextButton(
+                                onClick = { selectionMode = true },
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Select sessions"
+                                },
+                            ) { Text("Select") }
+                        }
+                        if (!selectionMode && savedSessionFilters.isNotEmpty()) {
+                            Box {
+                                TextButton(
+                                    onClick = { savedFilterMenuOpen = true },
+                                    modifier = Modifier.semantics {
+                                        contentDescription = "Saved session filters"
+                                    },
+                                ) { Text("Filters") }
+                                DropdownMenu(
+                                    expanded = savedFilterMenuOpen,
+                                    onDismissRequest = { savedFilterMenuOpen = false },
+                                ) {
+                                    savedSessionFilters.forEach { saved ->
+                                        DropdownMenuItem(
+                                            text = { Text(saved.name) },
+                                            onClick = {
+                                                searchOpen = true
+                                                searchQuery = saved.filter.toSearchQuery()
+                                                onSearchTranscripts(searchQuery)
+                                                savedFilterMenuOpen = false
+                                            },
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Remove ${saved.name}") },
+                                            onClick = {
+                                                sessionActionScope.launch {
+                                                    onRemoveSessionFilter(saved.name)
+                                                        .onFailure { snackbarHostState.showSnackbar("Could not remove saved filter") }
+                                                }
+                                                savedFilterMenuOpen = false
+                                            },
+                                        )
+                                    }
+                                }
+                            }
                         }
                         if (showDockOwnedActions) {
                             IconButton(
@@ -1987,40 +2193,49 @@ private fun SessionListScreen(
                         color = MaterialTheme.colorScheme.background,
                         shadowElevation = 3.dp,
                     ) {
-                        OutlinedTextField(
-                            value = searchQuery,
-                            onValueChange = {
-                                searchQuery = it.take(128)
-                                if (searchQuery.trim().length >= 2) onSearchTranscripts(searchQuery)
-                                else onSearchTranscripts("")
-                            },
-                            label = { Text("Search projects and sessions") },
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-                                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                        )
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = searchQuery,
+                                onValueChange = {
+                                    searchQuery = it.take(128)
+                                    if (searchQuery.trim().length >= 2) onSearchTranscripts(searchQuery)
+                                    else onSearchTranscripts("")
+                                },
+                                label = { Text("Search projects and sessions") },
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                                    disabledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp)
+                                    .padding(bottom = 8.dp),
+                                horizontalArrangement = Arrangement.End,
+                            ) {
+                                TextButton(
+                                    enabled = searchQuery.isNotBlank(),
+                                    onClick = {
+                                        saveFilterName = ""
+                                        saveFilterDialogOpen = true
+                                    },
+                                    modifier = Modifier.semantics {
+                                        contentDescription = "Save current session filter"
+                                    },
+                                ) { Text("Save filter") }
+                            }
+                        }
                     }
                 }
             }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        floatingActionButton = {
-            if (showDockOwnedActions && canStartNewChat) {
-                ExtendedFloatingActionButton(
-                    onClick = dropUnlessResumed { onNewSession() },
-                    containerColor = semanticColors.active,
-                    contentColor = semanticColors.onActive,
-                ) {
-                    Text("New task")
-                }
-            }
-        },
     ) { innerPadding ->
         PullToRefreshBox(
             isRefreshing = isRefreshing,
@@ -2061,39 +2276,39 @@ private fun SessionListScreen(
                     .padding(24.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Text(title, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        supportingText,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    snapshot.connectionError?.let { connectionError ->
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Text(title, style = MaterialTheme.typography.titleMedium)
                         Text(
-                            connectionError,
-                            color = MaterialTheme.colorScheme.error,
+                            supportingText,
                             style = MaterialTheme.typography.bodyMedium,
                         )
-                    }
-                    if (
-                        snapshot.authenticationState == AuthenticationState.SignInRequired &&
-                        snapshot.nativeOAuthSupported &&
-                        snapshot.authProviders.any { it.name == "nous" }
-                    ) {
-                        Button(onClick = dropUnlessResumed { onSignIn() }) {
-                            Text("Sign in with Nous")
+                        snapshot.connectionError?.let { connectionError ->
+                            Text(
+                                connectionError,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
                         }
-                    } else if (
-                        connectionState == ConnectionState.Disconnected &&
-                        serverSettingsState is ServerSettingsState.Ready
-                    ) {
-                        Button(onClick = dropUnlessResumed { onConfigureServer() }) {
-                            Text(if (serverOrigin == null) "Configure server" else "Edit server")
+                        if (
+                            snapshot.authenticationState == AuthenticationState.SignInRequired &&
+                            snapshot.nativeOAuthSupported &&
+                            snapshot.authProviders.any { it.name == "nous" }
+                        ) {
+                            Button(onClick = dropUnlessResumed { onSignIn() }) {
+                                Text("Sign in with Nous")
+                            }
+                        } else if (
+                            connectionState == ConnectionState.Disconnected &&
+                            serverSettingsState is ServerSettingsState.Ready
+                        ) {
+                            Button(onClick = dropUnlessResumed { onConfigureServer() }) {
+                                Text(if (serverOrigin == null) "Configure server" else "Edit server")
+                            }
                         }
                     }
-                }
             }
         } else {
             val homeListState = rememberLazyListState()
@@ -2125,7 +2340,6 @@ private fun SessionListScreen(
                 }
             }
             val layoutDirection = LocalLayoutDirection.current
-            val fabClearance = if (showDockOwnedActions && canStartNewChat) 96.dp else 0.dp
             LazyColumn(
                 state = homeListState,
                 modifier = Modifier
@@ -2135,7 +2349,7 @@ private fun SessionListScreen(
                     start = innerPadding.calculateStartPadding(layoutDirection),
                     top = innerPadding.calculateTopPadding(),
                     end = innerPadding.calculateEndPadding(layoutDirection),
-                    bottom = innerPadding.calculateBottomPadding() + fabClearance,
+                    bottom = innerPadding.calculateBottomPadding(),
                 ),
             ) {
                 if (snapshot.delegationStatus.active.isNotEmpty()) {
@@ -2220,23 +2434,38 @@ private fun SessionListScreen(
                         )
                     }
                 } else {
-                    val activeControllerSessionIds = snapshot.activeRuntimes
-                        .filter { it.access == RuntimeAccess.Controller }
-                        .mapNotNull { it.durableSessionId }
-                        .toSet()
                     items(visibleSessions, key = { "session:${it.id.value}" }) { session ->
                         val isCurrent = session.id in activeControllerSessionIds
-                        SwipeSessionRow(
-                            onDeleteRequest = { deletingSession = session },
-                        ) {
+                        val row: @Composable () -> Unit = {
                             RecentSessionHomeRow(
                                 session = session,
                                 current = isCurrent,
-                                onClick = dropUnlessResumed { onSessionSelected(session.id) },
+                                selectionMode = selectionMode && !session.isLocalDraft,
+                                isSelected = session.id in selectedSessionIds,
+                                onSelectionToggle = {
+                                    if (!session.isLocalDraft) {
+                                        selectedSessionIds = toggleBulkSelection(selectedSessionIds, session)
+                                    }
+                                },
+                                onClick = dropUnlessResumed {
+                                    if (selectionMode && !session.isLocalDraft) {
+                                        selectedSessionIds = toggleBulkSelection(selectedSessionIds, session)
+                                    } else {
+                                        onSessionSelected(session.id)
+                                    }
+                                },
                                 onRename = { editingSession = session },
                                 onPin = { sessionActionScope.launch { onSetSessionPinned(session.id, !session.pinned) } },
                                 onArchive = { sessionActionScope.launch { onSetSessionArchived(session.id, !session.archived) } },
                                 onDelete = { deletingSession = session },
+                            )
+                        }
+                        if (selectionMode) {
+                            row()
+                        } else {
+                            SwipeSessionRow(
+                                onDeleteRequest = { deletingSession = session },
+                                content = row,
                             )
                         }
                     }
@@ -2282,6 +2511,96 @@ private fun SessionListScreen(
                 ) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = { editingSession = null }) { Text("Cancel") } },
+        )
+    }
+    if (saveFilterDialogOpen) {
+        AlertDialog(
+            onDismissRequest = { saveFilterDialogOpen = false },
+            title = { Text("Save session filter") },
+            text = {
+                OutlinedTextField(
+                    value = saveFilterName,
+                    onValueChange = { saveFilterName = it.take(64) },
+                    label = { Text("Filter name") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = saveFilterName.trim().isNotEmpty(),
+                    onClick = {
+                        val filter = SavedSessionFilter(saveFilterName.trim(), currentFilter)
+                        sessionActionScope.launch {
+                            onSaveSessionFilter(filter)
+                                .onSuccess {
+                                    saveFilterDialogOpen = false
+                                    snackbarHostState.showSnackbar("Filter saved")
+                                }
+                                .onFailure {
+                                    snackbarHostState.showSnackbar("Could not save session filter")
+                                }
+                        }
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { saveFilterDialogOpen = false }) { Text("Cancel") }
+            },
+        )
+    }
+    bulkDeleteConfirmation?.let { ids ->
+        val confirmationDecision = evaluateBulkDeleteSelection(
+            selectedIds = ids,
+            sessions = sessions,
+            controllerRuntimeSessionIds = activeControllerSessionIds,
+            activeTurnSessionIds = activeTurnSessionIds,
+        )
+        AlertDialog(
+            onDismissRequest = { bulkDeleteConfirmation = null },
+            title = { Text("Delete ${ids.size} sessions?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("This permanently deletes the selected durable sessions from Hermes Serve.")
+                    if (confirmationDecision.blockedSessionIds.isNotEmpty()) {
+                        Text(
+                            "Active work is selected. Stop it before deleting.",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    if (confirmationDecision.invalidSessionIds.isNotEmpty()) {
+                        Text(
+                            "Some selected sessions are no longer visible.",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = confirmationDecision.canDelete &&
+                        snapshot.bulkDeleteCapability != SessionBulkDeleteCapability.Unsupported,
+                    onClick = {
+                        sessionActionScope.launch {
+                            onBulkDeleteSessions(ids)
+                                .onSuccess { result ->
+                                    bulkDeleteConfirmation = null
+                                    selectedSessionIds = emptySet()
+                                    selectionMode = false
+                                    snackbarHostState.showSnackbar("Deleted ${result.deleted} sessions")
+                                }
+                                .onFailure {
+                                    snackbarHostState.showSnackbar("Bulk delete was not completed")
+                                }
+                        }
+                    },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Confirm delete selected sessions"
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { bulkDeleteConfirmation = null }) { Text("Cancel") }
+            },
         )
     }
     deletingSession?.let { session ->
@@ -2568,6 +2887,9 @@ private fun ProjectHomeRow(
 private fun RecentSessionHomeRow(
     session: SessionSummary,
     current: Boolean,
+    selectionMode: Boolean = false,
+    isSelected: Boolean = false,
+    onSelectionToggle: () -> Unit = {},
     onClick: () -> Unit,
     onRename: () -> Unit,
     onPin: () -> Unit,
@@ -2584,8 +2906,22 @@ private fun RecentSessionHomeRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
-            .combinedClickable(onClick = onClick, onLongClick = onRename)
+            .then(
+                if (selectionMode) {
+                    Modifier.clickable(onClick = onSelectionToggle)
+                } else {
+                    Modifier.combinedClickable(onClick = onClick, onLongClick = onRename)
+                },
+            )
             .semantics(mergeDescendants = true) {
+                selected = selectionMode && isSelected
+                if (selectionMode) {
+                    contentDescription = if (isSelected) {
+                        "${session.title}, selected"
+                    } else {
+                        "${session.title}, not selected"
+                    }
+                }
                 if (current) stateDescription = "Current controller session"
             },
     ) {
@@ -2594,6 +2930,15 @@ private fun RecentSessionHomeRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (selectionMode) {
+                Checkbox(
+                    checked = isSelected,
+                    onCheckedChange = { onSelectionToggle() },
+                    modifier = Modifier.semantics {
+                        contentDescription = if (isSelected) "Deselect ${session.title}" else "Select ${session.title}"
+                    },
+                )
+            }
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -3026,27 +3371,45 @@ private fun MissingProjectScreen() {
 @Composable
 internal fun ServerSettingsScreen(
     serverOrigin: ServerOrigin?,
+    serverCatalog: ServerCatalog = ServerCatalog.empty(),
     snapshot: HermesGatewaySnapshot = HermesGatewaySnapshot(),
     showBack: Boolean,
     onBack: () -> Unit,
     onSave: suspend (ServerOrigin) -> Result<Unit>,
+    onSaveEntry: suspend (ServerCatalogEntry) -> Result<Unit> = { entry -> onSave(entry.origin) },
+    onUpdateServerLabel: suspend (ServerCatalogEntry) -> Result<Unit> = { entry -> onSaveEntry(entry) },
+    onSelectServer: suspend (ServerOrigin) -> Result<Unit> = { origin -> onSave(origin) },
+    onRemoveServer: suspend (ServerOrigin) -> Result<Unit> = { _ ->
+        Result.failure(UnsupportedOperationException("Removing servers is unavailable"))
+    },
     onLoadManagementSettings: (String) -> Unit = {},
     onSetProfileDefaultModel: suspend (ModelSelection, Boolean) -> ModelSwitchResult = { _, _ ->
         ModelSwitchResult(accepted = false)
     },
+    onSetProfileReasoningEffort: suspend (String) -> Result<Unit> = { Result.success(Unit) },
     onRefreshCronJobs: () -> Unit = {},
     onCronJobAction: (String, CronJobAction) -> Unit = { _, _ -> },
+    onRunCronJob: (String) -> Unit = {},
+    onToggleCronJobRuns: (String) -> Unit = {},
     onLogout: suspend () -> Unit = {},
 ) {
     var value by rememberSaveable(serverOrigin?.value) {
         mutableStateOf(serverOrigin?.value.orEmpty())
     }
+    var label by rememberSaveable(serverOrigin?.value) {
+        mutableStateOf(serverCatalog.activeEntry?.label.orEmpty())
+    }
+    var editingOrigin by rememberSaveable(serverOrigin?.value) { mutableStateOf<ServerOrigin?>(null) }
+    var pendingRemoval by remember { mutableStateOf<ServerCatalogEntry?>(null) }
     var isSaving by remember { mutableStateOf(false) }
     var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     val coroutineScope = rememberCoroutineScope()
     var modelQuery by rememberSaveable { mutableStateOf("") }
     var pendingExpensive by remember { mutableStateOf<ModelSelection?>(null) }
     var pendingDefault by remember { mutableStateOf<ModelSelection?>(null) }
+    var pendingProfileReasoning by remember { mutableStateOf<String?>(null) }
+    var profileReasoningMenuOpen by remember { mutableStateOf(false) }
+    var profileReasoningSaveError by remember { mutableStateOf<String?>(null) }
     var expensiveMessage by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(serverOrigin, snapshot.authenticationState) {
         if (serverOrigin != null && snapshot.authenticationState == AuthenticationState.Authenticated) {
@@ -3111,6 +3474,104 @@ internal fun ServerSettingsScreen(
                     .padding(horizontal = 24.dp, vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
+                Text("Servers", style = MaterialTheme.typography.titleMedium)
+                if (serverCatalog.entries.isEmpty()) {
+                    Text(
+                        "Add a Hermes server to get started.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        serverCatalog.entries.forEach { entry ->
+                            val selected = entry.origin == serverCatalog.activeOrigin
+                            ListItem(
+                                headlineContent = {
+                                    Text(
+                                        entry.displayLabel,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                },
+                                supportingContent = {
+                                    Text(
+                                        entry.origin.value,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                },
+                                trailingContent = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        TextButton(
+                                            onClick = {
+                                                editingOrigin = entry.origin
+                                                value = entry.origin.value
+                                                label = entry.label
+                                                saveError = null
+                                            },
+                                            modifier = Modifier.semantics {
+                                                contentDescription = "Edit ${entry.origin.value}"
+                                            },
+                                        ) {
+                                            Text("Edit")
+                                        }
+                                        IconButton(
+                                            onClick = { pendingRemoval = entry },
+                                            enabled = !selected,
+                                            modifier = Modifier.semantics {
+                                                contentDescription = "Remove ${entry.origin.value}"
+                                            },
+                                        ) {
+                                            Icon(Icons.Outlined.Delete, contentDescription = null)
+                                        }
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .semantics {
+                                        this.selected = selected
+                                        contentDescription = if (selected) {
+                                            "Selected ${entry.origin.value}"
+                                        } else {
+                                            "Select ${entry.origin.value}"
+                                        }
+                                    }
+                                    .clickable(enabled = !selected) {
+                                        coroutineScope.launch {
+                                            val result = onSelectServer(entry.origin)
+                                            if (result.isFailure) {
+                                                saveError = "Could not switch server. Try again."
+                                            }
+                                        }
+                                    },
+                            )
+                            if (selected) {
+                                Text(
+                                    "Active server",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(start = 16.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+                if (serverCatalog.entries.isNotEmpty()) {
+                    TextButton(
+                        onClick = {
+                            editingOrigin = null
+                            value = ""
+                            label = ""
+                            saveError = null
+                        },
+                        enabled = !isSaving,
+                    ) {
+                        Text("Add server")
+                    }
+                }
+                Text(
+                    if (editingOrigin == null) "Add a server or edit its local label." else "Edit server label",
+                    style = MaterialTheme.typography.bodyLarge,
+                )
                 Text(
                     "Enter the public HTTPS origin of your unchanged Hermes Serve instance.",
                     style = MaterialTheme.typography.bodyLarge,
@@ -3129,10 +3590,26 @@ internal fun ServerSettingsScreen(
                         )
                     },
                     isError = validationMessage != null,
-                    enabled = !isSaving,
+                    enabled = !isSaving && editingOrigin == null,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Server origin input" },
+                )
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = {
+                        label = it.take(MAX_SERVER_LABEL_CHARS)
+                        saveError = null
+                    },
+                    label = { Text("Display label (optional)") },
+                    supportingText = { Text("Stored only on this device") },
+                    enabled = !isSaving,
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Display label input" },
                 )
                 saveError?.let { message ->
                     Text(
@@ -3145,14 +3622,30 @@ internal fun ServerSettingsScreen(
                     Button(
                         enabled = parsedOrigin != null && !isSaving,
                         onClick = {
-                            val origin = parsedOrigin ?: return@Button
+                            val origin = editingOrigin ?: parsedOrigin ?: return@Button
+                            val entry = runCatching {
+                                ServerCatalogEntry(origin = origin, label = label.trim())
+                            }.getOrElse {
+                                saveError = "That server label is not valid."
+                                return@Button
+                            }
                             coroutineScope.launch {
                                 isSaving = true
                                 saveError = null
-                                val result = onSave(origin)
+                                val result = if (editingOrigin != null) {
+                                    onUpdateServerLabel(entry)
+                                } else {
+                                    onSaveEntry(entry)
+                                }
                                 isSaving = false
                                 if (result.isSuccess) {
-                                    onBack()
+                                    if (serverCatalog.entries.isEmpty()) {
+                                        onBack()
+                                    } else {
+                                        editingOrigin = null
+                                        value = ""
+                                        label = ""
+                                    }
                                 } else {
                                     saveError = "Could not save server. Try again."
                                 }
@@ -3168,6 +3661,11 @@ internal fun ServerSettingsScreen(
                         Text("Cancel")
                     }
                 }
+                HorizontalDivider()
+                OperationalOverviewItem(
+                    snapshot = snapshot,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 if (snapshot.authenticationState == AuthenticationState.Authenticated) {
                     HorizontalDivider()
                     Text("Connection", style = MaterialTheme.typography.titleMedium)
@@ -3184,8 +3682,20 @@ internal fun ServerSettingsScreen(
                             }
                         }
                     }
+                    val scopedModelOptions = snapshot.defaultModelOptions
+                        ?.takeIf { it.profile == snapshot.selectedProfile }
+                    val scopedCurrentModelInfo = snapshot.currentModelInfo
+                        ?.takeIf { it.profile == snapshot.selectedProfile }
+                    scopedCurrentModelInfo?.let { info ->
+                        Text("Current profile model", style = MaterialTheme.typography.titleMedium)
+                        val currentLabel = listOfNotNull(info.provider, info.model).joinToString(" / ")
+                        if (currentLabel.isNotBlank()) Text(currentLabel)
+                        info.effectiveContextLength?.let { length ->
+                            Text("Effective context: $length tokens")
+                        }
+                    }
                     Text("Default model for new chats", style = MaterialTheme.typography.titleMedium)
-                    snapshot.defaultModelOptions?.current?.let { current ->
+                    scopedModelOptions?.current?.let { current ->
                         Text("${current.provider} / ${current.model}")
                     }
                     OutlinedTextField(
@@ -3196,7 +3706,7 @@ internal fun ServerSettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        snapshot.defaultModelOptions?.providers.orEmpty().forEach { provider ->
+                        scopedModelOptions?.providers.orEmpty().forEach { provider ->
                             provider.models
                                 .filter { modelQuery.isBlank() || it.contains(modelQuery.trim(), ignoreCase = true) }
                                 .take(8)
@@ -3223,6 +3733,66 @@ internal fun ServerSettingsScreen(
                             }
                         }) { Text("Set default") }
                     }
+                    val reasoningCapabilityAvailable = scopedCurrentModelInfo?.capabilities?.reasoning == true
+                    if (reasoningCapabilityAvailable) {
+                        Text("Reasoning default for future chats", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "This changes future chats only; it does not change the active runtime.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        val reasoningLabel = pendingProfileReasoning
+                            ?: snapshot.profileReasoningEffort
+                            ?: "Provider default"
+                        Box {
+                            AssistChip(
+                                onClick = { profileReasoningMenuOpen = true },
+                                label = { Text(reasoningLabel) },
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Choose future chat reasoning default"
+                                },
+                            )
+                            DropdownMenu(
+                                expanded = profileReasoningMenuOpen,
+                                onDismissRequest = { profileReasoningMenuOpen = false },
+                            ) {
+                                ValidReasoningEfforts.forEach { effort ->
+                                    DropdownMenuItem(
+                                        text = { Text(effort) },
+                                        onClick = {
+                                            pendingProfileReasoning = effort
+                                            profileReasoningMenuOpen = false
+                                            profileReasoningSaveError = null
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        pendingProfileReasoning?.let { effort ->
+                            Button(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        val result = onSetProfileReasoningEffort(effort)
+                                        if (result.isSuccess) {
+                                            pendingProfileReasoning = null
+                                            profileReasoningSaveError = null
+                                        } else {
+                                            profileReasoningSaveError =
+                                                "Could not save the future-chat reasoning default."
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Save future chat reasoning default"
+                                },
+                            ) {
+                                Text("Set reasoning default")
+                            }
+                        }
+                        profileReasoningSaveError?.let { error ->
+                            Text(error, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
                     TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
                     snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     CronJobsPanel(
@@ -3231,10 +3801,54 @@ internal fun ServerSettingsScreen(
                         actionJobId = snapshot.cronJobActionJobId,
                         actionError = snapshot.cronJobActionError,
                         onJobAction = onCronJobAction,
+                        cronServerOrigin = serverOrigin?.value,
+                        cronProfile = snapshot.selectedProfile,
+                        triggerCapability = snapshot.cronTriggerCapability,
+                        historyCapability = snapshot.cronHistoryCapability,
+                        runLoadingScopes = snapshot.cronRunLoadingScopes,
+                        runErrors = snapshot.cronRunErrors,
+                        runsByScope = snapshot.cronRunsByScope,
+                        onRunNow = onRunCronJob,
+                        onToggleRuns = onToggleCronJobRuns,
                     )
                 }
             }
         }
+    }
+    pendingRemoval?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { if (!isSaving) pendingRemoval = null },
+            title = { Text("Remove server?") },
+            text = { Text("Remove ${entry.displayLabel} from this device? This does not change the remote server.") },
+            confirmButton = {
+                TextButton(
+                    enabled = !isSaving,
+                    onClick = {
+                        coroutineScope.launch {
+                            isSaving = true
+                            val result = onRemoveServer(entry.origin)
+                            isSaving = false
+                            if (result.isSuccess) {
+                                pendingRemoval = null
+                            } else {
+                                pendingRemoval = null
+                                saveError = "Could not remove server. Select another active server first."
+                            }
+                        }
+                    },
+                ) {
+                    Text("Remove")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !isSaving,
+                    onClick = { pendingRemoval = null },
+                ) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
     pendingExpensive?.let { selection ->
         AlertDialog(
@@ -3296,6 +3910,7 @@ private fun SessionDetailScreen(
     onRemoveAttachment: (String) -> Unit,
     onSend: (String) -> Unit,
     onReasoningSelected: (String) -> Unit,
+    onFastSelected: (Boolean) -> Unit,
     onOpenModelPicker: () -> Unit,
     onClarificationResponse: (String, String) -> Unit,
     onApprovalResponse: (String, Boolean) -> Unit,
@@ -3353,7 +3968,9 @@ private fun SessionDetailScreen(
         errors += onAddAttachments(candidates)
         attachmentError = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
     }
-    val hasRunStateContent = chat.runState.hasVisibleContent()
+    val hasRunStateContent = chat.runState.hasVisibleContent() ||
+        chat.processRows.isNotEmpty() ||
+        (delegationAvailable && delegationStatus.active.isNotEmpty())
     val timelineLastIndex = (
         chat.messages.size + if (hasRunStateContent) 1 else 0
     ).minus(1).coerceAtLeast(0)
@@ -3625,7 +4242,9 @@ private fun SessionDetailScreen(
                             item(key = "run-state") {
                                 RunStateContent(
                                     runState = chat.runState,
+                                    processRows = chat.processRows,
                                     runActive = chat.isSending,
+                                    delegationStatus = if (delegationAvailable) delegationStatus else DelegationStatus(),
                                     durableSessionId = session.id,
                                     onClarificationResponse = onClarificationResponse,
                                     onApprovalResponse = onApprovalResponse,
@@ -3937,39 +4556,117 @@ private fun SessionDetailScreen(
                         .widthIn(max = 240.dp)
                         .semantics { contentDescription = "Change session model" },
                 )
-                var reasoningMenuOpen by remember(session.id) { mutableStateOf(false) }
-                val reasoningLabel = chat.reasoningEffort?.takeIf(String::isNotBlank) ?: when {
-                    session.isLocalDraft && !chat.draftDefaultsLoaded -> "Loading reasoning…"
-                    session.isLocalDraft -> "Provider default"
-                    else -> "Reasoning"
-                }
-                Box {
-                    AssistChip(
-                        onClick = { reasoningMenuOpen = true },
-                        label = {
-                            Text(reasoningLabel)
-                        },
-                        trailingIcon = {
-                            Icon(
-                                Icons.Outlined.ExpandMore,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        },
+                val reportedReasoningEffort = chat.reasoningEffort?.takeIf(String::isNotBlank)
+                // Reasoning can be changed lazily via setReasoningEffort (it attaches a live
+                // session on demand), so it stays editable as long as the model advertises the
+                // capability — matching the always-editable model picker. Fast mode, by contrast,
+                // requires an already-attached controller and remains gated on maintenanceAvailable.
+                val reasoningEditable = chat.modelCapabilities?.reasoning == true
+                if (reasoningEditable) {
+                    var reasoningMenuOpen by remember(session.id) { mutableStateOf(false) }
+                    val reasoningLabel = reportedReasoningEffort ?: "Reasoning"
+                    Box {
+                        AssistChip(
+                            onClick = { reasoningMenuOpen = true },
+                            label = { Text(reasoningLabel) },
+                            trailingIcon = {
+                                Icon(
+                                    Icons.Outlined.ExpandMore,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            },
+                            modifier = Modifier.semantics {
+                                contentDescription = "Change reasoning effort"
+                            },
+                        )
+                        DropdownMenu(
+                            expanded = reasoningMenuOpen,
+                            onDismissRequest = { reasoningMenuOpen = false },
+                        ) {
+                            ValidReasoningEfforts.forEach { effort ->
+                                DropdownMenuItem(
+                                    text = { Text(effort) },
+                                    onClick = {
+                                        reasoningMenuOpen = false
+                                        onReasoningSelected(effort)
+                                    },
+                                )
+                            }
+                        }
+                    }
+                } else if (reportedReasoningEffort != null) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.semantics {
-                            contentDescription = "Change reasoning effort"
+                            contentDescription = "Reported reasoning effort"
+                            stateDescription = reportedReasoningEffort
                         },
-                    )
-                    DropdownMenu(
-                        expanded = reasoningMenuOpen,
-                        onDismissRequest = { reasoningMenuOpen = false },
                     ) {
-                        ValidReasoningEfforts.forEach { effort ->
+                        Text(
+                            reportedReasoningEffort,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    }
+                }
+                if (
+                    chat.modelCapabilities?.fast == true &&
+                    (maintenanceAvailable || session.isLocalDraft)
+                ) {
+                    var fastMenuOpen by remember(session.id) { mutableStateOf(false) }
+                    val fastEnabled = chat.fastMode == "fast"
+                    Box {
+                        AssistChip(
+                            onClick = { fastMenuOpen = true },
+                            label = { Text(if (fastEnabled) "Fast" else "Normal") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Outlined.Speed,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = if (fastEnabled) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                            },
+                            trailingIcon = {
+                                Icon(
+                                    Icons.Outlined.ExpandMore,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            },
+                            modifier = Modifier
+                                .semantics {
+                                    contentDescription = "Change fast mode"
+                                    stateDescription = if (fastEnabled) {
+                                        "Fast mode enabled"
+                                    } else {
+                                        "Normal mode enabled"
+                                    }
+                                },
+                        )
+                        DropdownMenu(
+                            expanded = fastMenuOpen,
+                            onDismissRequest = { fastMenuOpen = false },
+                        ) {
                             DropdownMenuItem(
-                                text = { Text(effort) },
+                                text = { Text("Fast") },
                                 onClick = {
-                                    reasoningMenuOpen = false
-                                    onReasoningSelected(effort)
+                                    fastMenuOpen = false
+                                    onFastSelected(true)
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Normal") },
+                                onClick = {
+                                    fastMenuOpen = false
+                                    onFastSelected(false)
                                 },
                             )
                         }
@@ -4513,12 +5210,14 @@ private fun formatPercent(value: Double): String =
 @Composable
 private fun RunStateContent(
     runState: RunEventState,
+    processRows: List<ProcessRow>,
     runActive: Boolean,
+    delegationStatus: DelegationStatus,
     durableSessionId: DurableSessionId,
     onClarificationResponse: (String, String) -> Unit,
     onApprovalResponse: (String, Boolean) -> Unit,
 ) {
-    if (!runState.hasVisibleContent()) return
+    if (!runState.hasVisibleContent() && delegationStatus.active.isEmpty() && processRows.isEmpty()) return
     val runningTools = runState.tools.filter { it.state == RunToolState.Running }
     var toolsExpanded by remember(durableSessionId.value) {
         mutableStateOf(false)
@@ -4527,12 +5226,19 @@ private fun RunStateContent(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // A stale status from a finished run reads as a stuck banner, so the
-        // amber pill only shows while the run is actually in flight.
         if (runActive || runningTools.isNotEmpty()) {
             runState.status?.let { status -> RunStatusPill(status) }
         }
-        if (runState.tools.isNotEmpty()) {
+        if (runState.todos.isNotEmpty() || delegationStatus.active.isNotEmpty() || processRows.isNotEmpty()) {
+            ActivityStack(
+                runState = runState,
+                delegationStatus = delegationStatus,
+                processRows = processRows,
+                runActive = runActive,
+            )
+        } else if (runState.tools.isNotEmpty()) {
+            // Preserve the established tool-only surface; the unified stack takes
+            // over as soon as a second authoritative activity family is present.
             ToolActivityGroup(
                 tools = runState.tools,
                 expanded = toolsExpanded,
@@ -4562,6 +5268,7 @@ private fun RunStateContent(
 private fun RunEventState.hasVisibleContent(): Boolean =
     status != null ||
         tools.isNotEmpty() ||
+        todos.isNotEmpty() ||
         clarification != null ||
         approval != null ||
         unsupportedBlocking != null

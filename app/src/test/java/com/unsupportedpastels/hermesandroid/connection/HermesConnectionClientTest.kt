@@ -16,6 +16,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -26,6 +27,7 @@ import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
+import com.unsupportedpastels.hermesandroid.gateway.CronJobScope
 
 class HermesConnectionClientTest {
     @Test
@@ -117,7 +119,7 @@ class HermesConnectionClientTest {
                     headers = headersOf(HttpHeaders.ContentType, "application/json"),
                 )
                 "/api/model/options" -> respond(
-                    """{"provider":"nous","model":"current-default","providers":[{"slug":"nous","name":"Nous","authenticated":true,"models":["current-default","expensive"]}]}""",
+                    """{"provider":"nous","model":"current-default","providers":[{"slug":"nous","name":"Nous","authenticated":true,"models":["current-default","expensive"],"capabilities":{"current-default":{"fast":false,"reasoning":true},"expensive":{"fast":true,"reasoning":"bad"}}}]}""",
                     headers = headersOf(HttpHeaders.ContentType, "application/json"),
                 )
                 "/api/model/set" -> respond(
@@ -141,6 +143,11 @@ class HermesConnectionClientTest {
 
         assertEquals(listOf("default", "work"), profiles)
         assertEquals(ModelSelection("nous", "current-default"), options.current)
+        assertEquals("work", options.profile)
+        assertEquals(false, options.providers.single().capabilities["current-default"]?.fast)
+        assertEquals(true, options.providers.single().capabilities["current-default"]?.reasoning)
+        assertEquals(true, options.providers.single().capabilities["expensive"]?.fast)
+        assertEquals(null, options.providers.single().capabilities["expensive"]?.reasoning)
         assertTrue(result.confirmationRequired)
         assertEquals("This model is expensive", result.confirmationMessage)
         assertEquals(
@@ -150,6 +157,72 @@ class HermesConnectionClientTest {
                 "POST /api/model/set?profile=work",
             ),
             requested,
+        )
+    }
+
+    @Test
+    fun modelOptionsAcceptsBoundedCatalogLargerThanGeneralResponseLimit() = runTest {
+        val models = List(5_000) { index -> "model-${index.toString().padStart(8, '0')}" }
+        val response = """{"provider":"nous","model":"${models.first()}","providers":[{"slug":"nous","name":"Nous","models":[${models.joinToString(",") { "\"$it\"" }}]}]}"""
+        assertTrue(response.toByteArray().size > 64 * 1024)
+        val engine = MockEngine { request ->
+            assertEquals("/api/model/options", request.url.encodedPath)
+            respond(response, headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+
+        val options = HttpHermesConnectionClient(HttpClient(engine)).loadDefaultModelOptions(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "default",
+        )
+
+        assertEquals(ModelSelection("nous", models.first()), options.current)
+        assertEquals(200, options.providers.single().models.size)
+    }
+
+    @Test
+    fun currentModelInfoIsProfileScopedAndToleratesMalformedOptionalFields() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Get, request.method)
+            assertEquals("/api/model/info", request.url.encodedPath)
+            assertEquals("work", request.url.parameters["profile"])
+            respond(
+                """{"profile":"work","provider":"nous","model":"Hermes-4-405B","effective_context_length":131072,"capabilities":{"fast":true,"reasoning":"true"},"future":{"ignored":true}}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val info = HttpHermesConnectionClient(HttpClient(engine)).loadCurrentModelInfo(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+        )
+
+        assertEquals("work", info.profile)
+        assertEquals("nous", info.provider)
+        assertEquals("Hermes-4-405B", info.model)
+        assertEquals(131072, info.effectiveContextLength)
+        assertEquals(true, info.capabilities.fast)
+        assertEquals(null, info.capabilities.reasoning)
+    }
+
+    @Test
+    fun profileReasoningDefaultUsesNarrowFutureChatConfigPut() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Put, request.method)
+            assertEquals("/api/config", request.url.encodedPath)
+            assertEquals("work", request.url.parameters["profile"])
+            val body = (request.body as TextContent).text
+            assertEquals(
+                """{"config":{"agent":{"reasoning_effort":"high"}}}""",
+                body,
+            )
+            respond("{}", headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        HttpHermesConnectionClient(HttpClient(engine)).setProfileReasoningEffort(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+            "high",
         )
     }
 
@@ -871,5 +944,210 @@ class HermesConnectionClientTest {
         assertEquals(listOf("/api/files/mkdir", "/api/files"), requestedPaths)
         assertEquals("/srv/projects/New Folder", listing.path)
         assertEquals("/srv/projects", listing.parentPath)
+    }
+
+    @Test
+    fun cronTriggerUsesBoundedAuthenticatedOfficialEndpointAndNoBody() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("/api/cron/jobs/job%2F1/trigger", request.url.encodedPath)
+            assertEquals("work", request.url.parameters["profile"])
+            assertEquals("Bearer opaque-access", request.headers[HttpHeaders.Authorization])
+            assertFalse(request.body is TextContent)
+            respond(
+                """{"id":"job/1","name":"Nightly","schedule":"0 2 * * *","enabled":true,"last_run_at":"2026-08-16T02:00:00Z"}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+
+        val job = HttpHermesConnectionClient(HttpClient(engine)).triggerCronJob(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+            "job/1",
+        )
+
+        assertEquals("job/1", job.jobId)
+        assertEquals("2026-08-16T02:00:00Z", job.lastRunAt)
+    }
+
+    @Test
+    fun cronRunsUsesBoundedProfileScopedEndpointAndPreservesReturnedOptionalFields() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Get, request.method)
+            assertEquals("/api/cron/jobs/job-1/runs", request.url.encodedPath)
+            assertEquals("work", request.url.parameters["profile"])
+            assertEquals("20", request.url.parameters["limit"])
+            assertEquals("Bearer opaque-access", request.headers[HttpHeaders.Authorization])
+            respond(
+                """{"runs":[{"id":"cron_job-1_1","title":"Run","preview":"hello","source":"cron","started_at":1700000000.0,"ended_at":1700000002.0,"message_count":4}],"limit":20}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+
+        val runs = HttpHermesConnectionClient(HttpClient(engine)).loadCronJobRuns(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+            "job-1",
+            limit = 20,
+        )
+
+        assertEquals("cron_job-1_1", runs.single().id)
+        assertEquals("hello", runs.single().preview)
+        assertEquals(1_700_000_000.0, runs.single().startedAt)
+        assertEquals(1_700_000_002.0, runs.single().endedAt)
+        assertEquals(4L, runs.single().messageCount)
+    }
+
+    @Test
+    fun cronRest404405And409RemainTypedWithoutExposingResponseBody() = runTest {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val notFound = HttpHermesConnectionClient(
+            HttpClient(MockEngine {
+                respond("secret response body", HttpStatusCode.NotFound)
+            }),
+        )
+        val unsupported = runCatching {
+            notFound.loadCronJobRuns(origin, "opaque-access", "default", "job-1")
+        }.exceptionOrNull()
+        assertTrue(unsupported is HermesCronRestUnsupportedException)
+        assertTrue(unsupported?.message?.contains("secret") == false)
+
+        val methodNotAllowed = HttpHermesConnectionClient(
+            HttpClient(MockEngine {
+                respond("secret response body", HttpStatusCode.MethodNotAllowed)
+            }),
+        )
+        assertTrue(
+            runCatching {
+                methodNotAllowed.triggerCronJob(origin, "opaque-access", "default", "job-1")
+            }.exceptionOrNull() is HermesCronRestUnsupportedException,
+        )
+
+        val claimed = HttpHermesConnectionClient(
+            HttpClient(MockEngine {
+                respond("private detail", HttpStatusCode.Conflict)
+            }),
+        )
+        val claimedError = runCatching {
+            claimed.triggerCronJob(origin, "opaque-access", "default", "job-1")
+        }.exceptionOrNull()
+        assertTrue(claimedError is HermesCronJobClaimedException)
+        assertEquals("Cron job is already running or was claimed by another scheduler", claimedError?.message)
+    }
+
+    @Test
+    fun bulkDeleteUsesOfficialBoundedProfileScopedContractAndParsesAuthoritativeCount() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("/api/sessions/bulk-delete", request.url.encodedPath)
+            assertEquals("Bearer opaque-access", request.headers[HttpHeaders.Authorization])
+            val body = (request.body as TextContent).text
+            val jsonBody = Json.parseToJsonElement(body).jsonObject
+            assertEquals(
+                listOf("stored-1", "stored-2"),
+                jsonBody.getValue("ids").jsonArray.map { it.jsonPrimitive.content },
+            )
+            assertEquals("work", jsonBody.getValue("profile").jsonPrimitive.content)
+            respond(
+                """{"ok":true,"deleted":2}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val client = HttpHermesConnectionClient(HttpClient(engine))
+
+        val result = client.bulkDeleteSessions(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            listOf(DurableSessionId("stored-1"), DurableSessionId("stored-2")),
+            profile = "work",
+        )
+
+        assertTrue(result.ok)
+        assertEquals(2, result.deleted)
+    }
+
+    @Test
+    fun bulkDelete404And405AreTypedCapabilityFallbacks() = runTest {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        listOf(HttpStatusCode.NotFound, HttpStatusCode.MethodNotAllowed).forEach { status ->
+            val client = HttpHermesConnectionClient(
+                HttpClient(MockEngine { respond("", status) }),
+            )
+            val failure = runCatching {
+                client.bulkDeleteSessions(origin, "opaque-access", listOf(DurableSessionId("stored-1")))
+            }.exceptionOrNull()
+            assertTrue(failure is HermesSessionBulkDeleteUnsupportedException)
+        }
+    }
+
+    @Test
+    fun bulkDeleteRejectsMoreThan500IdsBeforeDispatch() = runTest {
+        var dispatched = false
+        val client = HttpHermesConnectionClient(
+            HttpClient(MockEngine {
+                dispatched = true
+                respond("{}")
+            }),
+        )
+
+        val failure = runCatching {
+            client.bulkDeleteSessions(
+                ServerOrigin.parse("https://hermes.example"),
+                "opaque-access",
+                (0..500).map { DurableSessionId("stored-$it") },
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalArgumentException)
+        assertFalse(dispatched)
+    }
+
+    @Test
+    fun profileSessionReloadUsesExactProfileScope() = runTest {
+        val requestedProfiles = mutableListOf<String?>()
+        val engine = MockEngine { request ->
+            requestedProfiles += request.url.parameters["profile"]
+            when (request.url.encodedPath) {
+                "/api/auth/me" -> respond(
+                    """{"user_id":"user"}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+                "/api/profiles/sessions" -> respond(
+                    """{"sessions":[{"session_key":"work-session","title":"Work session"}]}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+                else -> error("Unexpected request: ${request.url}")
+            }
+        }
+
+        val sessions = HttpHermesConnectionClient(HttpClient(engine)).loadSessionsForProfile(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+        )
+
+        assertEquals(listOf("work"), requestedProfiles)
+        assertEquals(listOf(DurableSessionId("work-session")), sessions.map { it.id })
+    }
+
+    @Test
+    fun legacyClientsCanClassifyCronRestAsUnsupported() = runTest {
+        val legacy = object : HermesConnectionClient {
+            override suspend fun probe(serverOrigin: ServerOrigin) =
+                HermesConnectionInfo(null, false, false, emptyList())
+        }
+
+        val failure = runCatching {
+            legacy.loadCronJobRuns(
+                ServerOrigin.parse("https://hermes.example"),
+                "opaque-access",
+                "default",
+                "job-1",
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is HermesCronRestLegacyUnsupportedException)
     }
 }

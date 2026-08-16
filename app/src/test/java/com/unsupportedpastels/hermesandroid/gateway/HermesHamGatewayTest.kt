@@ -149,16 +149,18 @@ class HermesHamGatewayTest {
             val params = request["params"]!!.jsonObject
             assertEquals("list", params["action"]!!.jsonPrimitive.content)
             assertTrue(params["include_disabled"]!!.jsonPrimitive.boolean)
+            assertEquals("work", params["profile"]!!.jsonPrimitive.content)
             socket.offer(
-                """{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{"jobs":[{"job_id":"job-1","name":"Nightly","schedule":"0 0 * * *","enabled":false},{"job_id":"job-1","name":"duplicate","schedule":"ignored"},{"id":"job-2","name":"$longName","schedule":"@hourly","next_run_at":123},{"name":"missing id","schedule":"never"},{"job_id":"bad","schedule":"missing name"}]}}""",
+                """{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{"jobs":[{"job_id":"job-1","name":"Nightly","schedule":"0 0 * * *","enabled":false,"last_delivery_error":"delivery failed"},{"job_id":"job-1","name":"duplicate","schedule":"ignored"},{"id":"job-2","name":"$longName","schedule":"@hourly","next_run_at":123},{"name":"missing id","schedule":"never"},{"job_id":"bad","schedule":"missing name"}]}}""",
             )
         }
         val connection = newHamConnection(socket)
 
-        val jobs = connection.loadCronJobs()
+        val jobs = connection.loadCronJobsForProfile("work")
 
         assertEquals(listOf("job-1", "job-2"), jobs.map(CronJob::jobId))
         assertEquals("Nightly", jobs[0].name)
+        assertEquals("delivery failed", jobs[0].lastDeliveryError)
         assertEquals(512, jobs[1].name.length)
         assertEquals("123", jobs[1].nextRunAt)
         connection.close()

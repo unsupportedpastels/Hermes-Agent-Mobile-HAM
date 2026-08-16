@@ -616,80 +616,90 @@ private fun MarkdownTable(block: MarkdownTableBlock) {
     val columnCount = maxOf(block.header.size, block.rows.maxOfOrNull { it.size } ?: 0)
     if (columnCount == 0) return
     val rows = listOf(block.header) + block.rows
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(scrollState)
-            .semantics {
-                contentDescription =
-                    "Markdown table, ${block.header.size} columns, ${block.rows.size} rows"
-            },
-    ) {
-        // Sizes each column to its widest cell (clamped) so columns stay aligned across rows
-        // while still adapting to content and font scale.
-        Layout(
-            content = {
-                rows.forEachIndexed { rowIndex, cells ->
-                    repeat(columnCount) { column ->
-                        MarkdownTableCellText(
-                            cell = cells.getOrNull(column),
-                            header = rowIndex == 0,
-                            alignment = block.alignments.getOrElse(column) {
-                                MarkdownTableAlignment.Start
-                            },
-                        )
+    Column {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(scrollState)
+                .semantics {
+                    contentDescription =
+                        "Markdown table, ${block.header.size} columns, ${block.rows.size} rows"
+                },
+        ) {
+            // Sizes each column to its widest cell (clamped) so columns stay aligned across rows
+            // while still adapting to content and font scale.
+            Layout(
+                content = {
+                    rows.forEachIndexed { rowIndex, cells ->
+                        repeat(columnCount) { column ->
+                            MarkdownTableCellText(
+                                cell = cells.getOrNull(column),
+                                header = rowIndex == 0,
+                                alignment = block.alignments.getOrElse(column) {
+                                    MarkdownTableAlignment.Start
+                                },
+                            )
+                        }
+                    }
+                },
+                modifier = Modifier.background(
+                    MaterialTheme.colorScheme.outlineVariant,
+                    RoundedCornerShape(8.dp),
+                ),
+            ) { measurables, _ ->
+                val spacing = 1.dp.roundToPx()
+                val minCellWidth = MarkdownTableCellMinWidth.roundToPx()
+                val maxCellWidth = MarkdownTableCellMaxWidth.roundToPx()
+                val rowCount = rows.size
+                val columnWidths = IntArray(columnCount)
+                measurables.forEachIndexed { index, measurable ->
+                    val column = index % columnCount
+                    columnWidths[column] = maxOf(
+                        columnWidths[column],
+                        measurable.maxIntrinsicWidth(Constraints.Infinity)
+                            .coerceIn(minCellWidth, maxCellWidth),
+                    )
+                }
+                val rowHeights = IntArray(rowCount)
+                measurables.forEachIndexed { index, measurable ->
+                    val row = index / columnCount
+                    rowHeights[row] = maxOf(
+                        rowHeights[row],
+                        measurable.minIntrinsicHeight(columnWidths[index % columnCount]),
+                    )
+                }
+                val placeables = measurables.mapIndexed { index, measurable ->
+                    measurable.measure(
+                        Constraints.fixed(
+                            columnWidths[index % columnCount],
+                            rowHeights[index / columnCount],
+                        ),
+                    )
+                }
+                val tableWidth = columnWidths.sum() + spacing * (columnCount - 1)
+                val tableHeight = rowHeights.sum() + spacing * (rowCount - 1)
+                layout(tableWidth, tableHeight) {
+                    var y = 0
+                    var index = 0
+                    repeat(rowCount) { row ->
+                        var x = 0
+                        repeat(columnCount) { column ->
+                            placeables[index].place(x, y)
+                            x += columnWidths[column] + spacing
+                            index++
+                        }
+                        y += rowHeights[row] + spacing
                     }
                 }
-            },
-            modifier = Modifier.background(
-                MaterialTheme.colorScheme.outlineVariant,
-                RoundedCornerShape(8.dp),
-            ),
-        ) { measurables, _ ->
-            val spacing = 1.dp.roundToPx()
-            val minCellWidth = MarkdownTableCellMinWidth.roundToPx()
-            val maxCellWidth = MarkdownTableCellMaxWidth.roundToPx()
-            val rowCount = rows.size
-            val columnWidths = IntArray(columnCount)
-            measurables.forEachIndexed { index, measurable ->
-                val column = index % columnCount
-                columnWidths[column] = maxOf(
-                    columnWidths[column],
-                    measurable.maxIntrinsicWidth(Constraints.Infinity)
-                        .coerceIn(minCellWidth, maxCellWidth),
-                )
             }
-            val rowHeights = IntArray(rowCount)
-            measurables.forEachIndexed { index, measurable ->
-                val row = index / columnCount
-                rowHeights[row] = maxOf(
-                    rowHeights[row],
-                    measurable.minIntrinsicHeight(columnWidths[index % columnCount]),
-                )
-            }
-            val placeables = measurables.mapIndexed { index, measurable ->
-                measurable.measure(
-                    Constraints.fixed(
-                        columnWidths[index % columnCount],
-                        rowHeights[index / columnCount],
-                    ),
-                )
-            }
-            val tableWidth = columnWidths.sum() + spacing * (columnCount - 1)
-            val tableHeight = rowHeights.sum() + spacing * (rowCount - 1)
-            layout(tableWidth, tableHeight) {
-                var y = 0
-                var index = 0
-                repeat(rowCount) { row ->
-                    var x = 0
-                    repeat(columnCount) { column ->
-                        placeables[index].place(x, y)
-                        x += columnWidths[column] + spacing
-                        index++
-                    }
-                    y += rowHeights[row] + spacing
-                }
-            }
+        }
+        if (scrollState.maxValue > 0) {
+            Text(
+                "Swipe horizontally to see more",
+                modifier = Modifier.padding(top = 4.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall,
+            )
         }
     }
 }

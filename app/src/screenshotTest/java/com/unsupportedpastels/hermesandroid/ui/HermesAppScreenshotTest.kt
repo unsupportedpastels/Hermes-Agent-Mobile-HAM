@@ -3,6 +3,10 @@ package com.unsupportedpastels.hermesandroid.ui
 import android.content.res.Configuration
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import androidx.navigationevent.compose.rememberNavigationEventDispatcherOwner
@@ -26,9 +30,16 @@ import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
+import com.unsupportedpastels.hermesandroid.gateway.CronJob
+import com.unsupportedpastels.hermesandroid.gateway.CronJobRun
+import com.unsupportedpastels.hermesandroid.gateway.CronJobRunsState
+import com.unsupportedpastels.hermesandroid.gateway.CronJobScope
+import com.unsupportedpastels.hermesandroid.gateway.CronJobsState
+import com.unsupportedpastels.hermesandroid.gateway.CronRestCapability
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryEntry
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryListing
+import com.unsupportedpastels.hermesandroid.gateway.ModelCapabilities
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
@@ -162,6 +173,11 @@ private fun screenshotActiveSessionSnapshot(): HermesGatewaySnapshot = screensho
         screenshotAlphaWorkspaceSession.id to ChatSessionSnapshot(
             messages = screenshotTranscript,
             isSending = true,
+            model = "openai/gpt-5.6-sol",
+            provider = "openai-codex",
+            modelCapabilities = ModelCapabilities(fast = true, reasoning = true),
+            fastMode = "fast",
+            reasoningEffort = "medium",
             runState = RunEventState(
                 status = RunStatus(kind = "working", text = "Reviewing workspace"),
                 tools = listOf(
@@ -174,6 +190,16 @@ private fun screenshotActiveSessionSnapshot(): HermesGatewaySnapshot = screensho
                     ),
                 ),
             ),
+        ),
+    ),
+)
+
+private fun screenshotObservedReasoningSnapshot(): HermesGatewaySnapshot = screenshotProjectSnapshot().copy(
+    chatSessions = mapOf(
+        screenshotAlphaWorkspaceSession.id to ChatSessionSnapshot(
+            model = "openai/gpt-5.6-terra",
+            provider = "openai-codex",
+            reasoningEffort = "high",
         ),
     ),
 )
@@ -213,11 +239,89 @@ private fun screenshotNewDraftSnapshot(): HermesGatewaySnapshot = screenshotProj
         screenshotNewDraft.id to ChatSessionSnapshot(
             model = "openai/gpt-5.6-sol",
             provider = "openai-codex",
+            modelCapabilities = ModelCapabilities(fast = true, reasoning = true),
             reasoningEffort = "high",
             draftDefaultsLoaded = true,
         ),
     ),
 )
+
+private val screenshotCronJobs = listOf(
+    CronJob(
+        jobId = "nightly-brief",
+        name = "Nightly brief",
+        schedule = "0 2 * * *",
+        enabled = true,
+        state = "scheduled",
+        nextRunAt = "2026-08-17T02:00:00Z",
+        lastRunAt = "2026-08-16T02:00:00Z",
+        lastStatus = "success",
+    ),
+    CronJob(
+        jobId = "price-watch",
+        name = "Price watch",
+        schedule = "every 2h",
+        enabled = false,
+        state = "paused",
+        lastStatus = "skipped",
+    ),
+)
+private val screenshotCronScope = CronJobScope("https://hermes.example", "default", "nightly-brief")
+private val screenshotCronRuns = listOf(
+    CronJobRun(
+        id = "cron_nightly-brief_1",
+        title = "Nightly brief execution",
+        preview = "Returned execution session details",
+        source = "cron",
+        startedAt = 1_700_000_000.0,
+        endedAt = 1_700_000_120.0,
+        status = "completed",
+        messageCount = 12,
+        toolCallCount = 4,
+        inputTokens = 600,
+        outputTokens = 220,
+    ),
+)
+
+@Composable
+private fun ScreenshotCronJobsPanel() {
+    HermesAndroidTheme(darkTheme = false) {
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            CronJobsPanel(
+                state = CronJobsState.Ready(screenshotCronJobs),
+                onRefresh = {},
+                cronServerOrigin = screenshotCronScope.serverOrigin,
+                cronProfile = screenshotCronScope.profile,
+                triggerCapability = CronRestCapability.Supported,
+                historyCapability = CronRestCapability.Supported,
+                runsByScope = mapOf(screenshotCronScope to CronJobRunsState.Ready(screenshotCronRuns)),
+                onRunNow = {},
+                onToggleRuns = {},
+            )
+        }
+    }
+}
+
+@PreviewTest
+@Preview(name = "Compact cron jobs", widthDp = 400, heightDp = 900, showBackground = true)
+@Composable
+fun HermesCronJobsCompactScreenshot() {
+    ScreenshotCronJobsPanel()
+}
+
+@PreviewTest
+@Preview(name = "Medium cron jobs", widthDp = 610, heightDp = 900, showBackground = true)
+@Composable
+fun HermesCronJobsMediumScreenshot() {
+    ScreenshotCronJobsPanel()
+}
+
+@PreviewTest
+@Preview(name = "Expanded cron jobs", widthDp = 900, heightDp = 675, showBackground = true)
+@Composable
+fun HermesCronJobsExpandedScreenshot() {
+    ScreenshotCronJobsPanel()
+}
 
 @PreviewTest
 @Preview(name = "Compact project home light", widthDp = 400, heightDp = 900, showBackground = true)
@@ -304,6 +408,20 @@ fun HermesActiveSessionScreenshot() {
         HermesAndroidTheme(darkTheme = false) {
             HermesApp(
                 snapshot = screenshotActiveSessionSnapshot(),
+                initialRoute = SessionDetailRoute(screenshotAlphaWorkspaceSession.id),
+            )
+        }
+    }
+}
+
+@PreviewTest
+@Preview(name = "Compact observed reasoning effort", widthDp = 400, heightDp = 900, showBackground = true)
+@Composable
+fun HermesObservedReasoningScreenshot() {
+    ScreenshotNavigationHost {
+        HermesAndroidTheme(darkTheme = false) {
+            HermesApp(
+                snapshot = screenshotObservedReasoningSnapshot(),
                 initialRoute = SessionDetailRoute(screenshotAlphaWorkspaceSession.id),
             )
         }
