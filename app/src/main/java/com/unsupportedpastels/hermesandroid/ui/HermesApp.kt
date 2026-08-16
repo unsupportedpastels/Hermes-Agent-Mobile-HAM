@@ -3912,11 +3912,16 @@ private fun SessionDetailScreen(
                 val displayModel = chat.model
                     ?.takeIf(String::isNotBlank)
                     ?.substringAfterLast('/')
+                val modelLabel = displayModel ?: when {
+                    session.isLocalDraft && !chat.draftDefaultsLoaded -> "Loading model…"
+                    session.isLocalDraft -> "Profile default"
+                    else -> "Model"
+                }
                 AssistChip(
                     onClick = onOpenModelPicker,
                     label = {
                         Text(
-                            displayModel ?: "Model",
+                            modelLabel,
                             maxLines = 1,
                             overflow = TextOverflow.MiddleEllipsis,
                         )
@@ -3933,11 +3938,16 @@ private fun SessionDetailScreen(
                         .semantics { contentDescription = "Change session model" },
                 )
                 var reasoningMenuOpen by remember(session.id) { mutableStateOf(false) }
+                val reasoningLabel = chat.reasoningEffort?.takeIf(String::isNotBlank) ?: when {
+                    session.isLocalDraft && !chat.draftDefaultsLoaded -> "Loading reasoning…"
+                    session.isLocalDraft -> "Provider default"
+                    else -> "Reasoning"
+                }
                 Box {
                     AssistChip(
                         onClick = { reasoningMenuOpen = true },
                         label = {
-                            Text(chat.reasoningEffort?.takeIf(String::isNotBlank) ?: "Reasoning")
+                            Text(reasoningLabel)
                         },
                         trailingIcon = {
                             Icon(

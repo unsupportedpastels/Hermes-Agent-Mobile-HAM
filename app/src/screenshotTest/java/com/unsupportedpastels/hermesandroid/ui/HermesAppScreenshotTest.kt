@@ -201,6 +201,24 @@ private fun screenshotTableSnapshot(): HermesGatewaySnapshot = screenshotProject
     ),
 )
 
+private val screenshotNewDraft = SessionSummary(
+    id = DurableSessionId("draft-model-preview"),
+    title = "New chat",
+    isLocalDraft = true,
+)
+
+private fun screenshotNewDraftSnapshot(): HermesGatewaySnapshot = screenshotProjectSnapshot().copy(
+    durableSessions = listOf(screenshotNewDraft) + screenshotProjectSnapshot().durableSessions,
+    chatSessions = mapOf(
+        screenshotNewDraft.id to ChatSessionSnapshot(
+            model = "openai/gpt-5.6-sol",
+            provider = "openai-codex",
+            reasoningEffort = "high",
+            draftDefaultsLoaded = true,
+        ),
+    ),
+)
+
 @PreviewTest
 @Preview(name = "Compact project home light", widthDp = 400, heightDp = 900, showBackground = true)
 @Composable
@@ -251,6 +269,27 @@ fun HermesOpenProjectSearchScreenshot() {
             HermesApp(
                 snapshot = screenshotProjectSnapshot(),
                 initialHomeSearchOpen = true,
+                serverSettingsState = screenshotServerSettings,
+            )
+        }
+    }
+}
+
+@PreviewTest
+@Preview(
+    name = "Expanded dark new chat model preview",
+    widthDp = 900,
+    heightDp = 675,
+    uiMode = Configuration.UI_MODE_NIGHT_YES,
+    showBackground = true,
+)
+@Composable
+fun HermesExpandedNewChatModelPreviewScreenshot() {
+    ScreenshotNavigationHost {
+        HermesAndroidTheme(darkTheme = true) {
+            HermesApp(
+                snapshot = screenshotNewDraftSnapshot(),
+                initialRoute = SessionDetailRoute(screenshotNewDraft.id),
                 serverSettingsState = screenshotServerSettings,
             )
         }

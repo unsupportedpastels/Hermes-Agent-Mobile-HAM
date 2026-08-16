@@ -471,6 +471,46 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
+    fun newDraftHydratesProfileModelAndReasoningDefaultsWithoutCreatingRuntime() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = AuthenticatingHermesConnectionClient().apply {
+            defaultModelOptions = ModelOptions(
+                current = ModelSelection("openai-codex", "gpt-5.6-sol"),
+                providers = emptyList(),
+            )
+            profileReasoningEffort = "high"
+        }
+        var chatConnections = 0
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = FixedTokenStore(),
+            chatConnector = HermesChatConnector { _, _ ->
+                chatConnections += 1
+                error("draft defaults must not create a runtime")
+            },
+            projectConnector = null,
+        )
+
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+
+        val draftId = viewModel.createNewSession()
+        advanceUntilIdle()
+
+        val chat = viewModel.snapshots.value.chatSessions.getValue(draftId)
+        assertEquals("openai-codex", chat.provider)
+        assertEquals("gpt-5.6-sol", chat.model)
+        assertEquals("high", chat.reasoningEffort)
+        assertTrue(chat.draftDefaultsLoaded)
+        assertEquals(0, chatConnections)
+    }
+
+    @Test
     fun createProjectSessionPublishesExactProjectDraftWithValidatedWorkspaceWithoutRuntime() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
@@ -2005,6 +2045,8 @@ private class AuthenticatingHermesConnectionClient : HermesConnectionClient {
     val authenticateBarriers = ArrayDeque<CompletableDeferred<Unit>>()
     var hostDirectoryResponse = HostDirectoryListing("/srv", emptyList())
     val hostDirectoryRequests = mutableListOf<Triple<ServerOrigin, String?, String?>>()
+    var defaultModelOptions = ModelOptions(current = null, providers = emptyList())
+    var profileReasoningEffort: String? = null
 
     override suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo =
         probeResponse.await()
@@ -2028,6 +2070,19 @@ private class AuthenticatingHermesConnectionClient : HermesConnectionClient {
         hostDirectoryRequests += Triple(serverOrigin, accessToken, path)
         return hostDirectoryResponse
     }
+
+    override suspend fun loadDefaultModelOptions(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): ModelOptions = defaultModelOptions
+
+    override suspend fun loadProfileReasoningEffort(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        model: String,
+    ): String? = profileReasoningEffort
 
     override suspend fun loadTranscript(
         serverOrigin: ServerOrigin,

@@ -80,6 +80,7 @@ data class ChatSessionSnapshot(
     val model: String? = null,
     val provider: String? = null,
     val reasoningEffort: String? = null,
+    val draftDefaultsLoaded: Boolean = false,
     val sessionUsage: SessionUsage? = null,
     val contextBreakdown: SessionContextBreakdown? = null,
     val insightsLoading: Boolean = false,

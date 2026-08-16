@@ -301,6 +301,13 @@ interface HermesConnectionClient {
         profile: String,
     ): ModelOptions = throw UnsupportedOperationException()
 
+    suspend fun loadProfileReasoningEffort(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        model: String,
+    ): String? = null
+
     suspend fun setDefaultModel(
         serverOrigin: ServerOrigin,
         accessToken: String,
@@ -465,6 +472,37 @@ class HttpHermesConnectionClient(
             } else null,
             providers = providers,
         )
+    }
+
+    override suspend fun loadProfileReasoningEffort(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        model: String,
+    ): String? {
+        val response = client.get("${serverOrigin.value}/api/config") {
+            bearerAuth(accessToken)
+            parameter("profile", profile.take(64))
+        }
+        val body = response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException("Hermes config returned HTTP ${response.status.value}")
+        }
+        val root = json.parseToJsonElement(body) as? JsonObject
+            ?: throw HermesConnectionException("Hermes config response was invalid")
+        val agent = root["agent"] as? JsonObject ?: return null
+        val overrides = agent["reasoning_overrides"] as? JsonObject
+        val modelVariants = reasoningModelVariants(model)
+        val override = overrides
+            ?.entries
+            ?.firstOrNull { (key, _) -> reasoningModelVariants(key).any(modelVariants::contains) }
+            ?.value
+            ?.jsonPrimitive
+            ?.contentOrNull
+        return canonicalProfileReasoningEffort(override)
+            ?: canonicalProfileReasoningEffort(
+                agent["reasoning_effort"]?.jsonPrimitive?.contentOrNull,
+            )
     }
 
     override suspend fun setDefaultModel(
@@ -832,6 +870,38 @@ class HttpHermesConnectionClient(
         }.distinctBy { it.id }
             .take(MAX_DURABLE_SESSIONS)
         return sessions
+    }
+}
+
+private val profileReasoningEfforts = setOf(
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
+
+private fun canonicalProfileReasoningEffort(value: String?): String? {
+    val normalized = value?.trim()?.lowercase()?.takeIf(String::isNotEmpty) ?: return null
+    return when (normalized) {
+        "none", "false", "disabled", "off", "no" -> "none"
+        in profileReasoningEfforts -> normalized
+        else -> null
+    }
+}
+
+private fun reasoningModelVariants(value: String): Set<String> {
+    val normalized = value.trim().lowercase()
+    if (normalized.isEmpty()) return emptySet()
+    val bare = normalized.substringAfterLast('/')
+    return buildSet {
+        listOf(normalized, bare).forEach { model ->
+            add(model)
+            add(model.replace('.', '-'))
+            add(model.replace('-', '.'))
+        }
     }
 }
 

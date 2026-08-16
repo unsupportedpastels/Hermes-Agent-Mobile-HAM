@@ -222,6 +222,36 @@ class HermesAppTest {
     }
 
     @Test
+    fun newDraftShowsResolvedModelAndProviderDefaultReasoningBeforeFirstSend() {
+        val draft = SessionSummary(
+            id = DurableSessionId("draft-preview"),
+            title = "New chat",
+            isLocalDraft = true,
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(
+                        authenticationState = AuthenticationState.Authenticated,
+                        durableSessions = listOf(draft),
+                        chatSessions = mapOf(
+                            draft.id to ChatSessionSnapshot(
+                                model = "openai/gpt-5.6-sol",
+                                provider = "openai-codex",
+                                draftDefaultsLoaded = true,
+                            ),
+                        ),
+                    ),
+                    initialRoute = SessionDetailRoute(draft.id),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("gpt-5.6-sol").assertIsDisplayed()
+        composeRule.onNodeWithText("Provider default").assertIsDisplayed()
+    }
+
+    @Test
     fun exactModelCommandOpensNativePickerWithoutSendingChatText() {
         val sessionId = sessions.first().id
         var opened: DurableSessionId? = null
