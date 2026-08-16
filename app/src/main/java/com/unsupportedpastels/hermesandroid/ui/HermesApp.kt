@@ -2221,14 +2221,6 @@ private fun SessionListScreen(
         },
         topBar = {
             Column {
-                if (snapshot.sessionMetadataSource == CacheSource.Cached) {
-                    Text(
-                        "Cached offline data — reconnecting to Hermes",
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.tertiary,
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
                 TopAppBar(
                     title = {
                         val context = connectionContext(snapshot, serverOrigin)
@@ -2383,6 +2375,14 @@ private fun SessionListScreen(
                         }
                     },
                 )
+                if (snapshot.sessionMetadataSource == CacheSource.Cached) {
+                    Text(
+                        "Cached offline data — reconnecting to Hermes",
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.tertiary,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
                 if (searchOpen) {
                     Surface(
                         modifier = Modifier
