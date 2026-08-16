@@ -1746,9 +1746,10 @@ class HermesConnectionViewModel(
         return viewModelScope.launch {
             try {
                 val response = operation.session.respondToApproval(
-                    operation.runtimeSessionId,
-                    choice,
-                    all,
+                    runtimeSessionId = operation.runtimeSessionId,
+                    choice = choice,
+                    all = all,
+                    requestId = operation.requestId,
                 )
                 currentCoroutineContext().ensureActive()
                 val lifecycle = when (response.status) {

@@ -871,6 +871,53 @@ class HermesChatGatewayTest {
     }
 
     @Test
+    fun approvalResponseTargetsTheDisplayedQueuedRequestById() = runTest {
+        val socket = ScriptedSocket()
+        socket.onSend = { frame ->
+            val request = Json.parseToJsonElement(frame).jsonObject
+            socket.offer(
+                """{"jsonrpc":"2.0","id":${request["id"]!!.jsonPrimitive.content},"result":{"resolved":1}}""",
+            )
+        }
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("https://hermes.example"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient("ticket-1"),
+            socketFactory = RecordingSocketFactory(socket),
+            parentScope = backgroundScope,
+        ).connect()
+
+        socket.offer(
+            """{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"runtime-1","payload":{"request_id":"approval-1","choices":["once","deny"],"description":"first"}}}""",
+        )
+        socket.offer(
+            """{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"runtime-1","payload":{"request_id":"approval-2","choices":["session","deny"],"description":"second"}}}""",
+        )
+        val approvals = connection.events.take(2).toList()
+        assertEquals("approval-2", (approvals.last() as HermesChatEvent.ApprovalRequest).requestId)
+
+        val response = connection.respondToApproval(
+            runtimeSessionId = RuntimeSessionId("runtime-1"),
+            requestId = "approval-2",
+            choice = "session",
+            all = false,
+        )
+
+        val request = Json.parseToJsonElement(socket.sentFrames.single()).jsonObject
+        assertEquals(
+            mapOf(
+                "session_id" to "runtime-1",
+                "request_id" to "approval-2",
+                "choice" to "session",
+                "all" to "false",
+            ),
+            request["params"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content },
+        )
+        assertEquals(HermesChatResponseStatus.Ok, response.status)
+        connection.close()
+    }
+
+    @Test
     fun rejectsOversizedRuntimeIdentityBeforeInterruptRequestIsSent() = runTest {
         val socket = ScriptedSocket()
         socket.onSend = { frame ->

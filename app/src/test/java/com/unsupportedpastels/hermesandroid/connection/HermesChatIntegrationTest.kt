@@ -1294,6 +1294,7 @@ class HermesChatIntegrationTest {
             listOf(Triple(session.runtimeSessionId, "allow", true)),
             session.approvalCalls,
         )
+        assertEquals(listOf("approval-1"), session.approvalRequestIds)
         assertEquals(
             RunInteractionLifecycle.Responding,
             viewModel.snapshots.value.chatSessions.getValue(durableId).runState.approval?.lifecycle,
@@ -2741,6 +2742,7 @@ private class ControllerChatSession(
     override val events: Flow<HermesChatEvent> = channel.receiveAsFlow()
     val clarificationCalls = mutableListOf<Pair<String, String>>()
     val approvalCalls = mutableListOf<Triple<RuntimeSessionId, String, Boolean>>()
+    val approvalRequestIds = mutableListOf<String?>()
     val interruptCalls = mutableListOf<RuntimeSessionId>()
     val steerCalls = mutableListOf<Pair<RuntimeSessionId, String>>()
     val usageCalls = mutableListOf<RuntimeSessionId>()
@@ -2792,8 +2794,10 @@ private class ControllerChatSession(
         runtimeSessionId: RuntimeSessionId,
         choice: String,
         all: Boolean,
+        requestId: String?,
     ): HermesChatResponse {
         approvalCalls += Triple(runtimeSessionId, choice, all)
+        approvalRequestIds += requestId
         return if (approvalNonCooperative) {
             withContext(NonCancellable) { approvalResponse.await() }
         } else {
