@@ -4891,29 +4891,10 @@ private fun SessionDetailScreen(
                     var fastMenuOpen by remember(session.id) { mutableStateOf(false) }
                     val fastEnabled = chat.fastMode == "fast"
                     Box {
-                        AssistChip(
+                        IconButton(
                             onClick = { fastMenuOpen = true },
-                            label = { Text(if (fastEnabled) "Fast" else "Normal") },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Outlined.Speed,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp),
-                                    tint = if (fastEnabled) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                )
-                            },
-                            trailingIcon = {
-                                Icon(
-                                    Icons.Outlined.ExpandMore,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            },
                             modifier = Modifier
+                                .size(40.dp)
                                 .semantics {
                                     contentDescription = "Change fast mode"
                                     stateDescription = if (fastEnabled) {
@@ -4922,7 +4903,17 @@ private fun SessionDetailScreen(
                                         "Normal mode enabled"
                                     }
                                 },
-                        )
+                        ) {
+                            Icon(
+                                Icons.Outlined.Speed,
+                                contentDescription = null,
+                                tint = if (fastEnabled) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
                         DropdownMenu(
                             expanded = fastMenuOpen,
                             onDismissRequest = { fastMenuOpen = false },

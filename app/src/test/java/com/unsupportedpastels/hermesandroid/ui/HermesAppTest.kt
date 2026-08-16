@@ -615,7 +615,7 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("gpt-5.6-sol").assertIsDisplayed()
         composeRule.onNodeWithText("medium").assertIsDisplayed()
-        composeRule.onNodeWithText("Fast").assertIsDisplayed()
+        composeRule.onAllNodesWithText("Fast").assertCountEquals(0)
         composeRule.onNodeWithContentDescription("Change fast mode")
             .assertIsDisplayed()
             .assert(
