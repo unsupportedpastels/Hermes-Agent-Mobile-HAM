@@ -1,22 +1,22 @@
 package com.unsupportedpastels.hermesandroid.share
 
-import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
-import com.unsupportedpastels.hermesandroid.MainActivity
 import java.util.concurrent.atomic.AtomicLong
 
-internal const val ACTION_STAGE_SHARE = "com.unsupportedpastels.hermesandroid.action.STAGE_SHARE"
 private const val MAX_FORWARDED_URIS = 20
 private val requestIds = AtomicLong()
 
 internal fun nextShareRequestId(): Long = requestIds.incrementAndGet()
 
-/** Converts an untrusted public share intent into a bounded explicit in-app intent. */
-internal fun buildShareForwardIntent(context: Context, incoming: Intent): Intent? {
+/** Converts an untrusted public share intent into bounded in-app composer metadata. */
+internal fun parseIncomingShare(context: Context, incoming: Intent, requestId: Long): SharePayload? {
     if (incoming.action != Intent.ACTION_SEND && incoming.action != Intent.ACTION_SEND_MULTIPLE) return null
+    // MainActivity is singleTop and may be recreated with its current intent.
+    // Consume the action before parsing so this share cannot be staged twice.
+    incoming.action = null
     val text = incoming.getCharSequenceExtra(Intent.EXTRA_TEXT)
         ?.toString()
         ?.take(SharePayloadPolicy.MAX_TEXT_CHARS)
@@ -24,26 +24,7 @@ internal fun buildShareForwardIntent(context: Context, incoming: Intent): Intent
     val uris = incoming.sharedContentUris()
     if (text.isBlank() && uris.isEmpty()) return null
 
-    return Intent(context, MainActivity::class.java).apply {
-        action = ACTION_STAGE_SHARE
-        addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        if (text.isNotBlank()) putExtra(Intent.EXTRA_TEXT, text)
-        if (uris.isNotEmpty()) {
-            clipData = ClipData.newUri(context.contentResolver, "Shared content", uris.first()).also { clip ->
-                uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
-            }
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            if (incoming.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0) {
-                addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-            }
-        }
-    }
-}
-
-internal fun parseStagedShare(context: Context, intent: Intent, requestId: Long): SharePayload? {
-    if (intent.action != ACTION_STAGE_SHARE) return null
-    val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
-    val candidates = intent.sharedContentUris().mapNotNull { uri ->
+    val candidates = uris.mapNotNull { uri ->
         resolveCandidate(context, uri)
     }
     val result = SharePayloadPolicy.build(text, candidates, requestId)

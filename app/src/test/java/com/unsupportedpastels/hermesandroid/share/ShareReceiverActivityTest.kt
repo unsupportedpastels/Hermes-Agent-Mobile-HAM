@@ -22,8 +22,8 @@ class ShareReceiverActivityTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
 
     @Test
-    fun manifestExportsOnlyTheNarrowShareReceiverForSendActions() {
-        val component = ComponentName(context, ShareReceiverActivity::class.java)
+    fun manifestExportsOnlyTheLauncherForSendActions() {
+        val component = ComponentName(context, MainActivity::class.java)
         @Suppress("DEPRECATION")
         val info = context.packageManager.getActivityInfo(component, 0)
         assertTrue(info.exported)
@@ -33,11 +33,16 @@ class ShareReceiverActivityTest {
             Intent(Intent.ACTION_SEND).setType("text/plain"),
             PackageManager.MATCH_DEFAULT_ONLY,
         )
-        assertTrue(matches.any { it.activityInfo.name == ShareReceiverActivity::class.java.name })
+        assertTrue(matches.any { it.activityInfo.name == MainActivity::class.java.name })
+        assertEquals(
+            listOf(MainActivity::class.java.name),
+            matches.filter { it.activityInfo.packageName == context.packageName }
+                .map { it.activityInfo.name },
+        )
     }
 
     @Test
-    fun forwarderAcceptsOnlyBoundedTextAndDistinctContentUris() {
+    fun parserAcceptsOnlyBoundedTextAndDistinctContentUrisThenConsumesTheIntent() {
         val incoming = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
             type = "*/*"
             putExtra(Intent.EXTRA_TEXT, "Review")
@@ -49,13 +54,13 @@ class ShareReceiverActivityTest {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        val forwarded = requireNotNull(buildShareForwardIntent(context, incoming))
+        val payload = requireNotNull(parseIncomingShare(context, incoming, requestId = 7))
 
-        assertEquals(ComponentName(context, MainActivity::class.java), forwarded.component)
-        assertEquals(ACTION_STAGE_SHARE, forwarded.action)
-        assertEquals("Review", forwarded.getStringExtra(Intent.EXTRA_TEXT))
-        assertEquals(2, forwarded.clipData?.itemCount)
-        assertTrue(forwarded.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
-        assertNull(buildShareForwardIntent(context, Intent(Intent.ACTION_VIEW)))
+        assertEquals(7, payload.requestId)
+        assertEquals("Review", payload.text)
+        assertEquals(2, payload.attachments.size)
+        assertNull(incoming.action)
+        assertNull(parseIncomingShare(context, incoming, requestId = 8))
+        assertNull(parseIncomingShare(context, Intent(Intent.ACTION_VIEW), requestId = 9))
     }
 }

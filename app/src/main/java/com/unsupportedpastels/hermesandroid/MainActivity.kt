@@ -36,7 +36,7 @@ import com.unsupportedpastels.hermesandroid.notifications.SessionNotificationVis
 import com.unsupportedpastels.hermesandroid.notifications.synchronizeVisibleSessionNotifications
 import com.unsupportedpastels.hermesandroid.share.SharePayload
 import com.unsupportedpastels.hermesandroid.share.nextShareRequestId
-import com.unsupportedpastels.hermesandroid.share.parseStagedShare
+import com.unsupportedpastels.hermesandroid.share.parseIncomingShare
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.ui.HermesApp
 import com.unsupportedpastels.hermesandroid.ui.PaneLayoutPreferencesViewModel
@@ -156,7 +156,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun consumeIncomingShare(intent: Intent) {
-        parseStagedShare(this, intent, nextShareRequestId())?.let { incomingShare.value = it }
+        parseIncomingShare(this, intent, nextShareRequestId())?.let { incomingShare.value = it }
     }
 
 

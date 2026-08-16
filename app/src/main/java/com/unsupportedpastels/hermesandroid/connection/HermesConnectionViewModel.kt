@@ -447,9 +447,21 @@ class HermesConnectionViewModel(
         val expectedGeneration = generation
         cacheRepository?.clear(null)
         if (expectedOrigin != null && activeOrigin == expectedOrigin && generation == expectedGeneration) {
-            mutableSnapshots.value = mutableSnapshots.value.copy(
-                durableSessions = emptyList(),
-                sessionMetadataSource = CacheSource.Live,
+            val current = mutableSnapshots.value
+            mutableSnapshots.value = current.copy(
+                durableSessions = if (current.sessionMetadataSource == CacheSource.Cached) {
+                    emptyList()
+                } else {
+                    current.durableSessions
+                },
+                sessionMetadataSource = if (current.sessionMetadataSource == CacheSource.Cached) {
+                    CacheSource.Live
+                } else {
+                    current.sessionMetadataSource
+                },
+                chatSessions = current.chatSessions.filterValues { chat ->
+                    chat.transcriptSource != CacheSource.Cached
+                },
             )
         }
     }
@@ -491,7 +503,15 @@ class HermesConnectionViewModel(
             return
         }
 
-        mutableSnapshots.value = HermesGatewaySnapshot(connectionState = ConnectionState.Connecting)
+        val currentSnapshot = mutableSnapshots.value
+        mutableSnapshots.value = if (currentSnapshot.sessionMetadataSource == CacheSource.Cached) {
+            currentSnapshot.copy(
+                connectionState = ConnectionState.Connecting,
+                connectionError = null,
+            )
+        } else {
+            HermesGatewaySnapshot(connectionState = ConnectionState.Connecting)
+        }
         try {
             val store = tokenStore
             val startup = if (store != null) {
@@ -620,7 +640,7 @@ class HermesConnectionViewModel(
             publishSignInRequired()
         } catch (_: Exception) {
             if (generation != currentGeneration || activeOrigin != serverOrigin) return
-            mutableSnapshots.value = HermesGatewaySnapshot(
+            mutableSnapshots.value = mutableSnapshots.value.copy(
                 connectionState = ConnectionState.Disconnected,
                 connectionError = "Could not reach Hermes Serve",
             )
@@ -1144,7 +1164,9 @@ class HermesConnectionViewModel(
         val requestedProfile = profile.take(64)
         if (previousProfile != requestedProfile) {
             profileGeneration += 1
-            viewModelScope.launch { cacheRepository?.clearTranscriptTails(null) }
+            viewModelScope.launch {
+                cacheRepository?.clearTranscriptTails(CacheScope(origin, previousProfile))
+            }
         }
         return viewModelScope.launch {
             mutableSnapshots.value = mutableSnapshots.value.copy(
