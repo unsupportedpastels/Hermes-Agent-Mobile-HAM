@@ -58,6 +58,7 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -1560,12 +1561,12 @@ private fun ProjectDock(
                     .weight(1f),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
-                // When expanded, reserve the floating collapse control's height at
-                // the top so the first project's trailing actions never sit under
-                // it; when collapsed there is no overlay, so only a hairline.
-                contentPadding = PaddingValues(top = if (expanded) 44.dp else 2.dp, bottom = 2.dp),
+                // The expanded dock's collapse control floats in this top band;
+                // keep the project list itself flush so the first option fills
+                // the space immediately below the status-bar inset.
+                contentPadding = PaddingValues(top = 2.dp, bottom = 2.dp),
             ) {
-                items(projects, key = { it.id.value }) { project ->
+                itemsIndexed(projects, key = { _, project -> project.id.value }) { index, project ->
                     val iconId = projectIcons[project.id] ?: defaultProjectIconId(project)
                     val iconLabel = ProjectIconCatalog.entries.first { it.id == iconId }.label
                     ProjectDockAction(
@@ -1580,9 +1581,14 @@ private fun ProjectDock(
                             {
                                 IconButton(
                                     onClick = { onChooseProjectIcon(project.id) },
-                                    modifier = Modifier.semantics {
+                                    modifier = Modifier
+                                        // The floating collapse control occupies the
+                                        // top-right corner. Keep the first row's edit
+                                        // target clear without moving the row itself.
+                                        .offset(x = if (index == 0) (-44).dp else 0.dp)
+                                        .semantics {
                                         contentDescription = "Choose icon for ${project.label}"
-                                    },
+                                        },
                                 ) {
                                     Icon(
                                         imageVector = Icons.Outlined.Edit,
