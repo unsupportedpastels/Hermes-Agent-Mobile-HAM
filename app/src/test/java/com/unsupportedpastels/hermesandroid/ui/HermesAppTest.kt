@@ -246,6 +246,7 @@ class HermesAppTest {
         composeRule.onNodeWithText("Play").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Filter artifacts: Image").performClick()
         composeRule.onNodeWithContentDescription("Zoom image preview.png").performClick()
+        composeRule.waitForIdle()
         composeRule.onNodeWithText("Close").assertIsDisplayed()
     }
 
