@@ -27,6 +27,11 @@ jobs:
     name: Build signed artifacts and publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Only ever release from main. The push trigger is already main-only, but
+    # workflow_dispatch lets an operator pick any branch — without this guard a
+    # feature branch could be signed, published as a prerelease, and pushed to
+    # Play. Gate the whole job on the ref.
+    if: github.ref == 'refs/heads/main'
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -98,8 +103,14 @@ jobs:
       # the publisher secret exists. Dormant until the one-time Play prerequisites
       # (app created, first release uploaded by hand, service account granted) are
       # done — so routine merges never touch Play and never fail on it.
+      #
+      # The secret is surfaced via env because GitHub forbids the `secrets`
+      # context in an `if:` expression (it rejects the whole workflow as invalid
+      # rather than skipping the step); we test the env value instead.
       - name: Upload AAB to Play internal track
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_play && secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_play && env.HAS_PLAY_SA == 'true' }}
+        env:
+          HAS_PLAY_SA: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
