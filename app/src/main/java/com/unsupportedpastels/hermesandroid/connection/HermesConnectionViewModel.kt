@@ -65,6 +65,15 @@ import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.gateway.OperationalSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.OperationalStatusState
+import com.unsupportedpastels.hermesandroid.voice.ElevenLabsVoice
+import com.unsupportedpastels.hermesandroid.voice.KtorSpeechWebSocketFactory
+import com.unsupportedpastels.hermesandroid.voice.SpeechAudio
+import com.unsupportedpastels.hermesandroid.voice.SpeechStreamConnector
+import com.unsupportedpastels.hermesandroid.voice.SpeechStreamSocket
+import com.unsupportedpastels.hermesandroid.voice.StreamingSpeechTransport
+import com.unsupportedpastels.hermesandroid.voice.TranscriptionResult
+import com.unsupportedpastels.hermesandroid.voice.VoiceCapabilities
+import com.unsupportedpastels.hermesandroid.voice.VoiceServerConfig
 import com.unsupportedpastels.hermesandroid.gateway.lastGoodOrNull
 import com.unsupportedpastels.hermesandroid.gateway.ResumedChatSession
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
@@ -117,8 +126,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 private const val TOKEN_REFRESH_SKEW_SECONDS = 30L
 private const val MAX_CHAT_RECOVERIES_PER_OPERATION = 2
@@ -309,6 +320,7 @@ class HermesConnectionViewModel(
     private val appForegroundStates: StateFlow<Boolean> = MutableStateFlow(true),
     private val notifications: TurnNotificationController = NoOpTurnNotificationController,
     private val sessionFilterRepository: SessionFilterRepository? = null,
+    private val speechStreamConnector: SpeechStreamConnector? = null,
 ) : ViewModel() {
     private val mutableSnapshots = MutableStateFlow(HermesGatewaySnapshot())
     val snapshots: StateFlow<HermesGatewaySnapshot> = mutableSnapshots.asStateFlow()
@@ -391,6 +403,14 @@ class HermesConnectionViewModel(
         MutableStateFlow<Map<DurableSessionId, List<ComposerAttachment>>>(emptyMap())
     val attachments: StateFlow<Map<DurableSessionId, List<ComposerAttachment>>> =
         mutableAttachments.asStateFlow()
+
+    /** Which `/api/audio/…` contracts the connected server advertises (fail-closed). */
+    private val mutableVoiceCapabilities = MutableStateFlow(VoiceCapabilities.NONE)
+    val voiceCapabilities: StateFlow<VoiceCapabilities> = mutableVoiceCapabilities.asStateFlow()
+
+    /** Server-authoritative `voice` config (recording cap, silence, stop phrases). */
+    private val mutableVoiceServerConfig = MutableStateFlow(VoiceServerConfig.DEFAULT)
+    val voiceServerConfig: StateFlow<VoiceServerConfig> = mutableVoiceServerConfig.asStateFlow()
 
     /** Maps local draft IDs to the canonical durable IDs returned by session.create. */
     private val serverDurableIds = mutableMapOf<DurableSessionId, DurableSessionId>()
@@ -882,6 +902,126 @@ class HermesConnectionViewModel(
         }
         return result
     }
+
+    /**
+     * Refresh which `/api/audio/…` contracts the connected server advertises and
+     * its authoritative `voice` config. Fail-closed: any transport error leaves
+     * capabilities at [VoiceCapabilities.NONE], so the mic stays hidden.
+     */
+    suspend fun refreshVoiceCapabilities() {
+        val probe = runCatching {
+            withHermesRestOperation { origin, token ->
+                val profile = mutableSnapshots.value.selectedProfile
+                val caps = client.probeVoiceCapabilities(origin, token.orEmpty(), profile)
+                val config = client.loadVoiceServerConfig(origin, token.orEmpty(), profile)
+                caps to config
+            }
+        }.getOrNull()
+        if (probe == null) {
+            mutableVoiceCapabilities.value = VoiceCapabilities.NONE
+            return
+        }
+        mutableVoiceCapabilities.value = probe.first
+        mutableVoiceServerConfig.value = probe.second
+    }
+
+    /**
+     * Write `voice.auto_tts` through profile-scoped `PUT /api/config` (server
+     * deep-merges). Optimistic local update; rolled back on failure. Returns
+     * whether the server accepted the write.
+     */
+    suspend fun setVoiceAutoTts(enabled: Boolean): Boolean {
+        val previous = mutableVoiceServerConfig.value
+        mutableVoiceServerConfig.value = previous.copy(autoTts = enabled)
+        val accepted = runCatching {
+            withHermesRestOperation { origin, token ->
+                client.updateServerConfig(
+                    origin,
+                    token.orEmpty(),
+                    mutableSnapshots.value.selectedProfile,
+                    buildJsonObject {
+                        put("voice", buildJsonObject { put("auto_tts", enabled) })
+                    },
+                )
+            }
+        }.getOrDefault(false)
+        if (!accepted) mutableVoiceServerConfig.value = previous
+        return accepted
+    }
+
+    /** Write `tts.elevenlabs.voice_id`; optimistic with rollback like auto-TTS. */
+    suspend fun setElevenLabsVoice(voiceId: String): Boolean {
+        val trimmed = voiceId.trim().take(128)
+        if (trimmed.isEmpty()) return false
+        val previous = mutableVoiceServerConfig.value
+        mutableVoiceServerConfig.value = previous.copy(elevenLabsVoiceId = trimmed)
+        val accepted = runCatching {
+            withHermesRestOperation { origin, token ->
+                client.updateServerConfig(
+                    origin,
+                    token.orEmpty(),
+                    mutableSnapshots.value.selectedProfile,
+                    buildJsonObject {
+                        put(
+                            "tts",
+                            buildJsonObject {
+                                put("elevenlabs", buildJsonObject { put("voice_id", trimmed) })
+                            },
+                        )
+                    },
+                )
+            }
+        }.getOrDefault(false)
+        if (!accepted) mutableVoiceServerConfig.value = previous
+        return accepted
+    }
+
+    /** ElevenLabs voices for the settings picker; empty on any failure. */
+    suspend fun loadElevenLabsVoices(): List<ElevenLabsVoice> = runCatching {
+        withHermesRestOperation { origin, token ->
+            client.listElevenLabsVoices(
+                origin,
+                token.orEmpty(),
+                mutableSnapshots.value.selectedProfile,
+            )
+        }
+    }.getOrDefault(emptyList())
+
+    /** Transcribe a dictation recording via the server's audited STT chain. */
+    suspend fun transcribeDictation(dataUrl: String, mimeType: String?): TranscriptionResult =
+        withHermesRestOperation { origin, token ->
+            client.transcribeAudio(
+                origin,
+                token.orEmpty(),
+                mutableSnapshots.value.selectedProfile,
+                dataUrl,
+                mimeType,
+            )
+        }
+
+    /**
+     * Open a fresh-ticket streaming-speech socket to `/api/audio/speak-stream`
+     * for the active origin/profile. Each call mints a new single-use ticket;
+     * the chat socket is untouched. Null when streaming is unavailable.
+     */
+    suspend fun openSpeechStream(): SpeechStreamSocket? {
+        val connector = speechStreamConnector ?: return null
+        if (!mutableVoiceCapabilities.value.canStreamSpeech) return null
+        return withHermesRestOperation { origin, token ->
+            connector.connect(origin, token.orEmpty(), mutableSnapshots.value.selectedProfile)
+        }
+    }
+
+    /** Synthesize [text] to speech via the server's TTS chain (read-aloud REST path). */
+    suspend fun synthesizeSpeech(text: String): SpeechAudio =
+        withHermesRestOperation { origin, token ->
+            client.speakText(
+                origin,
+                token.orEmpty(),
+                mutableSnapshots.value.selectedProfile,
+                text,
+            )
+        }
 
     private fun isCurrentRestOperation(
         serverOrigin: ServerOrigin,
@@ -2321,7 +2461,15 @@ class HermesConnectionViewModel(
         return job
     }
 
-    fun sendMessage(durableSessionId: DurableSessionId, rawText: String): Job {
+    /**
+     * [interrupted] marks a voice barge-in follow-up; it is forwarded to
+     * `prompt.submit` for exactly this one submission.
+     */
+    fun sendMessage(
+        durableSessionId: DurableSessionId,
+        rawText: String,
+        interrupted: Boolean = false,
+    ): Job {
         val text = rawText.trim()
         val hasAttachments = mutableAttachments.value[durableSessionId].orEmpty().isNotEmpty()
         if (text.isEmpty() && !hasAttachments) return viewModelScope.launch { }
@@ -2404,7 +2552,7 @@ class HermesConnectionViewModel(
                 }
                 promptStaged = true
                 yield()
-                session.submitPrompt(runtimeId, submittedText)
+                session.submitPrompt(runtimeId, submittedText, interrupted)
                 // A prompt can launch background processes, so refresh the activity
                 // stack only after the turn is accepted: the pre-submit snapshot
                 // cannot contain processes created by this turn.
@@ -5534,6 +5682,10 @@ class HermesConnectionViewModel(
                 appForegroundStates = HermesAppForeground.states,
                 notifications = AndroidTurnNotificationController(context),
                 sessionFilterRepository = DataStoreSessionFilterRepository(context),
+                speechStreamConnector = StreamingSpeechTransport(
+                    ticketClient = KtorWsTicketClient(httpClient),
+                    socketFactory = KtorSpeechWebSocketFactory(httpClient),
+                ),
             ) as T
         }
     }

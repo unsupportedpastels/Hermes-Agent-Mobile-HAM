@@ -14,7 +14,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.net.toUri
 import com.unsupportedpastels.hermesandroid.app.ComposerAttachment
@@ -23,6 +26,12 @@ import com.unsupportedpastels.hermesandroid.app.ProjectId
 import com.unsupportedpastels.hermesandroid.connection.HermesConnectionViewModel
 import com.unsupportedpastels.hermesandroid.connection.HermesAppForeground
 import com.unsupportedpastels.hermesandroid.connection.HermesWindowFocus
+import com.unsupportedpastels.hermesandroid.voice.ComposerDictation
+import com.unsupportedpastels.hermesandroid.voice.ComposerVoiceConversation
+import com.unsupportedpastels.hermesandroid.voice.MessageReadAloud
+import com.unsupportedpastels.hermesandroid.voice.VoiceCapabilities
+import com.unsupportedpastels.hermesandroid.voice.VoiceServerConfig
+import com.unsupportedpastels.hermesandroid.voice.VoiceSettings
 import com.unsupportedpastels.hermesandroid.connection.ModelPickerState
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
@@ -183,6 +192,8 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private const val VOICE_SCREEN_OFF_PREF = "screen_off_continuation"
+
 @Composable
 internal fun HermesAppHost(
     viewModel: ServerSettingsViewModel,
@@ -245,6 +256,69 @@ internal fun HermesAppHost(
     val persistedProjectDockStateFlow = paneLayoutPreferencesViewModel?.projectDockState
         ?: remember { MutableStateFlow<ProjectDockState?>(null) }
     val persistedProjectDockState by persistedProjectDockStateFlow.collectAsStateWithLifecycle()
+
+    val voiceCapabilitiesFlow = connectionViewModel?.voiceCapabilities
+        ?: remember { MutableStateFlow(VoiceCapabilities.NONE) }
+    val voiceCapabilities by voiceCapabilitiesFlow.collectAsStateWithLifecycle()
+    val voiceServerConfigFlow = connectionViewModel?.voiceServerConfig
+        ?: remember { MutableStateFlow(VoiceServerConfig.DEFAULT) }
+    val voiceServerConfig by voiceServerConfigFlow.collectAsStateWithLifecycle()
+
+    // Re-probe voice contracts whenever the connection or selected profile
+    // changes; refreshVoiceCapabilities is fail-closed so an unauthenticated or
+    // older server simply leaves the mic hidden.
+    LaunchedEffect(connectionViewModel, snapshot.authenticationState, snapshot.selectedProfile) {
+        connectionViewModel?.refreshVoiceCapabilities()
+    }
+
+    val voiceViewModel = connectionViewModel
+    // Remembered so lambda-carrying bundles stay reference-stable across
+    // recompositions — downstream composables key remember/effects on them.
+    val composerDictation = remember(voiceViewModel, voiceCapabilities, voiceServerConfig) {
+        if (voiceCapabilities.canDictateViaServer && voiceViewModel != null) {
+            ComposerDictation(serverConfig = voiceServerConfig) { dataUrl, mimeType ->
+                resultPreservingCancellation { voiceViewModel.transcribeDictation(dataUrl, mimeType) }
+            }
+        } else {
+            null
+        }
+    }
+    val messageReadAloud = remember(voiceViewModel, voiceCapabilities) {
+        if (voiceCapabilities.canReadAloud && voiceViewModel != null) {
+            MessageReadAloud { text ->
+                resultPreservingCancellation { voiceViewModel.synthesizeSpeech(text) }
+            }
+        } else {
+            null
+        }
+    }
+    // Client-side opt-in for screen-off voice continuation; the voice loop
+    // itself and all audio stay in-memory only.
+    val appContext = LocalContext.current.applicationContext
+    val voicePreferences = remember(appContext) {
+        appContext.getSharedPreferences("voice", android.content.Context.MODE_PRIVATE)
+    }
+    var voiceScreenOffContinuation by remember(voicePreferences) {
+        mutableStateOf(voicePreferences.getBoolean(VOICE_SCREEN_OFF_PREF, false))
+    }
+
+    // The hands-free loop needs both STT (transcribe) and TTS (speak) contracts.
+    val composerVoiceConversation = remember(voiceViewModel, voiceCapabilities, voiceServerConfig) {
+        if (voiceCapabilities.canDictateViaServer && voiceCapabilities.canReadAloud && voiceViewModel != null) {
+            ComposerVoiceConversation(
+                serverConfig = voiceServerConfig,
+                transcribe = { dataUrl, mimeType ->
+                    resultPreservingCancellation { voiceViewModel.transcribeDictation(dataUrl, mimeType) }
+                },
+                openStream = { voiceViewModel.openSpeechStream() },
+                synthesize = { text ->
+                    resultPreservingCancellation { voiceViewModel.synthesizeSpeech(text) }
+                },
+            )
+        } else {
+            null
+        }
+    }
 
     HermesApp(
         snapshot = snapshot,
@@ -344,6 +418,33 @@ internal fun HermesAppHost(
                 ?: Result.failure(IllegalStateException("Bulk session deletion unavailable"))
         },
         onSearchTranscripts = { query -> connectionViewModel?.searchTranscripts(query) },
+        dictation = composerDictation,
+        readAloud = messageReadAloud,
+        voiceConversation = composerVoiceConversation,
+        onSendVoiceMessage = { sessionId, text, interrupted ->
+            connectionViewModel?.sendMessage(sessionId, text, interrupted)
+        },
+        voiceSettings = if (voiceCapabilities.audioRoutesPresent && voiceViewModel != null) {
+            VoiceSettings(
+                capabilities = voiceCapabilities,
+                config = voiceServerConfig,
+                setAutoTts = { enabled -> voiceViewModel.setVoiceAutoTts(enabled) },
+                setElevenLabsVoice = { voiceId -> voiceViewModel.setElevenLabsVoice(voiceId) },
+                loadVoices = { voiceViewModel.loadElevenLabsVoices() },
+                screenOffContinuationEnabled = voiceScreenOffContinuation,
+                setScreenOffContinuation = { enabled ->
+                    voiceScreenOffContinuation = enabled
+                    voicePreferences
+                        .edit()
+                        .putBoolean(VOICE_SCREEN_OFF_PREF, enabled)
+                        .apply()
+                },
+            )
+        } else {
+            null
+        },
+        autoSpeakEnabled = voiceCapabilities.canReadAloud && voiceServerConfig.autoTts,
+        voiceScreenOffContinuation = voiceScreenOffContinuation,
         onSendMessage = onSendMessage,
         onReasoningSelected = onReasoningSelected,
         onFastSelected = onFastSelected,
