@@ -5,6 +5,21 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Voice dictation and read-aloud: mic capture is used only while the user
+         is actively recording; audio is sent to the user's Hermes server. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <!-- Opt-in screen-off voice conversation: microphone foreground service with
+         a persistent, stoppable notification, plus a bounded partial wake lock
+         for capture/network continuity. Never started from the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <queries>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="false"
@@ -43,6 +58,10 @@
             android:name=".notifications.HermesTurnNotificationService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".voice.VoiceConversationService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

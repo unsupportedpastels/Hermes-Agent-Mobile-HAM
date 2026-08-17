@@ -14,6 +14,7 @@
 - Supports native Nous OAuth with system-browser PKCE, origin-scoped encrypted credentials, refresh, and reconnect/reconciliation.
 - Adapts cleanly across compact phones, Fold cover screens, unfolded layouts, split screen, freeform windows, and DeX.
 - Preserves a HAM-started live turn when you navigate away; it does not take over or close another client’s runtime.
+- Speaks and listens through your server's audited voice stack: tap/hold dictation into the draft, per-message read-aloud, streaming speech that overlaps generation, a hands-free voice conversation with spoken stop phrases and barge-in, and server-backed voice settings (`voice.auto_tts`, ElevenLabs voice). Voice controls appear only when the connected server exposes the official `/api/audio/…` routes, audio is never persisted on the device, and the microphone permission is requested only when you first use voice.
 
 ## Designed for foldables and tablets
 

@@ -27,6 +27,10 @@ The cache never stores access or refresh tokens, WebSocket tickets, transient ru
 
 Managed artifact downloads remain bounded by the client transport. Explicit sharing writes only the selected artifact to app-private cache and grants read access through a non-exported `FileProvider` content URI. HAM does not execute or render HTML/SVG artifacts in a WebView.
 
+## Voice
+
+Voice features use only released Hermes routes (`/api/audio/transcribe`, `/api/audio/speak`, `/api/audio/speak-stream`, `/api/audio/elevenlabs/voices`) over the same authenticated origin-scoped transport; the streaming speech WebSocket authenticates with a fresh single-use ticket per connection, never a bearer token in a URL. Servers without the audio routes simply hide voice controls. Microphone recordings and synthesized audio are held in memory or short-lived app-cache temporary files, deleted on completion, and are excluded from the offline cache, logs, and error messages (errors are bounded category messages without audio data URLs, prompt text, config bodies, or tickets). The opt-in screen-off voice service is non-exported, uses `foregroundServiceType="microphone"`, always shows a stoppable notification without transcript content, and never starts or restarts from the background.
+
 ## Scope
 
 HAM is a native client for released Hermes interfaces. Reports affecting Hermes Agent itself, a server deployment, or another upstream dependency may need coordinated disclosure with that project or vendor. We will acknowledge valid reports, assess the client impact, and coordinate a fix where appropriate.

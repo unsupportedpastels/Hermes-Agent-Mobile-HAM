@@ -497,6 +497,19 @@ interface HermesChatSession {
         text: String,
     ): PromptSubmission
 
+    /**
+     * Submits a prompt with the voice barge-in annotation. The released gateway
+     * latches `params.interrupted` so the turn's model message carries the
+     * interruption note; it is sent only when true, so older servers see an
+     * unchanged request. Implementations without the live transport just drop
+     * the flag.
+     */
+    suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+        interrupted: Boolean,
+    ): PromptSubmission = submitPrompt(runtimeSessionId, text)
+
     /** Adds bounded steering text to the currently running turn. */
     suspend fun steer(runtimeSessionId: RuntimeSessionId, text: String): SessionSteerResult =
         throw HermesChatMethodNotFoundException("session.steer")
@@ -825,10 +838,17 @@ class HermesChatConnection internal constructor(
     override suspend fun submitPrompt(
         runtimeSessionId: RuntimeSessionId,
         text: String,
+    ): PromptSubmission = submitPrompt(runtimeSessionId, text, interrupted = false)
+
+    override suspend fun submitPrompt(
+        runtimeSessionId: RuntimeSessionId,
+        text: String,
+        interrupted: Boolean,
     ): PromptSubmission {
         val params = buildJsonObject {
             put("session_id", runtimeSessionId.value)
             put("text", text)
+            if (interrupted) put("interrupted", true)
         }
         val result = request("prompt.submit", params)
         val status = result.stringValue("status")

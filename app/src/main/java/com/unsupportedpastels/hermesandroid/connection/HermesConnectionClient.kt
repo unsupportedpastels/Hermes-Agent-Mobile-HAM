@@ -31,8 +31,18 @@ import com.unsupportedpastels.hermesandroid.files.MAX_HOST_FILE_ENTRIES
 import com.unsupportedpastels.hermesandroid.files.validCanonicalHostFilePath
 import com.unsupportedpastels.hermesandroid.files.validHostFileMimeType
 import com.unsupportedpastels.hermesandroid.files.validHostFileName
+import com.unsupportedpastels.hermesandroid.voice.ElevenLabsVoice
+import com.unsupportedpastels.hermesandroid.voice.SpeechAudio
+import com.unsupportedpastels.hermesandroid.voice.decodeAudioDataUrl
+import com.unsupportedpastels.hermesandroid.voice.TranscriptionResult
+import com.unsupportedpastels.hermesandroid.voice.VoiceAudioTimeouts
+import com.unsupportedpastels.hermesandroid.voice.VoiceCapabilities
+import com.unsupportedpastels.hermesandroid.voice.VoiceCapabilityPolicy
+import com.unsupportedpastels.hermesandroid.voice.VoiceServerConfig
+import com.unsupportedpastels.hermesandroid.voice.audioRequestTimeout
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
@@ -274,7 +284,10 @@ private class HermesResponseBodyTooLargeException :
 
 private const val MAX_RESPONSE_BODY_BYTES = 64 * 1024
 private const val MAX_TRANSCRIPT_BODY_BYTES = 1024 * 1024
+// Base64 TTS audio for a finalized message can exceed the 1 MiB transcript cap.
+private const val MAX_SPEECH_RESPONSE_BODY_BYTES = 8 * 1024 * 1024
 private const val MAX_CRON_RESPONSE_BODY_BYTES = 128 * 1024
+private const val MAX_ELEVENLABS_VOICES = 200
 private const val MAX_MODEL_OPTIONS_RESPONSE_BODY_BYTES = 1024 * 1024
 private const val MAX_TRANSCRIPT_REASONING_CHARS = 1024 * 1024
 private val TRANSCRIPT_PAGE_LIMITS = intArrayOf(100, 50, 25, 10, 5, 1)
@@ -288,12 +301,16 @@ private const val MAX_HOST_FILE_READ_BODY_BYTES = 1024 * 1024
 
 internal fun HttpClientConfig<*>.configureHermesHttpClient() {
     followRedirects = false
+    // Installed with no defaults so ordinary chat/REST requests keep their
+    // engine-level timeout behaviour. Long-running `/api/audio/…` calls opt into
+    // extended windows per-request via HttpRequestBuilder.audioRequestTimeout().
+    install(HttpTimeout)
 }
 
 internal suspend fun HttpResponse.readBodyTextBounded(
     maxBytes: Int = MAX_RESPONSE_BODY_BYTES,
 ): String {
-    require(maxBytes in 1..MAX_TRANSCRIPT_BODY_BYTES)
+    require(maxBytes in 1..MAX_SPEECH_RESPONSE_BODY_BYTES)
     val channel = bodyAsChannel()
     return try {
         val source = channel.readRemaining(maxBytes + 1L)
@@ -328,6 +345,74 @@ interface HermesConnectionClient {
         serverOrigin: ServerOrigin,
         profile: String,
     ): OperationalStatus = throw UnsupportedOperationException()
+
+    /**
+     * Fail-closed probe of the `/api/audio/…` route family. Returns
+     * [VoiceCapabilities.NONE] when the routes are absent (older server) or the
+     * probe fails, so every voice affordance hides rather than errors.
+     */
+    suspend fun probeVoiceCapabilities(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): VoiceCapabilities = VoiceCapabilities.NONE
+
+    /**
+     * Read the server-authoritative `voice` config section. Falls back to
+     * [VoiceServerConfig.DEFAULT] on any transport or shape error.
+     */
+    suspend fun loadVoiceServerConfig(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): VoiceServerConfig = VoiceServerConfig.DEFAULT
+
+    /**
+     * Transcribe a recorded utterance via `POST /api/audio/transcribe`. [dataUrl]
+     * must be a `data:<audio-mime>;base64,<...>` URL. A blank transcript means the
+     * server detected silence — a normal result, not an error.
+     */
+    suspend fun transcribeAudio(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        dataUrl: String,
+        mimeType: String?,
+    ): TranscriptionResult = throw UnsupportedOperationException()
+
+    /**
+     * Synthesize [text] to speech via `POST /api/audio/speak`, returning decoded
+     * audio bytes ready for playback. This is the REST fallback for read-aloud;
+     * the streaming path is `/api/audio/speak-stream`.
+     */
+    suspend fun speakText(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        text: String,
+    ): SpeechAudio = throw UnsupportedOperationException()
+
+    /**
+     * Deep-merge [config] into the server's profile-scoped config via
+     * `PUT /api/config` (the released server merges incoming over disk, so only
+     * the changed nested fields are sent). Returns true on success.
+     */
+    suspend fun updateServerConfig(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        config: JsonObject,
+    ): Boolean = throw UnsupportedOperationException()
+
+    /**
+     * List configured ElevenLabs voices for the picker. Empty when the route
+     * reports `available:false` or the response is malformed.
+     */
+    suspend fun listElevenLabsVoices(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): List<ElevenLabsVoice> = emptyList()
 
     suspend fun authenticate(
         serverOrigin: ServerOrigin,
@@ -493,6 +578,154 @@ class HttpHermesConnectionClient(
     private val client: HttpClient,
 ) : HermesConnectionClient {
     private val json = Json { ignoreUnknownKeys = true }
+
+    override suspend fun probeVoiceCapabilities(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): VoiceCapabilities = try {
+        val response = client.get("${serverOrigin.value}/api/audio/elevenlabs/voices") {
+            bearerAuth(accessToken)
+            parameter("profile", profile.take(64))
+        }
+        val body = response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            VoiceCapabilityPolicy.fromVoicesProbe(response.status.value, elevenLabsAvailable = false)
+        } else {
+            val available = (json.parseToJsonElement(body) as? JsonObject)
+                ?.get("available")?.jsonPrimitive?.booleanOrNull ?: false
+            VoiceCapabilityPolicy.fromVoicesProbe(response.status.value, elevenLabsAvailable = available)
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        VoiceCapabilities.NONE
+    }
+
+    override suspend fun loadVoiceServerConfig(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): VoiceServerConfig = try {
+        val response = client.get("${serverOrigin.value}/api/config") {
+            bearerAuth(accessToken)
+            parameter("profile", profile.take(64))
+        }
+        val body = response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            VoiceServerConfig.DEFAULT
+        } else {
+            VoiceServerConfig.fromConfigRoot(json.parseToJsonElement(body) as? JsonObject)
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        VoiceServerConfig.DEFAULT
+    }
+
+    override suspend fun transcribeAudio(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        dataUrl: String,
+        mimeType: String?,
+    ): TranscriptionResult {
+        val response = client.post("${serverOrigin.value}/api/audio/transcribe") {
+            bearerAuth(accessToken)
+            parameter("profile", profile.take(64))
+            contentType(ContentType.Application.Json)
+            setBody(
+                buildJsonObject {
+                    put("data_url", dataUrl)
+                    mimeType?.takeIf { it.isNotBlank() }?.let { put("mime_type", it) }
+                }.toString(),
+            )
+            audioRequestTimeout(VoiceAudioTimeouts.TRANSCRIBE_REQUEST_MILLIS)
+        }
+        val body = response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException(
+                "Hermes transcription returned HTTP ${response.status.value}",
+            )
+        }
+        val root = json.parseToJsonElement(body) as? JsonObject
+            ?: throw HermesConnectionException("Hermes transcription response was invalid")
+        return TranscriptionResult(
+            transcript = root["transcript"]?.jsonPrimitive?.contentOrNull.orEmpty().trim(),
+            provider = root["provider"]?.jsonPrimitive?.contentOrNull,
+        )
+    }
+
+    override suspend fun speakText(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        text: String,
+    ): SpeechAudio {
+        val response = client.post("${serverOrigin.value}/api/audio/speak") {
+            bearerAuth(accessToken)
+            parameter("profile", profile.take(64))
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonObject { put("text", text) }.toString())
+            audioRequestTimeout(VoiceAudioTimeouts.SPEAK_REQUEST_MILLIS)
+        }
+        val body = response.readBodyTextBounded(MAX_SPEECH_RESPONSE_BODY_BYTES)
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException(
+                "Hermes speech synthesis returned HTTP ${response.status.value}",
+            )
+        }
+        val root = json.parseToJsonElement(body) as? JsonObject
+            ?: throw HermesConnectionException("Hermes speech response was invalid")
+        val dataUrl = root["data_url"]?.jsonPrimitive?.contentOrNull
+            ?: throw HermesConnectionException("Hermes speech response had no audio")
+        return decodeAudioDataUrl(dataUrl)
+            ?: throw HermesConnectionException("Hermes speech audio was not decodable")
+    }
+
+    override suspend fun updateServerConfig(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        config: JsonObject,
+    ): Boolean {
+        val response = client.put("${serverOrigin.value}/api/config") {
+            bearerAuth(accessToken)
+            parameter("profile", profile.take(64))
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonObject { put("config", config) }.toString())
+        }
+        if (!response.status.isSuccess()) return false
+        val body = response.readBodyTextBounded()
+        return (json.parseToJsonElement(body) as? JsonObject)
+            ?.get("ok")?.jsonPrimitive?.booleanOrNull == true
+    }
+
+    override suspend fun listElevenLabsVoices(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): List<ElevenLabsVoice> {
+        val response = client.get("${serverOrigin.value}/api/audio/elevenlabs/voices") {
+            bearerAuth(accessToken)
+            parameter("profile", profile.take(64))
+        }
+        if (!response.status.isSuccess()) return emptyList()
+        val body = response.readBodyTextBounded(MAX_TRANSCRIPT_BODY_BYTES)
+        val root = json.parseToJsonElement(body) as? JsonObject ?: return emptyList()
+        if (root["available"]?.jsonPrimitive?.booleanOrNull != true) return emptyList()
+        val voices = root["voices"] as? JsonArray ?: return emptyList()
+        return voices.mapNotNull { element ->
+            val voice = element as? JsonObject ?: return@mapNotNull null
+            val id = voice["voice_id"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf(String::isNotBlank)?.take(128) ?: return@mapNotNull null
+            ElevenLabsVoice(
+                voiceId = id,
+                name = voice["name"]?.jsonPrimitive?.contentOrNull.orEmpty().take(128),
+                label = voice["label"]?.jsonPrimitive?.contentOrNull.orEmpty().take(256),
+            )
+        }.take(MAX_ELEVENLABS_VOICES)
+    }
 
     override suspend fun updateSession(
         serverOrigin: ServerOrigin,
