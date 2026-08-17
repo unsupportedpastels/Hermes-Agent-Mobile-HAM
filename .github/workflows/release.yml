@@ -1,0 +1,109 @@
+name: Release
+
+# Builds a signed APK + AAB from main and publishes the APK as a GitHub
+# prerelease (side-load/testing artifact). The Play Store upload is intentionally
+# manual (workflow_dispatch) and self-guards on the publisher secret, so it stays
+# dormant until the one-time Play prerequisites are complete and never fails a
+# routine merge. See android-release-and-store-publishing skill for the runbook.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish_to_play:
+        description: "Upload the AAB to the Play internal track"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write            # create tags + GitHub Releases
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # never cancel a half-published release
+
+jobs:
+  release:
+    name: Build signed artifacts and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      # Verification gates. Screenshot validation is intentionally omitted here:
+      # android-ci.yml already runs it on this same push, and coupling a flaky
+      # screenshot check to publishing would block releases.
+      - name: Run verification gates
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug
+
+      - name: Decode upload keystore
+        env:
+          UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$UPLOAD_KEYSTORE_BASE64" ]; then
+            echo "::error::UPLOAD_KEYSTORE_BASE64 secret is not set; cannot build a signed release." >&2
+            exit 1
+          fi
+          echo "$UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+
+      - name: Build signed APK + AAB
+        env:
+          UPLOAD_KEYSTORE_PATH: ${{ runner.temp }}/upload.jks
+          UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
+          UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+          UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: ./gradlew assembleRelease bundleRelease
+
+      - name: Verify APK signature
+        run: |
+          APKSIGNER="$(find "$ANDROID_HOME"/build-tools -name apksigner | sort | tail -n1)"
+          "$APKSIGNER" verify --verbose app/build/outputs/apk/release/app-release.apk
+
+      - name: Remove decoded keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/upload.jks"
+
+      - name: Read versionName
+        id: ver
+        run: echo "name=$(grep -oP 'versionName\s*=\s*\"\K[^\"]+' app/build.gradle.kts)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub prerelease (side-load APK)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.name }}-build.${{ github.run_number }}
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload AAB as workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-release-aab
+          path: app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 14
+
+      # Play upload: only on an explicit manual run that opts in, and only when
+      # the publisher secret exists. Dormant until the one-time Play prerequisites
+      # (app created, first release uploaded by hand, service account granted) are
+      # done — so routine merges never touch Play and never fail on it.
+      - name: Upload AAB to Play internal track
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_play && secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.unsupportedpastels.hermesandroid
+          releaseFiles: app/build/outputs/bundle/release/app-release.aab
+          track: internal
+          status: completed

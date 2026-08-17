@@ -12,15 +12,39 @@ android {
         applicationId = "com.unsupportedpastels.hermesandroid"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
+        // versionCode is CI-driven so every Play upload is unique (Play rejects
+        // duplicates). Release CI passes VERSION_CODE=${{ github.run_number }};
+        // local builds fall back to 1.
+        versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // Env-driven upload signing: the release keystore is only materialized in CI
+    // from GitHub Secrets (decoded to a temp path). No keystore path -> the block
+    // stays empty and the release build is produced unsigned, so contributors
+    // without the key aren't broken and no signing material lives in the repo.
+    signingConfigs {
+        create("release") {
+            val storeFilePath = System.getenv("UPLOAD_KEYSTORE_PATH")
+            if (storeFilePath != null) {
+                storeFile = file(storeFilePath)
+                storePassword = System.getenv("UPLOAD_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("UPLOAD_KEY_ALIAS")
+                keyPassword = System.getenv("UPLOAD_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Only attach the release signing config when CI supplied the upload
+            // keystore; otherwise leave the build unsigned (never the debug key).
+            if (System.getenv("UPLOAD_KEYSTORE_PATH") != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {
