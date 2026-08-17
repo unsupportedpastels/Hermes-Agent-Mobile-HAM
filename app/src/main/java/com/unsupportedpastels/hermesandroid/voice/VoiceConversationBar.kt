@@ -5,6 +5,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -425,6 +426,13 @@ fun VoiceConversationToggleButton(
         Icon(
             imageVector = Icons.Outlined.Headphones,
             contentDescription = null,
+            // The Headphones glyph fills 18dp of its 24dp viewport, dead-center,
+            // while the composer's Mic glyph fills 19dp optically centered 0.5dp
+            // high. Render slightly larger and nudged up so the pair reads as the
+            // same size on the same optical baseline.
+            modifier = Modifier
+                .size(26.dp)
+                .offset(y = (-0.5).dp),
             tint = if (active) {
                 MaterialTheme.colorScheme.primary
             } else if (enabled) {

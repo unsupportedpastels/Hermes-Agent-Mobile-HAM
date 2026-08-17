@@ -32,6 +32,8 @@ Host-file contents are downloaded only after an explicit preview, play, save, or
 
 HAM sends data only to the Hermes server origin you configure in the app. HAM does **not** operate a shared hosted backend and does not include analytics, advertising, tracking, or telemetry SDKs.
 
+When you explicitly choose **Voice input**, HAM opens an installed Android speech-recognition activity. That service may capture and process audio under its own privacy policy; HAM receives only the recognized text and does not store the recording.
+
 Your chosen server’s operator and configuration determine how server-side data is processed, retained, logged, and secured. Review that server’s policies before connecting, especially if it is operated by someone else.
 
 ## Android permissions
@@ -42,7 +44,7 @@ Your chosen server’s operator and configuration determine how server-side data
 - **Microphone (`RECORD_AUDIO`)** — voice dictation, voice conversations, and barge-in; requested only when you first start a voice feature, used only while one is active.
 - **Foreground service / microphone and wake lock** — only for the opt-in screen-off voice continuation described above.
 
-HAM does not request location, contacts, camera, or storage-wide file permissions. Attachments use Android’s user-mediated document picker.
+HAM does not request location, contacts, camera, or storage-wide file permissions. Attachments use Android’s user-mediated document picker. Device Voice input uses an installed Android speech service, which may request microphone access in its own interface; server-backed dictation and voice conversation use HAM’s explicitly requested `RECORD_AUDIO` permission described above.
 
 ## Security
 

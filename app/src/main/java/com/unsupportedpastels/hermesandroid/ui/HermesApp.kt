@@ -129,6 +129,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.runtime.Composable
@@ -219,11 +220,9 @@ import com.unsupportedpastels.hermesandroid.artifacts.ArtifactExtractor
 import com.unsupportedpastels.hermesandroid.artifacts.ArtifactOrigin
 import com.unsupportedpastels.hermesandroid.artifacts.ArtifactType
 import com.unsupportedpastels.hermesandroid.voice.AutoSpeakEffect
-import com.unsupportedpastels.hermesandroid.voice.ComposerDictation
 import com.unsupportedpastels.hermesandroid.voice.ComposerVoiceConversation
 import com.unsupportedpastels.hermesandroid.voice.VoiceSettings
 import com.unsupportedpastels.hermesandroid.voice.VoiceSettingsSection
-import com.unsupportedpastels.hermesandroid.voice.DictationMicButton
 import com.unsupportedpastels.hermesandroid.voice.MessageReadAloud
 import com.unsupportedpastels.hermesandroid.voice.MessageSpeakerButton
 import com.unsupportedpastels.hermesandroid.voice.VoiceConversationBar
@@ -231,6 +230,8 @@ import com.unsupportedpastels.hermesandroid.voice.VoiceConversationState
 import com.unsupportedpastels.hermesandroid.voice.VoiceConversationToggleButton
 import com.unsupportedpastels.hermesandroid.voice.rememberReadAloudSession
 import com.unsupportedpastels.hermesandroid.voice.rememberVoiceConversationHost
+import com.unsupportedpastels.hermesandroid.voice.DeviceSpeechRecognizerController
+import com.unsupportedpastels.hermesandroid.voice.DeviceSpeechInputButton
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.connection.ServerCatalog
 import com.unsupportedpastels.hermesandroid.connection.ServerCatalogEntry
@@ -273,6 +274,7 @@ import com.unsupportedpastels.hermesandroid.session.toggleBulkSelection
 import com.unsupportedpastels.hermesandroid.share.SharePayload
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.theme.LocalHermesSemanticColors
+import com.unsupportedpastels.hermesandroid.voice.VoiceInputPolicy
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -383,7 +385,6 @@ fun HermesApp(
         Result.failure(UnsupportedOperationException("Bulk session deletion unavailable"))
     },
     onSearchTranscripts: (String) -> Unit = {},
-    dictation: ComposerDictation? = null,
     readAloud: MessageReadAloud? = null,
     voiceConversation: ComposerVoiceConversation? = null,
     voiceSettings: VoiceSettings? = null,
@@ -872,7 +873,6 @@ fun HermesApp(
                     SessionDetailScreen(
                         session = session,
                         chat = chat,
-                        dictation = dictation,
                         readAloud = readAloud,
                         voiceConversation = voiceConversation,
                         // Voice turns are attachment-free and skip staged host
@@ -882,6 +882,11 @@ fun HermesApp(
                         },
                         autoSpeakEnabled = autoSpeakEnabled,
                         voiceScreenOffContinuation = voiceScreenOffContinuation,
+                        voiceInputScopeKey = VoiceInputPolicy.scopeKey(
+                            serverOrigin = serverOrigin?.value,
+                            profile = snapshot.selectedProfile,
+                            durableSessionId = session.id.value,
+                        ),
                         draft = drafts[draftKey].orEmpty(),
                         onDraftChanged = { updated ->
                             drafts[draftKey] = updated
@@ -4158,12 +4163,12 @@ internal fun isTranscriptAtTrueEnd(
 private fun SessionDetailScreen(
     session: SessionSummary,
     chat: ChatSessionSnapshot,
-    dictation: ComposerDictation? = null,
     readAloud: MessageReadAloud? = null,
     voiceConversation: ComposerVoiceConversation? = null,
     onVoiceSubmit: (String, Boolean) -> Unit = { _, _ -> },
     autoSpeakEnabled: Boolean = false,
     voiceScreenOffContinuation: Boolean = false,
+    voiceInputScopeKey: String,
     draft: String,
     onDraftChanged: (String) -> Unit,
     canSend: Boolean,
@@ -4228,6 +4233,21 @@ private fun SessionDetailScreen(
         workspacePath == null
     var attachmentError by remember(session.id) { mutableStateOf<String?>(null) }
     var pendingSend by remember(session.id) { mutableStateOf<Pair<String, Int>?>(null) }
+    val currentDraft by rememberUpdatedState(draft)
+    val currentOnDraftChanged by rememberUpdatedState(onDraftChanged)
+    val deviceSpeechController = remember(context) {
+        DeviceSpeechRecognizerController(context)
+    }
+    val voiceInputAvailable = remember(context) {
+        DeviceSpeechRecognizerController.isAvailable(context)
+    }
+    LaunchedEffect(voiceInputScopeKey) {
+        deviceSpeechController.cancel()
+    }
+    DisposableEffect(session.id, deviceSpeechController) {
+        onDispose { deviceSpeechController.cancel() }
+    }
+
     val attachmentPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris ->
@@ -4789,23 +4809,30 @@ private fun SessionDetailScreen(
                             }
                         },
                     )
-                    if (dictation != null) {
-                        DictationMicButton(
-                            dictation = dictation,
-                            // One microphone owner: dictation yields while the
-                            // voice conversation loop is running.
+                    // Group the two voice controls tighter than the composer's
+                    // 4.dp spacing: each 40.dp button pads ~8.dp around its glyph,
+                    // so negative spacing pulls the glyphs closer without
+                    // overlapping their touch targets' visual centers.
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy((-10).dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        DeviceSpeechInputButton(
+                            controller = deviceSpeechController,
+                            available = voiceInputAvailable,
                             enabled = composerEnabled && !voiceActive,
-                            onAppendTranscript = { transcript ->
-                                val base = draft.trimEnd()
-                                onDraftChanged(if (base.isEmpty()) transcript else "$base $transcript")
-                            },
+                            currentDraft = currentDraft,
+                            onDraftChanged = currentOnDraftChanged,
+                            onError = { message -> attachmentError = message },
+                            modifier = Modifier.size(40.dp),
                         )
-                    }
-                    if (voiceHost != null) {
-                        VoiceConversationToggleButton(
-                            host = voiceHost,
-                            enabled = canSend && composerEnabled,
-                        )
+                        if (voiceHost != null) {
+                            VoiceConversationToggleButton(
+                                host = voiceHost,
+                                enabled = canSend && composerEnabled,
+                                modifier = Modifier.size(40.dp),
+                            )
+                        }
                     }
                     if (showStop) {
                         if (steeringAvailable) {
@@ -4853,6 +4880,7 @@ private fun SessionDetailScreen(
                     } else {
                         FilledIconButton(
                             onClick = {
+                                deviceSpeechController.finish()
                                 val message = draft.trim()
                                 val reasoningEffort = reasoningEffortCommand(message)
                                 keyboardController?.hide()

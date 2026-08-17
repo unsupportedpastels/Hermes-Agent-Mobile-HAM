@@ -26,7 +26,6 @@ import com.unsupportedpastels.hermesandroid.app.ProjectId
 import com.unsupportedpastels.hermesandroid.connection.HermesConnectionViewModel
 import com.unsupportedpastels.hermesandroid.connection.HermesAppForeground
 import com.unsupportedpastels.hermesandroid.connection.HermesWindowFocus
-import com.unsupportedpastels.hermesandroid.voice.ComposerDictation
 import com.unsupportedpastels.hermesandroid.voice.ComposerVoiceConversation
 import com.unsupportedpastels.hermesandroid.voice.MessageReadAloud
 import com.unsupportedpastels.hermesandroid.voice.VoiceCapabilities
@@ -272,17 +271,6 @@ internal fun HermesAppHost(
     }
 
     val voiceViewModel = connectionViewModel
-    // Remembered so lambda-carrying bundles stay reference-stable across
-    // recompositions — downstream composables key remember/effects on them.
-    val composerDictation = remember(voiceViewModel, voiceCapabilities, voiceServerConfig) {
-        if (voiceCapabilities.canDictateViaServer && voiceViewModel != null) {
-            ComposerDictation(serverConfig = voiceServerConfig) { dataUrl, mimeType ->
-                resultPreservingCancellation { voiceViewModel.transcribeDictation(dataUrl, mimeType) }
-            }
-        } else {
-            null
-        }
-    }
     val messageReadAloud = remember(voiceViewModel, voiceCapabilities) {
         if (voiceCapabilities.canReadAloud && voiceViewModel != null) {
             MessageReadAloud { text ->
@@ -418,7 +406,6 @@ internal fun HermesAppHost(
                 ?: Result.failure(IllegalStateException("Bulk session deletion unavailable"))
         },
         onSearchTranscripts = { query -> connectionViewModel?.searchTranscripts(query) },
-        dictation = composerDictation,
         readAloud = messageReadAloud,
         voiceConversation = composerVoiceConversation,
         onSendVoiceMessage = { sessionId, text, interrupted ->
