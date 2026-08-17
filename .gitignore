@@ -3,9 +3,13 @@
 .kotlin/
 .env
 *.jks
+*.jks.b64
 *.keystore
 keystore.properties
 secrets.properties
+# Play publisher service-account key (scoped, never a bare *.json).
+app-play-publisher*.json
+play-service-account*.json
 /local.properties
 /.idea/caches
 /.idea/libraries

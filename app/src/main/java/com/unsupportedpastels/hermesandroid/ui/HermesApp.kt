@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
@@ -56,11 +57,15 @@ import androidx.compose.foundation.layout.IntrinsicSize
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -1523,23 +1528,27 @@ private fun ProjectDock(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = if (expanded) 12.dp else 10.dp, vertical = 12.dp),
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (expanded) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    ProjectDockControl(
-                        glyph = "‹",
-                        description = "Collapse project dock",
-                        onClick = onCollapse,
-                    )
-                }
-            } else {
+            // Fill the status-bar inset with the dock's own surface so app
+            // content reads as starting *under* the system bar rather than
+            // bleeding up behind a transparent status bar.
+            Spacer(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsTopHeight(WindowInsets.statusBars),
+            )
+            Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = if (expanded) 12.dp else 10.dp)
+                    .padding(top = 4.dp, bottom = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+            if (!expanded) {
                 ProjectDockControl(
                     glyph = "›",
                     description = "Expand project dock",
@@ -1552,9 +1561,12 @@ private fun ProjectDock(
                     .weight(1f),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 2.dp),
+                // The expanded dock's collapse control floats in this top band;
+                // keep the project list itself flush so the first option fills
+                // the space immediately below the status-bar inset.
+                contentPadding = PaddingValues(top = 2.dp, bottom = 2.dp),
             ) {
-                items(projects, key = { it.id.value }) { project ->
+                itemsIndexed(projects, key = { _, project -> project.id.value }) { index, project ->
                     val iconId = projectIcons[project.id] ?: defaultProjectIconId(project)
                     val iconLabel = ProjectIconCatalog.entries.first { it.id == iconId }.label
                     ProjectDockAction(
@@ -1569,9 +1581,14 @@ private fun ProjectDock(
                             {
                                 IconButton(
                                     onClick = { onChooseProjectIcon(project.id) },
-                                    modifier = Modifier.semantics {
+                                    modifier = Modifier
+                                        // The floating collapse control occupies the
+                                        // top-right corner. Keep the first row's edit
+                                        // target clear without moving the row itself.
+                                        .offset(x = if (index == 0) (-44).dp else 0.dp)
+                                        .semantics {
                                         contentDescription = "Choose icon for ${project.label}"
-                                    },
+                                        },
                                 ) {
                                     Icon(
                                         imageVector = Icons.Outlined.Edit,
@@ -1626,6 +1643,21 @@ private fun ProjectDock(
                     description = "Hide project dock",
                     onClick = onHide,
                 )
+            }
+            }
+            // Floating collapse control: overlays the top-right corner so the
+            // nav list can start flush at the top instead of reserving a full
+            // header row (which left a large empty band on the left).
+            if (expanded) {
+                ProjectDockControl(
+                    glyph = "‹",
+                    description = "Collapse project dock",
+                    onClick = onCollapse,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(end = 6.dp, top = 2.dp),
+                )
+            }
             }
         }
     }
@@ -1859,12 +1891,13 @@ private fun ProjectDockControl(
     glyph: String,
     description: String,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Surface(
         onClick = onClick,
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainer,
-        modifier = Modifier
+        modifier = modifier
             .size(48.dp)
             .semantics { contentDescription = description },
     ) {
