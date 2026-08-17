@@ -1483,9 +1483,14 @@ class HermesConnectionViewModel(
                 }
                 currentCoroutineContext().ensureActive()
                 if (!isCurrentProjectLoad(serverOrigin, originGeneration)) return@launch
-                if (durableSessions != mutableSnapshots.value.durableSessions) {
+                val mergedHomeSessions = mergeServerSessionsPreservingDrafts(
+                    serverSessions = durableSessions,
+                    currentSessions = mutableSnapshots.value.durableSessions,
+                    pendingDrafts = pendingDraftSessions,
+                )
+                if (mergedHomeSessions != mutableSnapshots.value.durableSessions) {
                     mutableSnapshots.value = mutableSnapshots.value.copy(
-                        durableSessions = durableSessions,
+                        durableSessions = mergedHomeSessions,
                     )
                 }
                 startProjectTreeLoad(
@@ -1663,7 +1668,13 @@ class HermesConnectionViewModel(
                     mutableSnapshots.value = currentSnapshot.copy(
                         profiles = profiles,
                         selectedProfile = selected,
-                        durableSessions = profileSessions ?: currentSnapshot.durableSessions,
+                        durableSessions = profileSessions?.let { sessions ->
+                            mergeServerSessionsPreservingDrafts(
+                                serverSessions = sessions,
+                                currentSessions = currentSnapshot.durableSessions,
+                                pendingDrafts = pendingDraftSessions,
+                            )
+                        } ?: currentSnapshot.durableSessions,
                         defaultModelOptions = options,
                         currentModelInfo = currentInfo?.takeIf { it.profile == selected },
                         profileReasoningEffort = profileReasoningEffort,
@@ -1725,7 +1736,13 @@ class HermesConnectionViewModel(
             ) {
                 lastDurableSessionsFetchKey = key
                 activeSessionArchivedFilter = archivedOnly
-                mutableSnapshots.value = mutableSnapshots.value.copy(durableSessions = sessions)
+                mutableSnapshots.value = mutableSnapshots.value.copy(
+                    durableSessions = mergeServerSessionsPreservingDrafts(
+                        serverSessions = sessions,
+                        currentSessions = mutableSnapshots.value.durableSessions,
+                        pendingDrafts = pendingDraftSessions,
+                    ),
+                )
             }
         }
     }
@@ -1926,7 +1943,13 @@ class HermesConnectionViewModel(
         check(generation == expectedGeneration && activeOrigin == origin &&
             mutableSnapshots.value.selectedProfile == profile
         ) { "Server scope changed while refreshing sessions" }
-        mutableSnapshots.value = mutableSnapshots.value.copy(durableSessions = durableSessions)
+        mutableSnapshots.value = mutableSnapshots.value.copy(
+            durableSessions = mergeServerSessionsPreservingDrafts(
+                serverSessions = durableSessions,
+                currentSessions = mutableSnapshots.value.durableSessions,
+                pendingDrafts = pendingDraftSessions,
+            ),
+        )
         startProjectTreeLoad(
             serverOrigin = origin,
             originGeneration = expectedGeneration,
