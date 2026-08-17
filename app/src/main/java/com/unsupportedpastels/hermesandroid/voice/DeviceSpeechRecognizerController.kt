@@ -204,6 +204,6 @@ class DeviceSpeechRecognizerController(
         private const val RESTART_DELAY_MILLIS = 150L
 
         fun isAvailable(context: Context): Boolean =
-            SpeechRecognizer.isRecognitionAvailable(context)
+            runCatching { SpeechRecognizer.isRecognitionAvailable(context) }.getOrDefault(false)
     }
 }
