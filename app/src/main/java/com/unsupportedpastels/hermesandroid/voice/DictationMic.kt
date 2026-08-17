@@ -184,7 +184,11 @@ fun DictationMicButton(
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        onDispose {
+            recorder.cancel()
+            controller.cancel()
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     val level = (state as? DictationState.Recording)?.level ?: 0f

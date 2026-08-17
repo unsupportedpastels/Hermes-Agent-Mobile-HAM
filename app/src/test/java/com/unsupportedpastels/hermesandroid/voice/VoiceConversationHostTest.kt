@@ -3,6 +3,7 @@ package com.unsupportedpastels.hermesandroid.voice
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
 import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +50,8 @@ private class Harness(
         DictationRecording("data:audio/mp4;base64,QQ==", "audio/mp4")
     var stopTurnCalls = 0
     var listenCalls = 0
+    var listenCancellationCount = 0
+    var bargeCancellationCount = 0
     var playbackStops = 0
     var holdPlayback = false
     var playbackGate = CompletableDeferred<Unit>()
@@ -57,7 +60,12 @@ private class Harness(
     fun engines(turnStartTimeoutMillis: Long = 10_000L) = VoiceConversationEngines(
         listen = { _ ->
             listenCalls++
-            listenGate.await()
+            try {
+                listenGate.await()
+            } catch (cancelled: CancellationException) {
+                listenCancellationCount++
+                throw cancelled
+            }
         },
         transcribe = { _, _ -> transcribeResult },
         submit = { text, interrupted ->
@@ -85,9 +93,14 @@ private class Harness(
         },
         monitorBargeIn = if (bargeEnabled) {
             { onTrigger ->
-                bargeTrigger.receive()
-                onTrigger()
-                bargeCapture
+                try {
+                    bargeTrigger.receive()
+                    onTrigger()
+                    bargeCapture
+                } catch (cancelled: CancellationException) {
+                    bargeCancellationCount++
+                    throw cancelled
+                }
             }
         } else {
             null
@@ -387,6 +400,34 @@ class VoiceConversationHostTest {
         h.controller.setMuted(false)
         advanceUntilIdle()
         assertTrue(h.listenCalls > callsWhileListening)
+        host.end()
+    }
+
+    @Test
+    fun mutingCancelsActiveListeningCapture() = runTest {
+        val h = Harness()
+        val host = h.startHost(this)
+
+        h.controller.setMuted(true)
+        advanceUntilIdle()
+
+        assertEquals(1, h.listenCancellationCount)
+        host.end()
+    }
+
+    @Test
+    fun mutingCancelsActiveBargeMonitor() = runTest {
+        val h = Harness()
+        h.bargeEnabled = true
+        val host = h.startHost(this)
+        h.onSubmit = { h.replies.value = view(turnRunning = true, messageCount = 2) }
+        h.utterance()
+        advanceUntilIdle()
+
+        h.controller.setMuted(true)
+        advanceUntilIdle()
+
+        assertEquals(1, h.bargeCancellationCount)
         host.end()
     }
 

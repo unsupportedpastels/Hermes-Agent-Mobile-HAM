@@ -7,11 +7,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.selects.select
 
 /**
  * The slice of a chat snapshot the voice loop watches: whether the turn is
@@ -159,6 +161,32 @@ class VoiceConversationHost(
 
     val isActive: Boolean get() = controller.isActive
 
+    /**
+     * Run one microphone operation until it completes or mute is enabled. The
+     * child job is deliberately separate from the loop job so muting cancels
+     * recorder polling without ending the conversation itself.
+     */
+    private suspend fun captureUntilMuted(
+        operation: suspend () -> DictationRecording?,
+    ): DictationRecording? = coroutineScope {
+        val capture = async(start = CoroutineStart.UNDISPATCHED) { operation() }
+        val muted = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.muted.first { it }
+        }
+        try {
+            select {
+                capture.onAwait { it }
+                muted.onAwait {
+                    capture.cancel()
+                    null
+                }
+            }
+        } finally {
+            muted.cancel()
+            capture.cancel()
+        }
+    }
+
     fun start() {
         if (!controller.start()) return
         engines.startAudioSession()
@@ -198,7 +226,9 @@ class VoiceConversationHost(
         controller.muted.first { !it }
 
         engines.log("listen:start")
-        val recording = engines.listen { level -> controller.onListeningLevel(level) }
+        val recording = captureUntilMuted {
+            engines.listen { level -> controller.onListeningLevel(level) }
+        }
         engines.log("listen:done captured=${recording != null}")
         if (!controller.onUtteranceCaptured()) return
         if (recording == null) {
@@ -276,23 +306,36 @@ class VoiceConversationHost(
     private fun startBargeMonitor(): Job? {
         val monitor = engines.monitorBargeIn ?: return null
         val job = scope.launch {
-            val recording = monitor {
-                barged = true
-                engines.log("barge:candidate")
-                if (controller.state.value !is VoiceConversationState.Speaking) {
-                    // There is no audible reply to classify while Thinking,
-                    // so preserve the responsive interruption path.
-                    stopForBarge()
-                    controller.onBargeIn()
-                } else {
-                    // Stop only local audio immediately so a real user can
-                    // take the floor. Do not cancel Hermes until STT and echo
-                    // comparison complete; otherwise TTS cancels itself.
-                    stopPlaybackForBarge()
-                    engines.log("barge:playback-candidate")
+            val recording = captureUntilMuted {
+                monitor {
+                    barged = true
+                    engines.log("barge:candidate")
+                    if (controller.state.value !is VoiceConversationState.Speaking) {
+                        // There is no audible reply to classify while Thinking,
+                        // so preserve the responsive interruption path.
+                        stopForBarge()
+                        controller.onBargeIn()
+                    } else {
+                        // Stop only local audio immediately so a real user can
+                        // take the floor. Do not cancel Hermes until STT and echo
+                        // comparison complete; otherwise TTS cancels itself.
+                        stopPlaybackForBarge()
+                        engines.log("barge:playback-candidate")
+                    }
                 }
             }
-            if (barged) bargedCapture = recording
+            if (barged && !controller.muted.value) {
+                bargedCapture = recording
+            } else if (controller.muted.value) {
+                // Mute can race with the detector after it has stopped local
+                // playback. Discard that partial barge and re-arm once unmuted.
+                val playbackWasStopped = bargePlaybackStopIssued
+                barged = false
+                bargedCapture = null
+                bargeStopIssued = false
+                bargePlaybackStopIssued = false
+                if (playbackWasStopped) controller.onBargeIn()
+            }
         }
         bargeMonitorJob = job
         return job
@@ -355,6 +398,11 @@ class VoiceConversationHost(
         bargePlaybackStopIssued = true
         activeRun?.let { run -> scope.launch { run.stop() } }
         engines.stopPlayback()
+    }
+
+    /** Mute only the microphone capture; the loop remains explicitly active. */
+    fun setMuted(muted: Boolean) {
+        controller.setMuted(muted)
     }
 
     private suspend fun speakTurn(promptText: String, interrupted: Boolean = false) {

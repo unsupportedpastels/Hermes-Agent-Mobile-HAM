@@ -1,8 +1,10 @@
 package com.unsupportedpastels.hermesandroid.voice
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoiceInputPolicyTest {
@@ -45,5 +47,18 @@ class VoiceInputPolicyTest {
         assertEquals("existing new words", VoiceInputPolicy.mergeDraft("existing", "new words"))
         assertEquals("existing\nnew words", VoiceInputPolicy.mergeDraft("existing\n", "new words"))
         assertEquals("existing", VoiceInputPolicy.mergeDraft("existing", "   "))
+    }
+
+    @Test
+    fun serverDisabledSttHidesServerVoiceConversation() {
+        val capabilities = VoiceCapabilities(audioRoutesPresent = true, elevenLabsVoicesAvailable = false)
+
+        assertTrue(VoiceInputPolicy.canUseServerConversation(capabilities, VoiceServerConfig.DEFAULT))
+        assertFalse(
+            VoiceInputPolicy.canUseServerConversation(
+                capabilities,
+                VoiceServerConfig.DEFAULT.copy(sttEnabled = false),
+            ),
+        )
     }
 }

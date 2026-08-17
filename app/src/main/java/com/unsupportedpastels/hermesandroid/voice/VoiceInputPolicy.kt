@@ -3,6 +3,13 @@ package com.unsupportedpastels.hermesandroid.voice
 internal object VoiceInputPolicy {
     const val MAX_RESULT_CHARS = 4_096
 
+    fun canUseServerConversation(
+        capabilities: VoiceCapabilities,
+        config: VoiceServerConfig,
+    ): Boolean = capabilities.canDictateViaServer &&
+        capabilities.canReadAloud &&
+        config.sttEnabled
+
     fun scopeKey(
         serverOrigin: String?,
         profile: String,

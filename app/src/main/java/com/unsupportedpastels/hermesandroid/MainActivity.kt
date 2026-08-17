@@ -29,12 +29,14 @@ import com.unsupportedpastels.hermesandroid.connection.HermesWindowFocus
 import com.unsupportedpastels.hermesandroid.voice.ComposerVoiceConversation
 import com.unsupportedpastels.hermesandroid.voice.MessageReadAloud
 import com.unsupportedpastels.hermesandroid.voice.VoiceCapabilities
+import com.unsupportedpastels.hermesandroid.voice.VoiceInputPolicy
 import com.unsupportedpastels.hermesandroid.voice.VoiceServerConfig
 import com.unsupportedpastels.hermesandroid.voice.VoiceSettings
 import com.unsupportedpastels.hermesandroid.connection.ModelPickerState
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsViewModel
+import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import com.unsupportedpastels.hermesandroid.connection.launchBrowserAndAwaitReturn
 import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
@@ -193,6 +195,9 @@ class MainActivity : ComponentActivity() {
 
 private const val VOICE_SCREEN_OFF_PREF = "screen_off_continuation"
 
+internal fun voiceScreenOffPreferenceKey(origin: ServerOrigin?): String =
+    "$VOICE_SCREEN_OFF_PREF:${origin?.value ?: "unconfigured"}"
+
 @Composable
 internal fun HermesAppHost(
     viewModel: ServerSettingsViewModel,
@@ -286,13 +291,18 @@ internal fun HermesAppHost(
     val voicePreferences = remember(appContext) {
         appContext.getSharedPreferences("voice", android.content.Context.MODE_PRIVATE)
     }
-    var voiceScreenOffContinuation by remember(voicePreferences) {
-        mutableStateOf(voicePreferences.getBoolean(VOICE_SCREEN_OFF_PREF, false))
+    val screenOffConsentKey = voiceScreenOffPreferenceKey(currentServerOrigin)
+    var voiceScreenOffContinuation by remember(voicePreferences, screenOffConsentKey) {
+        mutableStateOf(voicePreferences.getBoolean(screenOffConsentKey, false))
     }
 
     // The hands-free loop needs both STT (transcribe) and TTS (speak) contracts.
     val composerVoiceConversation = remember(voiceViewModel, voiceCapabilities, voiceServerConfig) {
-        if (voiceCapabilities.canDictateViaServer && voiceCapabilities.canReadAloud && voiceViewModel != null) {
+        if (VoiceInputPolicy.canUseServerConversation(
+                voiceCapabilities,
+                voiceServerConfig,
+            ) && voiceViewModel != null
+        ) {
             ComposerVoiceConversation(
                 serverConfig = voiceServerConfig,
                 transcribe = { dataUrl, mimeType ->
@@ -423,7 +433,7 @@ internal fun HermesAppHost(
                     voiceScreenOffContinuation = enabled
                     voicePreferences
                         .edit()
-                        .putBoolean(VOICE_SCREEN_OFF_PREF, enabled)
+                        .putBoolean(screenOffConsentKey, enabled)
                         .apply()
                 },
             )

@@ -523,7 +523,7 @@ fun VoiceConversationBar(
                 )
             }
             IconButton(
-                onClick = { host.controller.setMuted(!muted) },
+                onClick = { host.setMuted(!muted) },
                 modifier = Modifier
                     .size(36.dp)
                     .scale(0.9f)

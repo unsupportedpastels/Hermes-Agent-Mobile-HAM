@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -46,6 +47,18 @@ class ReadAloudSession(
     private val engine: SpeechEngine,
     private val synthesize: suspend (String) -> Result<SpeechAudio>,
 ) {
+    private var requestGeneration = 0L
+    private var synthesisJob: Job? = null
+
+    private fun invalidateRequest() {
+        requestGeneration++
+        synthesisJob?.cancel()
+        synthesisJob = null
+    }
+
+    private fun isCurrent(messageKey: String, generation: Long): Boolean =
+        requestGeneration == generation && controller.isActiveFor(messageKey)
+
     /** Start speaking [text] for [messageKey], or stop if it is already the active one. */
     fun toggle(messageKey: String, text: String) {
         if (controller.isActiveFor(messageKey)) {
@@ -54,24 +67,45 @@ class ReadAloudSession(
         }
         val speechText = sanitizeTextForSpeech(text)
         if (speechText.isBlank()) return
+        invalidateRequest()
         engine.stop()
         controller.beginPreparing(messageKey)
-        scope.launch {
-            synthesize(speechText)
-                .onSuccess { audio ->
-                    if (!controller.isActiveFor(messageKey)) return@onSuccess
-                    engine.play(
-                        audio = audio,
-                        onStarted = { controller.markPlaying(messageKey) },
-                        onFinished = { controller.complete() },
-                        onError = { controller.fail(messageKey, SpeechPlaybackFailure.Playback) },
-                    )
-                }
-                .onFailure { controller.fail(messageKey, SpeechPlaybackFailure.Synthesis) }
+        val generation = requestGeneration
+        synthesisJob = scope.launch {
+            try {
+                synthesize(speechText)
+                    .onSuccess { audio ->
+                        if (!isCurrent(messageKey, generation)) return@onSuccess
+                        engine.play(
+                            audio = audio,
+                            onStarted = {
+                                if (isCurrent(messageKey, generation)) {
+                                    controller.markPlaying(messageKey)
+                                }
+                            },
+                            onFinished = {
+                                if (isCurrent(messageKey, generation)) controller.complete()
+                            },
+                            onError = {
+                                if (isCurrent(messageKey, generation)) {
+                                    controller.fail(messageKey, SpeechPlaybackFailure.Playback)
+                                }
+                            },
+                        )
+                    }
+                    .onFailure {
+                        if (isCurrent(messageKey, generation)) {
+                            controller.fail(messageKey, SpeechPlaybackFailure.Synthesis)
+                        }
+                    }
+            } finally {
+                if (requestGeneration == generation) synthesisJob = null
+            }
         }
     }
 
     fun stop() {
+        invalidateRequest()
         engine.stop()
         controller.stop()
     }

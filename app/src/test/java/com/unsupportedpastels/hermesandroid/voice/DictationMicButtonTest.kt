@@ -7,8 +7,12 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -95,5 +99,31 @@ class DictationMicButtonTest {
         composeRule.waitUntil(timeoutMillis = 5_000) { appended != null }
 
         assertEquals("hello world", appended)
+    }
+
+    @Test
+    fun leavingCompositionCancelsRecorder() {
+        grantMic()
+        var visible by mutableStateOf(true)
+        var recorder: FakeRecorder? = null
+        composeRule.setContent {
+            if (visible) {
+                DictationMicButton(
+                    dictation = ComposerDictation(VoiceServerConfig.DEFAULT) { _, _ ->
+                        Result.success(TranscriptionResult("hello", "whisper"))
+                    },
+                    enabled = true,
+                    onAppendTranscript = {},
+                    recorderFactory = { FakeRecorder().also { recorder = it } },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Dictate message").performClick()
+        composeRule.waitForIdle()
+        composeRule.runOnIdle { visible = false }
+        composeRule.waitForIdle()
+
+        assertTrue(recorder?.cancelled == true)
     }
 }
