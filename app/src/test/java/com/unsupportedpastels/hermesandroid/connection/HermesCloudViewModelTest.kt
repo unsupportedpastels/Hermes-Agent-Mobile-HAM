@@ -55,6 +55,7 @@ class HermesCloudViewModelTest {
         var discoverError: Throwable? = null
         var refreshError: Throwable? = null
         var refreshCalls = 0
+        val refreshTokensSeen = mutableListOf<String>()
         var lastOrg: String? = null
         var discoverCalls = 0
 
@@ -62,8 +63,14 @@ class HermesCloudViewModelTest {
         override suspend fun awaitDeviceToken(portalOrigin: ServerOrigin, deviceCode: PortalDeviceCode) = tokenToReturn
         override suspend fun refreshToken(portalOrigin: ServerOrigin, refreshToken: String): PortalTokenSet {
             refreshCalls += 1
+            refreshTokensSeen += refreshToken
             refreshError?.let { throw it }
-            return tokenToReturn.copy(accessToken = "refreshed-at", refreshToken = "rotated-rt")
+            // Rotate uniquely each call so a caller reusing a stale refresh token
+            // is detectable (as the real reuse-detecting Portal would reject it).
+            return tokenToReturn.copy(
+                accessToken = "refreshed-at-$refreshCalls",
+                refreshToken = "rotated-rt-$refreshCalls",
+            )
         }
         override suspend fun discoverAgents(
             portalOrigin: ServerOrigin,
@@ -125,8 +132,8 @@ class HermesCloudViewModelTest {
         dispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(1, client.refreshCalls)
-        assertEquals("refreshed-at", store.token?.accessToken)
-        assertEquals("rotated-rt", store.token?.refreshToken)
+        assertEquals("refreshed-at-1", store.token?.accessToken)
+        assertEquals("rotated-rt-1", store.token?.refreshToken)
         assertTrue(vm.state.value is CloudConnectState.Agents)
     }
 
@@ -145,6 +152,34 @@ class HermesCloudViewModelTest {
 
         assertEquals(1, client.refreshCalls)
         assertTrue(vm.state.value is CloudConnectState.Agents)
+    }
+
+    @Test
+    fun proactiveRefreshThen401FallbackUsesRotatedTokenNotConsumedOne() = runTest(dispatcher) {
+        // Near-expiry token → proactive refresh rotates rt → discovery still 401s
+        // → the fallback refresh MUST use the rotated token, not the original
+        // (which the Portal's reuse detection would reject, wrongly signing out).
+        val client = FakeClient().apply {
+            discoverError = HermesCloudSignInRequiredException("expired")
+            discoverResult = CloudDiscoverResult.Agents(
+                listOf(agent("a1", "https://x.agents.nousresearch.com")),
+                null,
+            )
+        }
+        // expiresAt=500 < now(1000)+skew → triggers the proactive refresh branch.
+        val store = FakeStore(PortalTokenSet("at", "original-rt", "Bearer", "inference:invoke", 500L))
+        val vm = viewModel(client, store, now = 1000L)
+
+        vm.resume()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(2, client.refreshCalls)
+        // First refresh sees the original; the fallback must use the rotated one.
+        assertEquals("original-rt", client.refreshTokensSeen[0])
+        assertEquals("rotated-rt-1", client.refreshTokensSeen[1])
+        assertTrue(vm.state.value is CloudConnectState.Agents)
+        // The latest rotated token is what stays persisted — never cleared.
+        assertEquals("rotated-rt-2", store.token?.refreshToken)
     }
 
     @Test

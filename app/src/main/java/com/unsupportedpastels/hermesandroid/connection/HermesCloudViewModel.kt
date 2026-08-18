@@ -155,18 +155,20 @@ class HermesCloudViewModel(
     private suspend fun discoverWithValidToken(stored: PortalTokenSet) {
         // Refresh proactively when the access token is expired/near-expiry so
         // discovery does not 401 into a re-login the refresh token could heal.
-        val token = if (stored.expiresAt in 1 until (nowSeconds() + EXPIRY_SKEW_SECONDS)) {
-            val refreshed = client.refreshToken(portalOrigin, stored.refreshToken)
-            tokenStore.save(portalOrigin, refreshed)
-            refreshed.accessToken
-        } else {
-            stored.accessToken
+        // Track the CURRENT token set: the Portal rotates (and reuse-detects)
+        // refresh tokens, so the 401 fallback below must reuse the rotated token,
+        // never the original that a proactive refresh already consumed.
+        var current = stored
+        if (stored.expiresAt in 1 until (nowSeconds() + EXPIRY_SKEW_SECONDS)) {
+            current = client.refreshToken(portalOrigin, stored.refreshToken)
+            tokenStore.save(portalOrigin, current)
         }
         try {
-            discover(token)
+            discover(current.accessToken)
         } catch (signInRequired: HermesCloudSignInRequiredException) {
-            // A live token still rejected: try one refresh before giving up.
-            val refreshed = client.refreshToken(portalOrigin, stored.refreshToken)
+            // A live token still rejected: try one refresh before giving up,
+            // using the latest (possibly already-rotated) refresh token.
+            val refreshed = client.refreshToken(portalOrigin, current.refreshToken)
             tokenStore.save(portalOrigin, refreshed)
             discover(refreshed.accessToken)
         }

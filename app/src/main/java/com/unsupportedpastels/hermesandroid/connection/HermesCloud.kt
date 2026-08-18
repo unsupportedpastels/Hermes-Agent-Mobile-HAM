@@ -1,13 +1,12 @@
 package com.unsupportedpastels.hermesandroid.connection
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Hermes Cloud discovery contract, mirrored from the desktop shell
@@ -97,7 +96,7 @@ object HermesCloudParsing {
     fun parseOrgSelection(body: String): List<CloudOrg>? {
         val root = runCatching { json.parseToJsonElement(body) as? JsonObject }.getOrNull()
             ?: return null
-        val error = root["error"]?.jsonPrimitive?.contentOrNull
+        val error = (root["error"] as? JsonPrimitive)?.contentOrNull
         if (error != "org_selection_required") return null
         val orgsElement = root["orgs"] ?: return null
         val orgs = trimOrgs(orgsElement)
@@ -105,39 +104,50 @@ object HermesCloudParsing {
     }
 
     private fun trimAgents(element: JsonElement?): List<CloudAgent> {
-        val array = runCatching { element?.jsonArray }.getOrNull() ?: return emptyList()
+        val array = (element as? JsonArray) ?: return emptyList()
         return array.mapNotNull { entry ->
-            val obj = runCatching { entry.jsonObject }.getOrNull() ?: return@mapNotNull null
-            val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            if (id.isBlank()) return@mapNotNull null
-            CloudAgent(
-                id = id,
-                name = obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: id,
-                status = obj["status"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                    ?: "unknown",
-                dashboardUrl = obj["dashboardUrl"]?.jsonPrimitive?.contentOrNull
-                    ?.takeIf { it.isNotBlank() },
-                dashboardGatewayState = obj["dashboardGatewayState"]?.jsonPrimitive?.contentOrNull
-                    ?.takeIf { it.isNotBlank() } ?: "unknown",
-            )
+            // Wrap the whole row so a single preview-era schema mismatch (e.g. a
+            // wrong-typed field like "name": {}) discards only that row instead
+            // of failing the entire discovery — the tolerant-row contract.
+            runCatching {
+                val obj = (entry as? JsonObject) ?: return@runCatching null
+                val id = obj.stringOrNull("id") ?: return@runCatching null
+                if (id.isBlank()) return@runCatching null
+                CloudAgent(
+                    id = id,
+                    name = obj.stringOrNull("name")?.takeIf { it.isNotBlank() } ?: id,
+                    status = obj.stringOrNull("status")?.takeIf { it.isNotBlank() } ?: "unknown",
+                    dashboardUrl = obj.stringOrNull("dashboardUrl")?.takeIf { it.isNotBlank() },
+                    dashboardGatewayState = obj.stringOrNull("dashboardGatewayState")
+                        ?.takeIf { it.isNotBlank() } ?: "unknown",
+                )
+            }.getOrNull()
         }
     }
 
     private fun trimOrgs(element: JsonElement?): List<CloudOrg> {
-        val array = runCatching { element?.jsonArray }.getOrNull() ?: return emptyList()
+        val array = (element as? JsonArray) ?: return emptyList()
         return array.mapNotNull { entry -> trimOrg(entry) }
     }
 
-    private fun trimOrg(element: JsonElement?): CloudOrg? {
-        val obj = runCatching { element?.jsonObject }.getOrNull() ?: return null
-        val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return null
-        if (id.isBlank()) return null
-        return CloudOrg(
+    private fun trimOrg(element: JsonElement?): CloudOrg? = runCatching {
+        val obj = (element as? JsonObject) ?: return@runCatching null
+        val id = obj.stringOrNull("id") ?: return@runCatching null
+        if (id.isBlank()) return@runCatching null
+        CloudOrg(
             id = id,
-            slug = obj["slug"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
-            name = obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: id,
-            isPersonal = obj["isPersonal"]?.jsonPrimitive?.booleanOrNull ?: false,
-            role = obj["role"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: "MEMBER",
+            slug = obj.stringOrNull("slug")?.takeIf { it.isNotBlank() },
+            name = obj.stringOrNull("name")?.takeIf { it.isNotBlank() } ?: id,
+            isPersonal = obj.booleanOrNull("isPersonal") ?: false,
+            role = obj.stringOrNull("role")?.takeIf { it.isNotBlank() } ?: "MEMBER",
         )
-    }
+    }.getOrNull()
+
+    /** Read a string field, returning null for absent OR wrong-typed values. */
+    private fun JsonObject.stringOrNull(key: String): String? =
+        (this[key] as? JsonPrimitive)?.contentOrNull
+
+    /** Read a boolean field, returning null for absent OR wrong-typed values. */
+    private fun JsonObject.booleanOrNull(key: String): Boolean? =
+        (this[key] as? JsonPrimitive)?.booleanOrNull
 }

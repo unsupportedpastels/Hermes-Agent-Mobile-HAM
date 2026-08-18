@@ -71,6 +71,36 @@ class HermesCloudClientTest {
     }
 
     @Test
+    fun discoverAgentsToleratesWrongTypedOptionalFields() = runTest {
+        val engine = jsonEngine { _, _, _ ->
+            // A preview-era schema mismatch: wrong-typed "name" (object) and
+            // "dashboardGatewayState" (array). This must NOT crash discovery or
+            // lose the sibling valid row. A row with a valid id survives with
+            // wrong-typed optionals falling back to their defaults.
+            HttpStatusCode.OK to """
+                {"agents":[
+                  {"id":"bad","name":{},"status":"RUNNING",
+                   "dashboardUrl":"https://bad.agents.nousresearch.com","dashboardGatewayState":[]},
+                  {"id":"good","name":"good","status":"RUNNING",
+                   "dashboardUrl":"https://good.agents.nousresearch.com","dashboardGatewayState":"active"}
+                ]}
+            """.trimIndent()
+        }
+        val client = HttpHermesCloudClient(HttpClient(engine))
+
+        val result = client.discoverAgents(portal, "bearer-token")
+
+        assertTrue(result is CloudDiscoverResult.Agents)
+        val agents = (result as CloudDiscoverResult.Agents).agents
+        // Both rows present; the wrong-typed fields fall back (name → id,
+        // dashboardGatewayState → "unknown") instead of failing the discovery.
+        assertEquals(listOf("bad", "good"), agents.map { it.id })
+        val bad = agents.first { it.id == "bad" }
+        assertEquals("bad", bad.name)
+        assertEquals("unknown", bad.dashboardGatewayState)
+    }
+
+    @Test
     fun discoverAgentsScopesToOrgQueryWhenProvided() = runTest {
         var seenQuery = ""
         val engine = jsonEngine { _, _, query ->
