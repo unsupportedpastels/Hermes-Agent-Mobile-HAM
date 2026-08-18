@@ -141,6 +141,9 @@ data class HermesGatewaySnapshot(
     val defaultModelOptions: ModelOptions? = null,
     val currentModelInfo: CurrentModelInfo? = null,
     val profileReasoningEffort: String? = null,
+    /** Per-model reasoning effort overrides for the selected profile, keyed by
+     *  the picker's ModelSelection. Empty when none are configured. */
+    val profileModelReasoningOverrides: Map<ModelSelection, String> = emptyMap(),
     val managementLoading: Boolean = false,
     val managementError: String? = null,
     val searchQuery: String = "",

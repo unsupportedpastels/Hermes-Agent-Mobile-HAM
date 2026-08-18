@@ -57,6 +57,7 @@ class HermesAppHostTest {
         }
 
         composeRule.onNodeWithText("Configure server").performClick()
+        composeRule.onNodeWithContentDescription("Open Servers settings").performClick()
         composeRule.onNodeWithContentDescription("Server origin input")
             .performTextInput("https://hermes.example/")
         composeRule.onNodeWithText("Save").performScrollTo().performClick()

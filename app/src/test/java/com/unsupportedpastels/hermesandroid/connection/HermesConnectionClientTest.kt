@@ -26,6 +26,8 @@ import org.junit.Test
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
+import com.unsupportedpastels.hermesandroid.gateway.ModelOptions
+import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.CronJobScope
 
@@ -223,6 +225,62 @@ class HermesConnectionClientTest {
             "opaque-access",
             "work",
             "high",
+        )
+    }
+
+    @Test
+    fun perModelReasoningOverrideWritesModelKeyedByItsOwnPrefixViaDeepMergedConfigPut() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Put, request.method)
+            assertEquals("/api/config", request.url.encodedPath)
+            assertEquals("work", request.url.parameters["profile"])
+            val body = (request.body as TextContent).text
+            // Keyed off the model string itself (which already carries its own
+            // provider prefix). The portal slug ("nous") is NOT prepended.
+            assertEquals(
+                """{"config":{"agent":{"reasoning_overrides":{"anthropic/claude-opus-5":"high"}}}}""",
+                body,
+            )
+            respond("{}", headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        HttpHermesConnectionClient(HttpClient(engine)).setProfileModelReasoningOverride(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+            ModelSelection("nous", "anthropic/claude-opus-5"),
+            "high",
+        )
+    }
+
+    @Test
+    fun loadProfileReasoningOverridesMatchesModelPrefixedKeys() = runTest {
+        val engine = MockEngine {
+            respond(
+                """{"agent":{"reasoning_overrides":{"anthropic/claude-opus-5":"high"}}}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val options = ModelOptions(
+            current = null,
+            providers = listOf(
+                ModelProviderOption(
+                    slug = "nous",
+                    name = "Nous Portal",
+                    models = listOf("anthropic/claude-opus-5", "anthropic/claude-sonnet-5"),
+                    capabilities = emptyMap(),
+                ),
+            ),
+            profile = "work",
+        )
+        val overrides = HttpHermesConnectionClient(HttpClient(engine)).loadProfileReasoningOverrides(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+            options,
+        )
+        assertEquals(
+            mapOf(ModelSelection("nous", "anthropic/claude-opus-5") to "high"),
+            overrides,
         )
     }
 

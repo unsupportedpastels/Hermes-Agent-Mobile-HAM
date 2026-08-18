@@ -534,10 +534,36 @@ interface HermesConnectionClient {
         model: String,
     ): String? = null
 
+    /**
+     * Load every per-model reasoning override configured for [profile], resolved
+     * against the models in [options] so the picker can show each model's current
+     * effort. Keys are matched spelling-tolerantly (dots↔dashes, provider prefix).
+     */
+    suspend fun loadProfileReasoningOverrides(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        options: ModelOptions,
+    ): Map<ModelSelection, String> = emptyMap()
+
     suspend fun setProfileReasoningEffort(
         serverOrigin: ServerOrigin,
         accessToken: String,
         profile: String,
+        effort: String,
+    ): Unit = throw UnsupportedOperationException()
+
+    /**
+     * Set (or clear) a per-model reasoning-effort override for future chats.
+     * Writes `agent.reasoning_overrides.<provider/model>` via the deep-merging
+     * `PUT /api/config`, so it preserves the global default and every other
+     * model's override. Passing effort "none" disables thinking for that model.
+     */
+    suspend fun setProfileModelReasoningOverride(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        selection: ModelSelection,
         effort: String,
     ): Unit = throw UnsupportedOperationException()
 
@@ -1004,6 +1030,46 @@ class HttpHermesConnectionClient(
             )
     }
 
+    override suspend fun loadProfileReasoningOverrides(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        options: ModelOptions,
+    ): Map<ModelSelection, String> {
+        val response = client.get("${serverOrigin.value}/api/config") {
+            bearerAuth(accessToken)
+            parameter("profile", profile.take(64))
+        }
+        val body = response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException("Hermes config returned HTTP ${response.status.value}")
+        }
+        val root = json.parseToJsonElement(body) as? JsonObject
+            ?: throw HermesConnectionException("Hermes config response was invalid")
+        val agent = root["agent"] as? JsonObject ?: return emptyMap()
+        val overrides = agent["reasoning_overrides"] as? JsonObject ?: return emptyMap()
+        val overrideKeys = overrides.entries.associate { (key, value) ->
+            key.trim().lowercase() to value.jsonPrimitive.contentOrNull
+        }
+        val result = LinkedHashMap<ModelSelection, String>()
+        options.providers.forEach { provider ->
+            provider.models.forEach { model ->
+                // The server keys overrides off the model string itself (which
+                // already carries its own provider prefix, e.g.
+                // "anthropic/claude-opus-5"), matched spelling-tolerantly. The
+                // portal provider slug is NOT part of the key.
+                val normalizedModel = model.trim().lowercase()
+                val candidateKeys = reasoningBareModelVariants(model) + normalizedModel
+                val raw = candidateKeys.firstNotNullOfOrNull { key -> overrideKeys[key] }
+                val canonical = canonicalProfileReasoningEffort(raw)
+                if (canonical != null) {
+                    result[ModelSelection(provider.slug, model)] = canonical
+                }
+            }
+        }
+        return result
+    }
+
     override suspend fun setProfileReasoningEffort(
         serverOrigin: ServerOrigin,
         accessToken: String,
@@ -1029,6 +1095,47 @@ class HttpHermesConnectionClient(
         response.readBodyTextBounded()
         if (!response.status.isSuccess()) {
             throw HermesConnectionException("Hermes reasoning default update returned HTTP ${response.status.value}")
+        }
+    }
+
+    override suspend fun setProfileModelReasoningOverride(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        selection: ModelSelection,
+        effort: String,
+    ) {
+        val boundedProfile = profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
+            ?: throw HermesConnectionException("Hermes reasoning profile is invalid")
+        val canonicalEffort = canonicalProfileReasoningEffort(effort)
+            ?: throw HermesConnectionException("Hermes reasoning effort is invalid")
+        val model = selection.model.trim().takeIf { it.isNotEmpty() && it.length <= 256 }
+            ?: throw HermesConnectionException("Hermes reasoning model is invalid")
+        // The server keys reasoning_overrides off the MODEL string itself
+        // (resolve_per_model_reasoning_effort / _canonical_model_variants), not
+        // provider/model — the model already carries its own provider prefix
+        // (e.g. "anthropic/claude-opus-5"); the selection's provider is the
+        // portal slug (e.g. "nous") and must not be prepended.
+        val overrideKey = model
+        val response = client.put("${serverOrigin.value}/api/config") {
+            bearerAuth(accessToken)
+            parameter("profile", boundedProfile)
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonObject {
+                put("config", buildJsonObject {
+                    put("agent", buildJsonObject {
+                        put("reasoning_overrides", buildJsonObject {
+                            put(overrideKey, canonicalEffort)
+                        })
+                    })
+                })
+            }.toString())
+        }
+        response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException(
+                "Hermes reasoning override update returned HTTP ${response.status.value}",
+            )
         }
     }
 

@@ -1574,6 +1574,7 @@ class HermesConnectionViewModel(
                 defaultModelOptions = null,
                 currentModelInfo = null,
                 profileReasoningEffort = null,
+                profileModelReasoningOverrides = emptyMap(),
                 managementLoading = true,
                 managementError = null,
             )
@@ -1614,6 +1615,18 @@ class HermesConnectionViewModel(
                         } catch (_: Exception) {
                             null
                         }
+                    }
+                    val profileModelReasoningOverrides = try {
+                        client.loadProfileReasoningOverrides(
+                            serverOrigin = origin,
+                            accessToken = token,
+                            profile = selected,
+                            options = options,
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        emptyMap()
                     }
                     // The durable rows must belong to the profile that is about to
                     // become selected; validating a bulk-delete selection against
@@ -1678,6 +1691,7 @@ class HermesConnectionViewModel(
                         defaultModelOptions = options,
                         currentModelInfo = currentInfo?.takeIf { it.profile == selected },
                         profileReasoningEffort = profileReasoningEffort,
+                        profileModelReasoningOverrides = profileModelReasoningOverrides,
                         chatSessions = updatedChats,
                         managementLoading = false,
                     )
@@ -1792,6 +1806,42 @@ class HermesConnectionViewModel(
                 "Profile settings changed while saving reasoning default"
             }
             mutableSnapshots.value = mutableSnapshots.value.copy(profileReasoningEffort = canonicalEffort)
+            Result.success(Unit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
+        }
+    }
+
+    suspend fun setProfileModelReasoningOverride(
+        selection: ModelSelection,
+        effort: String,
+    ): Result<Unit> {
+        return try {
+            val canonicalEffort = canonicalReasoningEffort(effort)
+                ?: throw HermesConnectionException("Reasoning effort is invalid")
+            val origin = checkNotNull(activeOrigin) { "No Hermes server configured" }
+            val expectedGeneration = generation
+            val profile = mutableSnapshots.value.selectedProfile
+            val token = checkNotNull(accessTokenForRequest(origin, expectedGeneration)) { "Sign in required" }
+            client.setProfileModelReasoningOverride(origin, token, profile, selection, canonicalEffort)
+            currentCoroutineContext().ensureActive()
+            check(isCurrentOrigin(origin, expectedGeneration) && mutableSnapshots.value.selectedProfile == profile) {
+                "Profile settings changed while saving reasoning override"
+            }
+            val current = mutableSnapshots.value
+            val updatedOverrides = current.profileModelReasoningOverrides + (selection to canonicalEffort)
+            mutableSnapshots.value = current.copy(
+                profileModelReasoningOverrides = updatedOverrides,
+                // Keep the global summary in sync when the override targets the
+                // currently-selected default model, so the card reflects it.
+                profileReasoningEffort = if (current.defaultModelOptions?.current == selection) {
+                    canonicalEffort
+                } else {
+                    current.profileReasoningEffort
+                },
+            )
             Result.success(Unit)
         } catch (cancelled: CancellationException) {
             throw cancelled

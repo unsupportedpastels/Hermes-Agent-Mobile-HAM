@@ -23,6 +23,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeRight
@@ -54,6 +55,8 @@ import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessage
 import com.unsupportedpastels.hermesandroid.gateway.ChatMessageRole
+import com.unsupportedpastels.hermesandroid.voice.MessageReadAloud
+import com.unsupportedpastels.hermesandroid.voice.SpeechAudio
 import com.unsupportedpastels.hermesandroid.gateway.ChatBillingNotice
 import com.unsupportedpastels.hermesandroid.gateway.ChatSessionSnapshot
 import com.unsupportedpastels.hermesandroid.gateway.ConnectionState
@@ -65,6 +68,7 @@ import com.unsupportedpastels.hermesandroid.gateway.ModelCapabilities
 import com.unsupportedpastels.hermesandroid.gateway.CurrentModelInfo
 import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
+import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
 import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
@@ -202,6 +206,77 @@ class HermesAppTest {
 
         composeRule.onNodeWithContentDescription("Attach files").performClick()
         composeRule.onAllNodesWithText("Artifacts").assertCountEquals(0)
+    }
+
+    @Test
+    fun consecutiveTranscriptToolMessagesCollapseIntoOneExpandableGroup() {
+        val session = sessions.first()
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            chatSessions = mapOf(
+                session.id to ChatSessionSnapshot(
+                    messages = listOf(
+                        ChatMessage(ChatMessageRole.User, "deploy the site"),
+                        ChatMessage(ChatMessageRole.Tool, "web_extract · https://example.com/"),
+                        ChatMessage(ChatMessageRole.Tool, "patch · /home/mark/site/index.html"),
+                        ChatMessage(ChatMessageRole.Tool, "terminal · curl -fsSL https://example.com"),
+                        ChatMessage(ChatMessageRole.Assistant, "Deployed successfully."),
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    initialRoute = SessionDetailRoute(session.id),
+                )
+            }
+        }
+
+        // Collapsed: one group header, no raw per-tool rows visible yet.
+        composeRule.onNodeWithContentDescription("3 actions, completed, collapsed")
+            .assertIsDisplayed()
+        composeRule.onAllNodesWithText("Tool").assertCountEquals(0)
+
+        // Expand the group; the individual tool rows appear underneath.
+        composeRule.onNodeWithContentDescription("3 actions, completed, collapsed").performClick()
+        composeRule.onNodeWithContentDescription("3 actions, completed, expanded")
+            .assertIsDisplayed()
+        composeRule.onAllNodesWithText("Tool").assertCountEquals(3)
+    }
+
+    @Test
+    fun assistantResponsesHaveNoPerMessageReadAloudSpeakerButton() {
+        val session = sessions.first()
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            chatSessions = mapOf(
+                session.id to ChatSessionSnapshot(
+                    messages = listOf(
+                        ChatMessage(ChatMessageRole.User, "what device is linked?"),
+                        ChatMessage(ChatMessageRole.Assistant, "Your Garmin Venu X1 is linked."),
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    initialRoute = SessionDetailRoute(session.id),
+                    // TTS is fully available, yet the per-message speaker button
+                    // must not appear beneath responses.
+                    readAloud = MessageReadAloud { Result.success(SpeechAudio(byteArrayOf(1), "audio/mpeg")) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Your Garmin Venu X1 is linked.").assertIsDisplayed()
+        composeRule.onAllNodesWithContentDescription("Read message aloud").assertCountEquals(0)
+        composeRule.onAllNodesWithContentDescription("Stop reading aloud").assertCountEquals(0)
     }
 
     @Test
@@ -771,7 +846,9 @@ class HermesAppTest {
         composeRule.onNodeWithText("New chat").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Settings").performClick()
         assertEquals(1, taskStarts)
-        composeRule.onNodeWithText("Hermes server").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open Servers settings").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open Servers settings").performClick()
+        composeRule.onNodeWithContentDescription("Server origin input").assertIsDisplayed()
     }
 
     @Test
@@ -796,6 +873,7 @@ class HermesAppTest {
         composeRule.onNodeWithContentDescription("New task").assertIsDisplayed().performClick()
         assertEquals(1, taskStarts)
         composeRule.onNodeWithContentDescription("Settings").performClick()
+        composeRule.onNodeWithContentDescription("Open Connection & profile settings").performClick()
         composeRule.onNodeWithContentDescription("Operational overview").assertIsDisplayed()
     }
 
@@ -2490,6 +2568,7 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("Configure server").performClick()
+        composeRule.onNodeWithContentDescription("Open Servers settings").performClick()
         composeRule.onNodeWithText("Server origin").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Server origin input")
             .performTextInput("HTTPS://Example.COM/")
@@ -2516,6 +2595,7 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("Configure server").performClick()
+        composeRule.onNodeWithContentDescription("Open Servers settings").performClick()
         composeRule.onNodeWithContentDescription("Server origin input")
             .performTextInput("http://10.0.1.2")
 
@@ -2560,10 +2640,10 @@ class HermesAppTest {
 
         composeRule.onNodeWithText("Current profile model").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Effective context: 131072 tokens").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Reasoning default for future chats").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText(
-            "This changes future chats only; it does not change the active runtime.",
-        ).performScrollTo().assertIsDisplayed()
+        // Reasoning is now set per-model inside the picker, not via a separate
+        // profile-wide dropdown, so the Change model entry point is what shows.
+        composeRule.onNodeWithContentDescription("Change default model").performScrollTo().assertIsDisplayed()
+        composeRule.onAllNodesWithText("Reasoning default for future chats").assertCountEquals(0)
     }
 
     @Test
@@ -2595,7 +2675,175 @@ class HermesAppTest {
         composeRule.onNodeWithText("Server settings unavailable").assertIsDisplayed()
         composeRule.onNodeWithText("Open Server to replace the saved origin.").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Settings").performClick()
-        composeRule.onNodeWithText("Hermes server").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open Servers settings").performClick()
+        composeRule.onNodeWithContentDescription("Server origin input").assertIsDisplayed()
+    }
+
+    @Test
+    fun settingsHubListsSectionsAndOpensModelSectionForAuthenticatedServer() {
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            currentModelInfo = CurrentModelInfo(
+                profile = "default",
+                provider = "nous",
+                model = "Hermes-4-405B",
+                effectiveContextLength = 131072,
+                capabilities = ModelCapabilities(reasoning = true, fast = true),
+            ),
+            defaultModelOptions = ModelOptions(
+                current = ModelSelection("nous", "Hermes-4-405B"),
+                providers = emptyList(),
+                profile = "default",
+            ),
+        )
+        composeRule.setContent {
+            HermesAndroidTheme { HermesApp(snapshot = snapshot) }
+        }
+
+        composeRule.onNodeWithContentDescription("Settings").performClick()
+        // Hub shows a concise list of sections, not the full form.
+        composeRule.onNodeWithContentDescription("Open Servers settings").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open Default model settings").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open Offline & privacy settings").assertIsDisplayed()
+
+        composeRule.onNodeWithContentDescription("Open Default model settings").performClick()
+        composeRule.onNodeWithText("Default model for new chats").assertIsDisplayed()
+        // Servers form is not on the model section.
+        composeRule.onNodeWithContentDescription("Server origin input").assertDoesNotExist()
+    }
+
+    @Test
+    fun unauthenticatedSettingsHubOnlyOffersServers() {
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(snapshot = HermesGatewaySnapshot(connectionState = ConnectionState.Connected))
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Settings").performClick()
+        composeRule.onNodeWithContentDescription("Open Servers settings").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open Default model settings").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Open Account settings").assertDoesNotExist()
+    }
+
+    @Test
+    fun modelPickerGroupsByProviderSearchesAndSetsDefault() {
+        var chosen: ModelSelection? = null
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            defaultModelOptions = ModelOptions(
+                current = ModelSelection("nous", "Hermes-4-405B"),
+                providers = listOf(
+                    ModelProviderOption(
+                        slug = "nous",
+                        name = "Nous",
+                        models = listOf("Hermes-4-405B", "Hermes-4-70B"),
+                        capabilities = mapOf(
+                            "Hermes-4-405B" to ModelCapabilities(reasoning = true),
+                        ),
+                    ),
+                    ModelProviderOption(
+                        slug = "openai",
+                        name = "OpenAI",
+                        models = listOf("gpt-5.6-sol"),
+                    ),
+                ),
+                profile = "default",
+            ),
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    onSetProfileDefaultModel = { selection, _ ->
+                        chosen = selection
+                        ModelSwitchResult(accepted = true)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Settings").performClick()
+        composeRule.onNodeWithContentDescription("Open Default model settings").performClick()
+        // Current-model card, not a wall of chips.
+        composeRule.onNodeWithContentDescription("Change default model").performClick()
+
+        // Grouped by provider inside the sheet — the Nous models render.
+        composeRule.onNodeWithContentDescription("Select Nous Hermes-4-405B").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Select Nous Hermes-4-70B").assertIsDisplayed()
+
+        // Search narrows to a single provider's model.
+        composeRule.onNodeWithContentDescription("Search models").performTextInput("70b")
+        composeRule.onNodeWithContentDescription("Select Nous Hermes-4-70B").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Select Nous Hermes-4-405B").assertDoesNotExist()
+
+        // Clearing the query and filtering by Reasoning drops the fast-only 70B model.
+        composeRule.onNodeWithContentDescription("Search models").performTextClearance()
+        composeRule.onNodeWithContentDescription("Filter by Reasoning capability").performClick()
+        composeRule.onNodeWithContentDescription("Select Nous Hermes-4-405B").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Select Nous Hermes-4-70B").assertDoesNotExist()
+        // Turn the filter back off before selecting.
+        composeRule.onNodeWithContentDescription("Filter by Reasoning capability").performClick()
+
+        composeRule.onNodeWithContentDescription("Select Nous Hermes-4-70B").performClick()
+        composeRule.runOnIdle {
+            assertEquals(ModelSelection("nous", "Hermes-4-70B"), chosen)
+        }
+    }
+
+    @Test
+    fun modelPickerExpandsReasoningModelAndSetsPerModelEffort() {
+        var reasoningCall: Pair<ModelSelection, String>? = null
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            profileReasoningEffort = "medium",
+            defaultModelOptions = ModelOptions(
+                current = ModelSelection("nous", "Hermes-4-405B"),
+                providers = listOf(
+                    ModelProviderOption(
+                        slug = "nous",
+                        name = "Nous",
+                        models = listOf("Hermes-4-405B", "Hermes-4-70B"),
+                        capabilities = mapOf(
+                            "Hermes-4-405B" to ModelCapabilities(reasoning = true),
+                            "Hermes-4-70B" to ModelCapabilities(fast = true),
+                        ),
+                    ),
+                ),
+                profile = "default",
+            ),
+        )
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    onSetModelReasoningOverride = { selection, effort ->
+                        reasoningCall = selection to effort
+                        Result.success(Unit)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Settings").performClick()
+        composeRule.onNodeWithContentDescription("Open Default model settings").performClick()
+        composeRule.onNodeWithContentDescription("Change default model").performClick()
+
+        // The fast-only 70B model has no reasoning expander.
+        composeRule.onNodeWithContentDescription("Show options for Hermes-4-70B").assertDoesNotExist()
+
+        // Expand the reasoning-capable model to reveal Thinking + effort scale.
+        composeRule.onNodeWithContentDescription("Show options for Hermes-4-405B").performClick()
+        composeRule.onNodeWithContentDescription("Thinking for Hermes-4-405B").assertIsDisplayed()
+
+        // Setting an effort level writes a per-model override, not a global one.
+        composeRule.onNodeWithContentDescription("Set Hermes-4-405B reasoning to high")
+            .performScrollTo()
+            .performClick()
+        composeRule.waitUntil(timeoutMillis = 2_000) {
+            reasoningCall != null
+        }
+        assertEquals(ModelSelection("nous", "Hermes-4-405B") to "high", reasoningCall)
     }
 
     @Test
