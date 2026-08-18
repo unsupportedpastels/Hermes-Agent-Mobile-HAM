@@ -4131,7 +4131,7 @@ internal fun ServerSettingsScreen(
             current = scopedModelOptions?.current,
             recents = recentModels,
             reasoningOverrides = snapshot.profileModelReasoningOverrides,
-            profileDefaultEffort = snapshot.profileReasoningEffort,
+            profileDefaultEffort = snapshot.profileReasoningDefault,
             query = modelQuery,
             onQueryChange = { modelQuery = it.take(128) },
             onDismiss = { modelPickerOpen = false },

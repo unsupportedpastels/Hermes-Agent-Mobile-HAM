@@ -534,6 +534,13 @@ interface HermesConnectionClient {
         model: String,
     ): String? = null
 
+    /** Load the profile-wide reasoning default without applying a model override. */
+    suspend fun loadProfileReasoningDefault(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): String? = null
+
     /**
      * Load every per-model reasoning override configured for [profile], resolved
      * against the models in [options] so the picker can show each model's current
@@ -1030,6 +1037,27 @@ class HttpHermesConnectionClient(
             )
     }
 
+    override suspend fun loadProfileReasoningDefault(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+    ): String? {
+        val response = client.get("${serverOrigin.value}/api/config") {
+            bearerAuth(accessToken)
+            parameter("profile", profile.take(64))
+        }
+        val body = response.readBodyTextBounded()
+        if (!response.status.isSuccess()) {
+            throw HermesConnectionException("Hermes config returned HTTP ${response.status.value}")
+        }
+        val root = json.parseToJsonElement(body) as? JsonObject
+            ?: throw HermesConnectionException("Hermes config response was invalid")
+        val agent = root["agent"] as? JsonObject ?: return null
+        return canonicalProfileReasoningEffort(
+            agent["reasoning_effort"]?.jsonPrimitive?.contentOrNull,
+        )
+    }
+
     override suspend fun loadProfileReasoningOverrides(
         serverOrigin: ServerOrigin,
         accessToken: String,
@@ -1056,11 +1084,15 @@ class HttpHermesConnectionClient(
             provider.models.forEach { model ->
                 // The server keys overrides off the model string itself (which
                 // already carries its own provider prefix, e.g.
-                // "anthropic/claude-opus-5"), matched spelling-tolerantly. The
-                // portal provider slug is NOT part of the key.
+                // "anthropic/claude-opus-5"). For bare catalog IDs, also accept
+                // the provider-qualified spelling used by existing configs.
                 val normalizedModel = model.trim().lowercase()
-                val candidateKeys = reasoningBareModelVariants(model) + normalizedModel
-                val raw = candidateKeys.firstNotNullOfOrNull { key -> overrideKeys[key] }
+                val bareVariants = reasoningBareModelVariants(model)
+                val providerQualifiedVariants = bareVariants.map { bare ->
+                    "${provider.slug.trim().lowercase()}/$bare"
+                }
+                val candidateKeys = listOf(normalizedModel) + providerQualifiedVariants + bareVariants
+                val raw = candidateKeys.distinct().firstNotNullOfOrNull { key -> overrideKeys[key] }
                 val canonical = canonicalProfileReasoningEffort(raw)
                 if (canonical != null) {
                     result[ModelSelection(provider.slug, model)] = canonical

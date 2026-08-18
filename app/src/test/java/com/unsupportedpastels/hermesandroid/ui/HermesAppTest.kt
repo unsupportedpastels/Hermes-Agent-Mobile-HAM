@@ -2625,6 +2625,7 @@ class HermesAppTest {
                 capabilities = ModelCapabilities(reasoning = true, fast = true),
             ),
             profileReasoningEffort = "medium",
+            profileReasoningDefault = "medium",
         )
         composeRule.setContent {
             HermesAndroidTheme {
@@ -2797,6 +2798,7 @@ class HermesAppTest {
         val snapshot = connectedSnapshot.copy(
             authenticationState = AuthenticationState.Authenticated,
             profileReasoningEffort = "medium",
+            profileReasoningDefault = "medium",
             defaultModelOptions = ModelOptions(
                 current = ModelSelection("nous", "Hermes-4-405B"),
                 providers = listOf(

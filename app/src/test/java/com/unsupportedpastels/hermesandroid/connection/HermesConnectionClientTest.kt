@@ -285,6 +285,50 @@ class HermesConnectionClientTest {
     }
 
     @Test
+    fun loadProfileReasoningOverridesMatchesProviderQualifiedBareModelIds() = runTest {
+        val engine = MockEngine {
+            respond(
+                """{"agent":{"reasoning_overrides":{"openai/shared-model":"low"}}}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val options = ModelOptions(
+            current = null,
+            providers = listOf(
+                ModelProviderOption(
+                    slug = "openai",
+                    name = "OpenAI",
+                    models = listOf("shared-model"),
+                ),
+            ),
+            profile = "work",
+        )
+        val overrides = HttpHermesConnectionClient(HttpClient(engine)).loadProfileReasoningOverrides(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+            options,
+        )
+        assertEquals(mapOf(ModelSelection("openai", "shared-model") to "low"), overrides)
+    }
+
+    @Test
+    fun loadProfileReasoningDefaultIgnoresCurrentModelOverride() = runTest {
+        val engine = MockEngine {
+            respond(
+                """{"agent":{"reasoning_effort":"medium","reasoning_overrides":{"anthropic/claude-opus-5":"high"}}}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val effort = HttpHermesConnectionClient(HttpClient(engine)).loadProfileReasoningDefault(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            "work",
+        )
+        assertEquals("medium", effort)
+    }
+
+    @Test
     fun profileReasoningEffortUsesModelOverrideBeforeGlobalDefault() = runTest {
         val engine = MockEngine { request ->
             assertEquals("/api/config", request.url.encodedPath)

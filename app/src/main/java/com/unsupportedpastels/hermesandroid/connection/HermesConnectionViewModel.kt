@@ -1574,6 +1574,7 @@ class HermesConnectionViewModel(
                 defaultModelOptions = null,
                 currentModelInfo = null,
                 profileReasoningEffort = null,
+                profileReasoningDefault = null,
                 profileModelReasoningOverrides = emptyMap(),
                 managementLoading = true,
                 managementError = null,
@@ -1615,6 +1616,17 @@ class HermesConnectionViewModel(
                         } catch (_: Exception) {
                             null
                         }
+                    }
+                    val profileReasoningDefault = try {
+                        client.loadProfileReasoningDefault(
+                            serverOrigin = origin,
+                            accessToken = token,
+                            profile = selected,
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
                     }
                     val profileModelReasoningOverrides = try {
                         client.loadProfileReasoningOverrides(
@@ -1691,6 +1703,7 @@ class HermesConnectionViewModel(
                         defaultModelOptions = options,
                         currentModelInfo = currentInfo?.takeIf { it.profile == selected },
                         profileReasoningEffort = profileReasoningEffort,
+                        profileReasoningDefault = profileReasoningDefault,
                         profileModelReasoningOverrides = profileModelReasoningOverrides,
                         chatSessions = updatedChats,
                         managementLoading = false,
@@ -1805,7 +1818,15 @@ class HermesConnectionViewModel(
             check(isCurrentOrigin(origin, expectedGeneration) && mutableSnapshots.value.selectedProfile == profile) {
                 "Profile settings changed while saving reasoning default"
             }
-            mutableSnapshots.value = mutableSnapshots.value.copy(profileReasoningEffort = canonicalEffort)
+            val current = mutableSnapshots.value
+            val currentSelection = current.defaultModelOptions?.current
+            val effectiveCurrentEffort = currentSelection
+                ?.let { current.profileModelReasoningOverrides[it] }
+                ?: canonicalEffort
+            mutableSnapshots.value = current.copy(
+                profileReasoningDefault = canonicalEffort,
+                profileReasoningEffort = effectiveCurrentEffort,
+            )
             Result.success(Unit)
         } catch (cancelled: CancellationException) {
             throw cancelled
