@@ -108,6 +108,9 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -424,6 +427,14 @@ fun HermesApp(
     },
     onRemoveServerOrigin: suspend (ServerOrigin) -> Result<Unit> = { _ ->
         Result.failure(UnsupportedOperationException("Removing servers is unavailable"))
+    },
+    cloudState: com.unsupportedpastels.hermesandroid.connection.CloudConnectState? = null,
+    onCloudSignIn: () -> Unit = {},
+    onCloudRefresh: () -> Unit = {},
+    onCloudSignOut: () -> Unit = {},
+    onCloudSelectOrg: (com.unsupportedpastels.hermesandroid.connection.CloudOrg) -> Unit = {},
+    onCloudSelectAgent: suspend (com.unsupportedpastels.hermesandroid.connection.CloudAgent) -> Result<Unit> = {
+        Result.success(Unit)
     },
     onLoadManagementSettings: (String) -> Unit = {},
     onRefreshDurableSessions: (Boolean) -> Unit = {},
@@ -846,6 +857,12 @@ fun HermesApp(
                     onLogout = onLogout,
                     visibleSections = setOf(section),
                     title = section.title,
+                    cloudState = cloudState,
+                    onCloudSignIn = onCloudSignIn,
+                    onCloudRefresh = onCloudRefresh,
+                    onCloudSignOut = onCloudSignOut,
+                    onCloudSelectOrg = onCloudSelectOrg,
+                    onCloudSelectAgent = onCloudSelectAgent,
                 )
             }
             Box(
@@ -3983,6 +4000,14 @@ internal fun ServerSettingsScreen(
     voiceSettings: VoiceSettings? = null,
     visibleSections: Set<SettingsSection> = SettingsSection.entries.toSet(),
     title: String = "Hermes server",
+    cloudState: com.unsupportedpastels.hermesandroid.connection.CloudConnectState? = null,
+    onCloudSignIn: () -> Unit = {},
+    onCloudRefresh: () -> Unit = {},
+    onCloudSignOut: () -> Unit = {},
+    onCloudSelectOrg: (com.unsupportedpastels.hermesandroid.connection.CloudOrg) -> Unit = {},
+    onCloudSelectAgent: suspend (com.unsupportedpastels.hermesandroid.connection.CloudAgent) -> Result<Unit> = {
+        Result.success(Unit)
+    },
 ) {
     var value by rememberSaveable(serverOrigin?.value) {
         mutableStateOf(serverOrigin?.value.orEmpty())
@@ -4074,6 +4099,47 @@ internal fun ServerSettingsScreen(
             ) {
                 if (SettingsSection.Servers in visibleSections) {
                     Text("Servers", style = MaterialTheme.typography.titleMedium)
+                    // When a Cloud view-model is wired in, offer the two connect
+                    // modes: Hermes Cloud (sign in → pick agent) and Server URL
+                    // (manual origin entry). Selecting a Cloud agent saves its
+                    // dashboard origin, so the manual catalog stays authoritative
+                    // once connected.
+                    val cloudActive = cloudState != null &&
+                        cloudState !is com.unsupportedpastels.hermesandroid.connection.CloudConnectState.SignedOut
+                    var connectMode by rememberConnectMode(initialCloud = cloudActive)
+                    if (cloudState != null) {
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            SegmentedButton(
+                                selected = connectMode == ConnectMode.Cloud,
+                                onClick = { connectMode = ConnectMode.Cloud },
+                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                            ) { Text("Hermes Cloud") }
+                            SegmentedButton(
+                                selected = connectMode == ConnectMode.ServerUrl,
+                                onClick = { connectMode = ConnectMode.ServerUrl },
+                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                            ) { Text("Server URL") }
+                        }
+                    }
+                    if (cloudState != null && connectMode == ConnectMode.Cloud) {
+                        HermesCloudConnectPanel(
+                            state = cloudState,
+                            onSignIn = onCloudSignIn,
+                            onRefresh = onCloudRefresh,
+                            onSignOut = onCloudSignOut,
+                            onSelectOrg = onCloudSelectOrg,
+                            onSelectAgent = { agent ->
+                                coroutineScope.launch {
+                                    val result = onCloudSelectAgent(agent)
+                                    if (result.isSuccess) {
+                                        onBack()
+                                    } else {
+                                        saveError = "Could not connect to that agent. Try again."
+                                    }
+                                }
+                            },
+                        )
+                    } else {
                     if (serverCatalog.entries.isEmpty()) {
                         Text(
                             "Add a Hermes server to get started.",
@@ -4259,6 +4325,7 @@ internal fun ServerSettingsScreen(
                         ) {
                             Text("Cancel")
                         }
+                    }
                     }
                 }
                 if (SettingsSection.Connection in visibleSections) {

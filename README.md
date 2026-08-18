@@ -52,7 +52,12 @@ HAM uses the available window and posture — not a device name or orientation �
 
 HAM is a client, not an agent host. Install and configure Hermes Agent on a machine you control (or deploy an always-on **Hermes Cloud** instance from the [Nous Portal](https://portal.nousresearch.com/cloud)), then keep a compatible Hermes backend running before connecting from Android. The host remains authoritative for your agent, tools, files, sessions, and data.
 
-Both paths authenticate the same way — **Sign in with Nous**. For a managed Hermes Cloud instance the endpoints are already live: enter your Cloud instance's origin on HAM's Connect screen and sign in. The rest of this section covers self-hosting.
+Both paths authenticate the same way — **Sign in with Nous**. HAM's Connect screen has two modes:
+
+- **Hermes Cloud** — sign in once to Nous Portal and pick from the agents on your account; no URL to paste. HAM discovers your deployed [Hermes Cloud](https://portal.nousresearch.com/cloud) agents automatically and connects to the one you choose. Multi-org accounts get an org picker.
+- **Server URL** — enter the HTTP/HTTPS origin of a Hermes host you run yourself. Use this for self-hosting (below) or to connect to a known instance by hand.
+
+The rest of this section covers self-hosting.
 
 ### Recommended public access: HTTPS through Cloudflare Tunnel
 
