@@ -266,53 +266,15 @@ class HermesAppTest {
     }
 
     @Test
-    fun sessionSelectionShowsBoundedCountAndRequiresBulkConfirmation() {
+    fun homeDoesNotExposeMultiSessionSelectionAction() {
         composeRule.setContent {
             HermesAndroidTheme {
                 HermesApp(snapshot = connectedSnapshot)
             }
         }
 
-        composeRule.onNodeWithText("Select").performClick()
-        composeRule.onNodeWithText("First session").performClick()
-        composeRule.onNodeWithContentDescription("1 sessions selected").assertIsDisplayed()
-        composeRule.onNodeWithText("Delete selected").performClick()
-
-        composeRule.onNodeWithText("Delete 1 sessions?").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Confirm delete selected sessions").assertIsDisplayed()
-    }
-
-    @Test
-    fun selectionModeShowsNoSelectableControlForLocalDrafts() {
-        val draft = SessionSummary(DurableSessionId("local-draft"), "Local draft", isLocalDraft = true)
-        composeRule.setContent {
-            HermesAndroidTheme {
-                HermesApp(
-                    snapshot = connectedSnapshot.copy(durableSessions = sessions + draft),
-                )
-            }
-        }
-
-        composeRule.onNodeWithText("Select").performClick()
-        composeRule.onAllNodesWithContentDescription("Select Local draft").assertCountEquals(0)
-        composeRule.onAllNodesWithContentDescription("Deselect Local draft").assertCountEquals(0)
-    }
-
-    @Test
-    fun unsupportedBulkCapabilityDoesNotExposeDeleteAction() {
-        composeRule.setContent {
-            HermesAndroidTheme {
-                HermesApp(
-                    snapshot = connectedSnapshot.copy(
-                        bulkDeleteCapability = com.unsupportedpastels.hermesandroid.connection.SessionBulkDeleteCapability.Unsupported,
-                    ),
-                )
-            }
-        }
-
-        composeRule.onNodeWithText("Select").performClick()
-        composeRule.onNodeWithText("First session").performClick()
-        composeRule.onAllNodesWithText("Delete selected").assertCountEquals(0)
+        composeRule.onAllNodesWithContentDescription("Select sessions").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Select").assertCountEquals(0)
     }
 
     @Test
@@ -2538,23 +2500,29 @@ class HermesAppTest {
     }
 
     @Test
-    fun serverDialogRejectsCleartextOrigin() {
+    fun serverDialogAcceptsCleartextOriginForLocalServers() {
+        var savedOrigin: ServerOrigin? = null
         composeRule.setContent {
             HermesAndroidTheme {
                 HermesApp(
                     snapshot = HermesGatewaySnapshot(),
                     serverSettingsState = ServerSettingsState.Ready(null),
-                    onSaveServerOrigin = { Result.success(Unit) },
+                    onSaveServerOrigin = { origin ->
+                        savedOrigin = origin
+                        Result.success(Unit)
+                    },
                 )
             }
         }
 
         composeRule.onNodeWithText("Configure server").performClick()
         composeRule.onNodeWithContentDescription("Server origin input")
-            .performTextInput("http://example.com")
+            .performTextInput("http://10.0.1.2")
 
-        composeRule.onNodeWithText("Server origin must use HTTPS").assertIsDisplayed()
-        composeRule.onNodeWithText("Save").assertIsNotEnabled()
+        composeRule.onNodeWithText("Save").assertIsEnabled().performScrollTo().performClick()
+        composeRule.waitForIdle()
+
+        assertEquals("http://10.0.1.2", savedOrigin?.value)
     }
 
     @Test

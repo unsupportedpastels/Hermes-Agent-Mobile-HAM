@@ -10,11 +10,13 @@ value class ServerOrigin private constructor(val value: String) {
         fun parse(input: String): ServerOrigin {
             val candidate = input.trim()
             val uri = runCatching { URI(candidate) }
-                .getOrElse { throw IllegalArgumentException("Enter a valid HTTPS server origin") }
+                .getOrElse { throw IllegalArgumentException("Enter a valid HTTP or HTTPS server origin") }
             val scheme = uri.scheme?.lowercase(Locale.ROOT)
             val authority = uri.rawAuthority
 
-            require(scheme == "https") { "Server origin must use HTTPS" }
+            require(scheme == "http" || scheme == "https") {
+                "Server origin must use HTTP or HTTPS"
+            }
             require(!authority.isNullOrBlank()) { "Server origin must include a host" }
             require(uri.rawUserInfo == null && '@' !in authority) {
                 "Server origin must not include credentials"
@@ -27,8 +29,9 @@ value class ServerOrigin private constructor(val value: String) {
             }
 
             val (host, port) = parseAuthority(authority)
-            val canonicalPort = port.takeUnless { it == -1 || it == 443 } ?: -1
-            val canonical = URI("https", null, host, canonicalPort, null, null, null)
+            val defaultPort = if (scheme == "https") 443 else 80
+            val canonicalPort = port.takeUnless { it == -1 || it == defaultPort } ?: -1
+            val canonical = URI(scheme, null, host, canonicalPort, null, null, null)
                 .toASCIIString()
             return ServerOrigin(canonical)
         }
@@ -71,4 +74,11 @@ value class ServerOrigin private constructor(val value: String) {
             return port
         }
     }
+
+    val webSocketValue: String
+        get() = when {
+            value.startsWith("https://") -> value.replaceFirst("https://", "wss://")
+            value.startsWith("http://") -> value.replaceFirst("http://", "ws://")
+            else -> error("Server origin must use HTTP or HTTPS")
+        }
 }

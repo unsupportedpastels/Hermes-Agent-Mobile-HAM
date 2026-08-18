@@ -14,6 +14,18 @@ class ServerOriginTest {
     }
 
     @Test
+    fun canonicalizesHttpOriginForLocalServers() {
+        assertEquals(
+            "http://10.0.1.2",
+            ServerOrigin.parse("  HTTP://10.0.1.2:80/  ").value,
+        )
+        assertEquals(
+            "http://10.0.1.2:8080",
+            ServerOrigin.parse("http://10.0.1.2:8080").value,
+        )
+    }
+
+    @Test
     fun preservesExplicitNonDefaultPort() {
         assertEquals(
             "https://example.com:8443",
@@ -30,10 +42,10 @@ class ServerOriginTest {
     }
 
     @Test
-    fun rejectsNonHttpsAndNonOriginUrls() {
+    fun rejectsUnsupportedSchemesAndNonOriginUrls() {
         listOf(
             "",
-            "http://example.com",
+            "ftp://example.com",
             "https://user@example.com",
             "https://example.com/api",
             "https://example.com?ticket=secret",

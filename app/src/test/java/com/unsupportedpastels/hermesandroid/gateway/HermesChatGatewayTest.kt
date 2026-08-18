@@ -268,6 +268,28 @@ class HermesChatGatewayTest {
     }
 
     @Test
+    fun connectsToHttpOriginUsingUnencryptedWebSocketTransport() = runTest {
+        val socket = ScriptedSocket()
+        val socketFactory = RecordingSocketFactory(socket)
+        val connection = HermesChatGateway(
+            origin = ServerOrigin.parse("http://10.0.1.2"),
+            accessToken = "opaque-access",
+            ticketClient = RecordingTicketClient(
+                ticket = "ticket-1",
+                expectedOrigin = ServerOrigin.parse("http://10.0.1.2"),
+            ),
+            socketFactory = socketFactory,
+            parentScope = backgroundScope,
+        ).connect()
+
+        assertEquals(
+            listOf("ws://10.0.1.2/api/ws?ticket=ticket-1"),
+            socketFactory.urls,
+        )
+        connection.close()
+    }
+
+    @Test
     fun createsSessionSendsValidCwdAndPreservesRuntimeAndCanonicalStoredAlias() = runTest {
         val socket = ScriptedSocket()
         socket.onSend = { frame ->
@@ -1450,14 +1472,17 @@ class HermesChatGatewayTest {
     }
 }
 
-private class RecordingTicketClient(private val ticket: String) : WsTicketClient {
+private class RecordingTicketClient(
+    private val ticket: String,
+    private val expectedOrigin: ServerOrigin = ServerOrigin.parse("https://hermes.example"),
+) : WsTicketClient {
     val accessTokens = mutableListOf<String>()
 
     override suspend fun mintTicket(
         origin: ServerOrigin,
         accessToken: String,
     ): WsTicket {
-        assertEquals("https://hermes.example", origin.value)
+        assertEquals(expectedOrigin.value, origin.value)
         accessTokens += accessToken
         return WsTicket(ticket = ticket, ttlSeconds = 30)
     }

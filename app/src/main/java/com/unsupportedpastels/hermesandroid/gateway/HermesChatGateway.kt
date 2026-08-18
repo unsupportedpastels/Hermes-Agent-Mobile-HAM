@@ -660,10 +660,8 @@ class HermesChatGateway(
     }
 
     private fun websocketUrl(origin: ServerOrigin, ticket: String): String {
-        val httpsOrigin = origin.value
-        val wssOrigin = httpsOrigin.replaceFirst("https://", "wss://")
         val encodedTicket = URLEncoder.encode(ticket, StandardCharsets.UTF_8.name())
-        return "$wssOrigin/api/ws?ticket=$encodedTicket"
+        return "${origin.webSocketValue}/api/ws?ticket=$encodedTicket"
     }
 }
 

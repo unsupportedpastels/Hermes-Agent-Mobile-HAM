@@ -80,7 +80,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
+
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -243,8 +243,7 @@ import com.unsupportedpastels.hermesandroid.connection.ServerCatalogEntry
 import com.unsupportedpastels.hermesandroid.connection.MAX_SERVER_LABEL_CHARS
 import com.unsupportedpastels.hermesandroid.connection.ModelPickerState
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
-import com.unsupportedpastels.hermesandroid.connection.SessionBulkDeleteCapability
-import com.unsupportedpastels.hermesandroid.connection.BulkDeleteResult
+
 import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
 import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
@@ -270,12 +269,8 @@ import com.unsupportedpastels.hermesandroid.navigation.HomeRoute
 import com.unsupportedpastels.hermesandroid.navigation.ProjectRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import com.unsupportedpastels.hermesandroid.navigation.ServerSettingsRoute
-import com.unsupportedpastels.hermesandroid.session.BulkDeleteSelectionDecision
-import com.unsupportedpastels.hermesandroid.session.MAX_BULK_SELECTION
 import com.unsupportedpastels.hermesandroid.session.SavedSessionFilter
 import com.unsupportedpastels.hermesandroid.session.SessionListFilter
-import com.unsupportedpastels.hermesandroid.session.evaluateBulkDeleteSelection
-import com.unsupportedpastels.hermesandroid.session.toggleBulkSelection
 import com.unsupportedpastels.hermesandroid.share.SharePayload
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.theme.LocalHermesSemanticColors
@@ -386,9 +381,6 @@ fun HermesApp(
     savedSessionFilters: List<SavedSessionFilter> = emptyList(),
     onSaveSessionFilter: suspend (SavedSessionFilter) -> Result<Unit> = { Result.success(Unit) },
     onRemoveSessionFilter: suspend (String) -> Result<Unit> = { Result.success(Unit) },
-    onBulkDeleteSessions: suspend (Collection<DurableSessionId>) -> Result<BulkDeleteResult> = {
-        Result.failure(UnsupportedOperationException("Bulk session deletion unavailable"))
-    },
     onSearchTranscripts: (String) -> Unit = {},
     readAloud: MessageReadAloud? = null,
     voiceConversation: ComposerVoiceConversation? = null,
@@ -782,7 +774,6 @@ fun HermesApp(
                     savedSessionFilters = savedSessionFilters,
                     onSaveSessionFilter = onSaveSessionFilter,
                     onRemoveSessionFilter = onRemoveSessionFilter,
-                    onBulkDeleteSessions = onBulkDeleteSessions,
                     onSearchTranscripts = onSearchTranscripts,
                     onCreateProject = { projectCreatorOpen = true },
                     onNewSession = {
@@ -2177,7 +2168,6 @@ private fun SessionListScreen(
     savedSessionFilters: List<SavedSessionFilter>,
     onSaveSessionFilter: suspend (SavedSessionFilter) -> Result<Unit>,
     onRemoveSessionFilter: suspend (String) -> Result<Unit>,
-    onBulkDeleteSessions: suspend (Collection<DurableSessionId>) -> Result<BulkDeleteResult>,
     onSearchTranscripts: (String) -> Unit,
     onCreateProject: () -> Unit,
     onNewSession: () -> Unit = {},
@@ -2188,12 +2178,9 @@ private fun SessionListScreen(
     val canStartNewChat = snapshot.authenticationState == AuthenticationState.Authenticated
     var searchOpen by rememberSaveable { mutableStateOf(initialSearchOpen) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
-    var selectionMode by rememberSaveable { mutableStateOf(false) }
-    var selectedSessionIds by remember { mutableStateOf<Set<DurableSessionId>>(emptySet()) }
     var savedFilterMenuOpen by remember { mutableStateOf(false) }
     var saveFilterDialogOpen by remember { mutableStateOf(false) }
     var saveFilterName by remember { mutableStateOf("") }
-    var bulkDeleteConfirmation by remember { mutableStateOf<Set<DurableSessionId>?>(null) }
 
     var editingSession by remember { mutableStateOf<SessionSummary?>(null) }
     var deletingSession by remember { mutableStateOf<SessionSummary?>(null) }
@@ -2222,23 +2209,10 @@ private fun SessionListScreen(
                     session.workspacePath?.contains(normalizedSearch, ignoreCase = true) == true
             )
     }
-    val visibleDurableSessionIds = visibleSessions
-        .filterNot(SessionSummary::isLocalDraft)
-        .map(SessionSummary::id)
-        .toSet()
     val activeControllerSessionIds = snapshot.activeRuntimes
         .filter { it.access == RuntimeAccess.Controller }
         .mapNotNull { it.durableSessionId }
         .toSet()
-    val activeTurnSessionIds = snapshot.chatSessions
-        .filterValues(ChatSessionSnapshot::isSending)
-        .keys
-    val selectionDecision = evaluateBulkDeleteSelection(
-        selectedIds = selectedSessionIds,
-        sessions = sessions,
-        controllerRuntimeSessionIds = activeControllerSessionIds,
-        activeTurnSessionIds = activeTurnSessionIds,
-    )
     var observedFilterScopeKey by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(serverOrigin, snapshot.authenticationState) {
         if (
@@ -2260,16 +2234,10 @@ private fun SessionListScreen(
     LaunchedEffect(serverOrigin, snapshot.selectedProfile) {
         val scopeKey = "${serverOrigin?.value.orEmpty()}\u0000${snapshot.selectedProfile}"
         if (observedFilterScopeKey != null && observedFilterScopeKey != scopeKey) {
-            selectionMode = false
-            selectedSessionIds = emptySet()
             searchQuery = ""
             searchOpen = false
         }
         observedFilterScopeKey = scopeKey
-    }
-    LaunchedEffect(visibleDurableSessionIds) {
-        selectedSessionIds = selectedSessionIds.intersect(visibleDurableSessionIds)
-        if (selectedSessionIds.isEmpty()) selectionMode = false
     }
     Scaffold(
         modifier = modifier,
@@ -2333,33 +2301,6 @@ private fun SessionListScreen(
                         }
                     },
                     actions = {
-                        if (selectionMode) {
-                            Text(
-                                "${selectedSessionIds.size} selected",
-                                modifier = Modifier.semantics {
-                                    contentDescription = "${selectedSessionIds.size} sessions selected"
-                                },
-                                style = MaterialTheme.typography.labelLarge,
-                            )
-                            TextButton(
-                                onClick = {
-                                    selectionMode = false
-                                    selectedSessionIds = emptySet()
-                                },
-                                modifier = Modifier.semantics {
-                                    contentDescription = "Exit session selection"
-                                },
-                            ) { Text("Done") }
-                            if (snapshot.bulkDeleteCapability != SessionBulkDeleteCapability.Unsupported) {
-                                TextButton(
-                                    enabled = selectionDecision.canDelete,
-                                    onClick = { bulkDeleteConfirmation = selectedSessionIds },
-                                    modifier = Modifier.semantics {
-                                        contentDescription = "Delete selected sessions"
-                                    },
-                                ) { Text("Delete selected") }
-                            }
-                        }
                         TextButton(
                             onClick = {
                                 searchOpen = !searchOpen
@@ -2378,15 +2319,7 @@ private fun SessionListScreen(
                                 style = MaterialTheme.typography.titleLarge,
                             )
                         }
-                        if (!selectionMode && visibleDurableSessionIds.isNotEmpty()) {
-                            TextButton(
-                                onClick = { selectionMode = true },
-                                modifier = Modifier.semantics {
-                                    contentDescription = "Select sessions"
-                                },
-                            ) { Text("Select") }
-                        }
-                        if (!selectionMode && savedSessionFilters.isNotEmpty()) {
+                        if (savedSessionFilters.isNotEmpty()) {
                             Box {
                                 TextButton(
                                     onClick = { savedFilterMenuOpen = true },
@@ -2710,19 +2643,8 @@ private fun SessionListScreen(
                             RecentSessionHomeRow(
                                 session = session,
                                 current = isCurrent,
-                                selectionMode = selectionMode && !session.isLocalDraft,
-                                isSelected = session.id in selectedSessionIds,
-                                onSelectionToggle = {
-                                    if (!session.isLocalDraft) {
-                                        selectedSessionIds = toggleBulkSelection(selectedSessionIds, session)
-                                    }
-                                },
                                 onClick = dropUnlessResumed {
-                                    if (selectionMode && !session.isLocalDraft) {
-                                        selectedSessionIds = toggleBulkSelection(selectedSessionIds, session)
-                                    } else {
-                                        onSessionSelected(session.id)
-                                    }
+                                    onSessionSelected(session.id)
                                 },
                                 onRename = { editingSession = session },
                                 onPin = { sessionActionScope.launch { onSetSessionPinned(session.id, !session.pinned) } },
@@ -2730,14 +2652,10 @@ private fun SessionListScreen(
                                 onDelete = { deletingSession = session },
                             )
                         }
-                        if (selectionMode) {
-                            row()
-                        } else {
-                            SwipeSessionRow(
-                                onDeleteRequest = { deletingSession = session },
-                                content = row,
-                            )
-                        }
+                        SwipeSessionRow(
+                            onDeleteRequest = { deletingSession = session },
+                            content = row,
+                        )
                     }
                 }
             }
@@ -2818,61 +2736,7 @@ private fun SessionListScreen(
             },
         )
     }
-    bulkDeleteConfirmation?.let { ids ->
-        val confirmationDecision = evaluateBulkDeleteSelection(
-            selectedIds = ids,
-            sessions = sessions,
-            controllerRuntimeSessionIds = activeControllerSessionIds,
-            activeTurnSessionIds = activeTurnSessionIds,
-        )
-        AlertDialog(
-            onDismissRequest = { bulkDeleteConfirmation = null },
-            title = { Text("Delete ${ids.size} sessions?") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("This permanently deletes the selected durable sessions from Hermes Serve.")
-                    if (confirmationDecision.blockedSessionIds.isNotEmpty()) {
-                        Text(
-                            "Active work is selected. Stop it before deleting.",
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                    if (confirmationDecision.invalidSessionIds.isNotEmpty()) {
-                        Text(
-                            "Some selected sessions are no longer visible.",
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = confirmationDecision.canDelete &&
-                        snapshot.bulkDeleteCapability != SessionBulkDeleteCapability.Unsupported,
-                    onClick = {
-                        sessionActionScope.launch {
-                            onBulkDeleteSessions(ids)
-                                .onSuccess { result ->
-                                    bulkDeleteConfirmation = null
-                                    selectedSessionIds = emptySet()
-                                    selectionMode = false
-                                    snackbarHostState.showSnackbar("Deleted ${result.deleted} sessions")
-                                }
-                                .onFailure {
-                                    snackbarHostState.showSnackbar("Bulk delete was not completed")
-                                }
-                        }
-                    },
-                    modifier = Modifier.semantics {
-                        contentDescription = "Confirm delete selected sessions"
-                    },
-                ) { Text("Delete") }
-            },
-            dismissButton = {
-                TextButton(onClick = { bulkDeleteConfirmation = null }) { Text("Cancel") }
-            },
-        )
-    }
+
     deletingSession?.let { session ->
         AlertDialog(
             onDismissRequest = { deletingSession = null },
@@ -3157,9 +3021,6 @@ private fun ProjectHomeRow(
 private fun RecentSessionHomeRow(
     session: SessionSummary,
     current: Boolean,
-    selectionMode: Boolean = false,
-    isSelected: Boolean = false,
-    onSelectionToggle: () -> Unit = {},
     onClick: () -> Unit,
     onRename: () -> Unit,
     onPin: () -> Unit,
@@ -3176,22 +3037,8 @@ private fun RecentSessionHomeRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
-            .then(
-                if (selectionMode) {
-                    Modifier.clickable(onClick = onSelectionToggle)
-                } else {
-                    Modifier.combinedClickable(onClick = onClick, onLongClick = onRename)
-                },
-            )
+            .combinedClickable(onClick = onClick, onLongClick = onRename)
             .semantics(mergeDescendants = true) {
-                selected = selectionMode && isSelected
-                if (selectionMode) {
-                    contentDescription = if (isSelected) {
-                        "${session.title}, selected"
-                    } else {
-                        "${session.title}, not selected"
-                    }
-                }
                 if (current) stateDescription = "Current controller session"
             },
     ) {
@@ -3200,15 +3047,6 @@ private fun RecentSessionHomeRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (selectionMode) {
-                Checkbox(
-                    checked = isSelected,
-                    onCheckedChange = { onSelectionToggle() },
-                    modifier = Modifier.semantics {
-                        contentDescription = if (isSelected) "Deselect ${session.title}" else "Select ${session.title}"
-                    },
-                )
-            }
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -3847,7 +3685,7 @@ internal fun ServerSettingsScreen(
                     style = MaterialTheme.typography.bodyLarge,
                 )
                 Text(
-                    "Enter the public HTTPS origin of your unchanged Hermes Serve instance.",
+                    "Enter the HTTP or HTTPS origin of your unchanged Hermes Serve instance.",
                     style = MaterialTheme.typography.bodyLarge,
                 )
                 OutlinedTextField(
@@ -3860,7 +3698,7 @@ internal fun ServerSettingsScreen(
                     supportingText = {
                         Text(
                             validationMessage
-                                ?: "HTTPS origin only — no path, credentials, query, or ticket.",
+                                ?: "HTTP or HTTPS origin only — no path, credentials, query, or ticket.",
                         )
                     },
                     isError = validationMessage != null,

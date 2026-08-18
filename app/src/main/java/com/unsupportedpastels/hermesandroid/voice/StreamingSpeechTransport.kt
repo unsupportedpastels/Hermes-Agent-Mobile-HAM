@@ -20,10 +20,9 @@ import java.nio.charset.StandardCharsets
  * never logged (it carries the ticket).
  */
 internal fun speakStreamUrl(origin: ServerOrigin, ticket: String, profile: String): String {
-    val wssOrigin = origin.value.replaceFirst("https://", "wss://")
     val encodedTicket = URLEncoder.encode(ticket, StandardCharsets.UTF_8.name())
     val encodedProfile = URLEncoder.encode(profile.take(64), StandardCharsets.UTF_8.name())
-    return "$wssOrigin/api/audio/speak-stream?ticket=$encodedTicket&profile=$encodedProfile"
+    return "${origin.webSocketValue}/api/audio/speak-stream?ticket=$encodedTicket&profile=$encodedProfile"
 }
 
 /** Seam the ViewModel uses to open speech sockets (fake-able in tests). */
