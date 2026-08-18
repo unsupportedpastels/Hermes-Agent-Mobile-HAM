@@ -662,6 +662,40 @@ class HermesConnectionClientTest {
     }
 
     @Test
+    fun loadSessionsPageUsesOfficialLimitOffsetAndReadsPaginationMetadata() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals("/api/profiles/sessions", request.url.encodedPath)
+            assertEquals("20", request.url.parameters["limit"])
+            assertEquals("20", request.url.parameters["offset"])
+            assertEquals("recent", request.url.parameters["order"])
+            assertEquals("exclude", request.url.parameters["archived"])
+            assertEquals("default", request.url.parameters["profile"])
+            respond(
+                content = """{
+                    "sessions":[{"id":"stored-21","title":"Session 21"}],
+                    "total":21,
+                    "limit":20,
+                    "offset":20
+                }""".trimIndent(),
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+
+        val page = HttpHermesConnectionClient(HttpClient(engine)).loadSessionsPageForProfile(
+            ServerOrigin.parse("https://hermes.example"),
+            "opaque-access",
+            profile = "default",
+            limit = 20,
+            offset = 20,
+        )
+
+        assertEquals(listOf("stored-21"), page.sessions.map { it.id.value })
+        assertEquals(21, page.total)
+        assertEquals(20, page.limit)
+        assertEquals(20, page.offset)
+    }
+
+    @Test
     fun probeDiscoversReachableGatedServerAndNativeNousLogin() = runTest {
         val requestedPaths = mutableListOf<String>()
         val engine = MockEngine { request ->

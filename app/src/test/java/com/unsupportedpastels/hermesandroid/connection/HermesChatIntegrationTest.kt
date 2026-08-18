@@ -938,6 +938,54 @@ class HermesChatIntegrationTest {
     }
 
     @Test
+    fun foregroundReconnectsAfterTransientConnectFailure() = runTest(dispatcher) {
+        val foreground = MutableStateFlow(true)
+        val client = FailThenSucceedConnectionClient(failuresBeforeSuccess = 1)
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = MemoryTokenStore(tokens),
+            nowEpochSeconds = { 1_900_000_000 },
+            appForegroundStates = foreground,
+        )
+
+        // The initial connect hits a transient failure and lands Disconnected —
+        // exactly the "Offline" state seen after resuming from background.
+        advanceUntilIdle()
+        assertEquals(ConnectionState.Disconnected, viewModel.snapshots.value.connectionState)
+        assertEquals(1, client.probeAttempts)
+
+        // Toggling foreground off→on (returning from background) must self-heal.
+        foreground.value = false
+        runCurrent()
+        foreground.value = true
+        advanceUntilIdle()
+
+        assertEquals(ConnectionState.Connected, viewModel.snapshots.value.connectionState)
+        assertEquals(AuthenticationState.Authenticated, viewModel.snapshots.value.authenticationState)
+        assertTrue(client.probeAttempts >= 2)
+    }
+
+    @Test
+    fun retryConnectionRecoversFromTransientFailure() = runTest(dispatcher) {
+        val client = FailThenSucceedConnectionClient(failuresBeforeSuccess = 1)
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = MemoryTokenStore(tokens),
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+        advanceUntilIdle()
+        assertEquals(ConnectionState.Disconnected, viewModel.snapshots.value.connectionState)
+
+        viewModel.retryConnection()
+        advanceUntilIdle()
+
+        assertEquals(ConnectionState.Connected, viewModel.snapshots.value.connectionState)
+        assertEquals(AuthenticationState.Authenticated, viewModel.snapshots.value.authenticationState)
+    }
+
+    @Test
     fun reconnectReplacesLocalPartialWithInflightSnapshot() = runTest(dispatcher) {
         val first = ReconnectingChatSession(
             runtimeId = "runtime-1",
@@ -1258,9 +1306,10 @@ class HermesChatIntegrationTest {
         first.join()
         duplicate.join()
 
-        assertEquals(
-            RunInteractionLifecycle.Resolved,
-            viewModel.snapshots.value.chatSessions.getValue(durableId).runState.clarification?.lifecycle,
+        // A resolved response clears the card immediately rather than leaving a
+        // settled placeholder that lingers until the next turn.
+        assertNull(
+            viewModel.snapshots.value.chatSessions.getValue(durableId).runState.clarification,
         )
     }
 
@@ -2425,6 +2474,40 @@ private class ChatConnectionClient : HermesConnectionClient {
             com.unsupportedpastels.hermesandroid.gateway.ChatMessage(ChatMessageRole.Assistant, "Earlier answer"),
         )
     }
+}
+
+/**
+ * Probes fail with a transient transport error for the first [failuresBeforeSuccess]
+ * attempts, then succeed. Models a resume-time network blip that leaves the app
+ * Disconnected until it retries.
+ */
+private class FailThenSucceedConnectionClient(
+    private val failuresBeforeSuccess: Int,
+) : HermesConnectionClient {
+    private val durableId = DurableSessionId("durable-1")
+    var probeAttempts = 0
+        private set
+
+    override suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo {
+        probeAttempts += 1
+        if (probeAttempts <= failuresBeforeSuccess) {
+            throw HermesConnectionException("Could not reach Hermes Serve")
+        }
+        return HermesConnectionInfo(
+            version = "0.20.0",
+            authRequired = true,
+            nativeOAuthSupported = true,
+            providers = listOf(HermesAuthProvider("nous")),
+        )
+    }
+
+    override suspend fun authenticate(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+    ) = AuthenticatedHermesConnection(
+        userId = "user-1",
+        sessions = listOf(SessionSummary(durableId, "Test session")),
+    )
 }
 
 private class RecordingTurnNotificationController : TurnNotificationController {

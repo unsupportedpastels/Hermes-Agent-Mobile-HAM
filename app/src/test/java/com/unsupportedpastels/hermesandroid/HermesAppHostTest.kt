@@ -214,7 +214,8 @@ class HermesAppHostTest {
         composeRule.onNodeWithText("Controller session").performClick()
         composeRule.onNodeWithText("deny").performScrollTo().performClick()
         composeRule.onNodeWithText("Yes").performScrollTo().performClick()
-        composeRule.onNodeWithText("Stop").performClick()
+        composeRule.onNodeWithText("Continue").performScrollTo().performClick()
+        composeRule.onNodeWithContentDescription("Stop Hermes response").performClick()
 
         composeRule.runOnIdle {
             assertEquals(Triple(sessionId, "clarify-1", "Yes"), clarification)

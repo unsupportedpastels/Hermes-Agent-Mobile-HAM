@@ -24,6 +24,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
@@ -70,6 +71,7 @@ import com.unsupportedpastels.hermesandroid.gateway.CurrentModelInfo
 import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
+import com.unsupportedpastels.hermesandroid.gateway.RecentSessionsState
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
 import com.unsupportedpastels.hermesandroid.gateway.ActiveRuntimeSession
@@ -429,7 +431,7 @@ class HermesAppTest {
         }
 
         val composerAncestor = hasAnyAncestor(hasTestTag("Message composer"))
-        composeRule.onNodeWithText("Stop").assert(composerAncestor)
+        composeRule.onNodeWithContentDescription("Stop Hermes response").assert(composerAncestor)
         composeRule.onNodeWithContentDescription("Send message").assertDoesNotExist()
     }
 
@@ -1126,7 +1128,7 @@ class HermesAppTest {
             HermesAndroidTheme { HermesApp(snapshot = snapshot) }
         }
 
-        composeRule.onNodeWithText("Project Alpha").performClick()
+        composeRule.onNodeWithTag("Project home row:Project Alpha").performClick()
         composeRule.onNodeWithContentDescription("Sessions inbox, 2 sessions").assertIsDisplayed()
         composeRule.onNodeWithText("Sessions", substring = false).assertIsDisplayed()
         composeRule.onNodeWithText("Workspace: No workspace").assertIsDisplayed()
@@ -1172,7 +1174,7 @@ class HermesAppTest {
             HermesAndroidTheme { HermesApp(snapshot = snapshot) }
         }
 
-        composeRule.onNodeWithText("Hermes Agent").performClick()
+        composeRule.onNodeWithTag("Project home row:Hermes Agent").performClick()
         composeRule.onNodeWithText("hermes-agent").assertIsDisplayed()
         composeRule.onNodeWithText("Revitalize inbox style session sidebar").assertIsDisplayed()
         composeRule.onNodeWithText("I think I might have some worktree or draft problems")
@@ -1207,7 +1209,7 @@ class HermesAppTest {
             HermesAndroidTheme { HermesApp(snapshot = snapshot) }
         }
 
-        composeRule.onNodeWithText("Status project").performClick()
+        composeRule.onNodeWithTag("Project home row:Status project").performClick()
         composeRule.onNodeWithContentDescription("Status session is running").assertIsDisplayed()
 
         composeRule.runOnIdle {
@@ -1248,7 +1250,7 @@ class HermesAppTest {
             HermesAndroidTheme { HermesApp(snapshot = snapshot) }
         }
 
-        composeRule.onNodeWithText("Pulse project").performClick()
+        composeRule.onNodeWithTag("Project home row:Pulse project").performClick()
         composeRule.onNodeWithContentDescription("Pulse session is running").assertIsDisplayed()
 
         val startAlpha = sessionStatusPulseAlphaAt(playTimeMillis = 0)
@@ -1738,13 +1740,55 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("First session").performClick()
-        composeRule.onNodeWithText("Which environment should I use?").assertIsDisplayed()
+        // The card renders at the bottom-pinned tail of the transcript; a tall
+        // clarify card can push the question above the fold, so assert it exists
+        // while the interactive controls (choices + Continue) stay on screen.
+        composeRule.onNodeWithText("Which environment should I use?").assertExists()
+        // Desktop parity: picking a choice stages it; the user confirms with Continue.
         composeRule.onNodeWithText("Production").performClick()
+        composeRule.onNodeWithText("Continue").performClick()
         assertEquals(Triple(sessionId, requestId, "Production"), response)
     }
 
     @Test
-    fun terminalClarificationShowsLifecycleAndNoChoiceControls() {
+    fun clarificationSkipSendsEmptyAnswer() {
+        val sessionId = sessions.first().id
+        val requestId = "clarify-skip"
+        var response: Triple<DurableSessionId, String, String>? = null
+        val pending = connectedSnapshot.copy(
+            chatSessions = mapOf(
+                sessionId to ChatSessionSnapshot(
+                    runState = RunEventState(
+                        clarification = ClarificationInteraction(
+                            runtimeSessionId = RuntimeSessionId("runtime-1"),
+                            requestId = requestId,
+                            question = "Which environment should I use?",
+                            choices = listOf("Staging", "Production"),
+                            multiSelect = false,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = pending,
+                    onClarificationResponse = { id, request, answer ->
+                        response = Triple(id, request, answer)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("First session").performClick()
+        composeRule.onNodeWithText("Skip").performClick()
+        assertEquals(Triple(sessionId, requestId, ""), response)
+    }
+
+    @Test
+    fun expiredClarificationShowsTimedOutAndHasNoChoiceControls() {
         val sessionId = sessions.first().id
         val snapshot = connectedSnapshot.copy(
             chatSessions = mapOf(
@@ -1756,7 +1800,7 @@ class HermesAppTest {
                             question = "Which environment should I use?",
                             choices = listOf("Staging", "Production"),
                             multiSelect = false,
-                            lifecycle = RunInteractionLifecycle.Resolved,
+                            lifecycle = RunInteractionLifecycle.Expired,
                         ),
                     ),
                 ),
@@ -1766,9 +1810,11 @@ class HermesAppTest {
             HermesAndroidTheme { HermesApp(snapshot = snapshot) }
         }
         composeRule.onNodeWithText("First session").performClick()
-        composeRule.onNodeWithText("Which environment should I use?").assertIsDisplayed()
-        composeRule.onNodeWithText("Resolved").assertIsDisplayed()
-        composeRule.onAllNodesWithText("Production").assertCountEquals(0)
+        composeRule.onNodeWithText("Which environment should I use?").assertExists()
+        // A settled (timed-out) card drops all interactive controls.
+        composeRule.onNodeWithText("Timed out").assertExists()
+        composeRule.onAllNodesWithText("Continue").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Skip").assertCountEquals(0)
     }
 
     @Test
@@ -1805,7 +1851,7 @@ class HermesAppTest {
         composeRule.onNodeWithText("First session").performClick()
         composeRule.onNodeWithText("Gamma").performClick()
         composeRule.onNodeWithText("Beta").performClick()
-        composeRule.onNodeWithText("Send response").performClick()
+        composeRule.onNodeWithText("Continue").performClick()
 
         assertEquals(Triple(sessionId, "clarify-multi", "Beta, Gamma"), response)
     }
@@ -1913,11 +1959,11 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("First session").performClick()
-        composeRule.onNodeWithText("Stop").performClick()
+        composeRule.onNodeWithContentDescription("Stop Hermes response").performClick()
         assertEquals(sessionId, stopped)
 
         stopping = true
-        composeRule.onNodeWithText("Stopping…").assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("Stop Hermes response").assertIsNotEnabled()
     }
 
     @Test
@@ -2879,10 +2925,81 @@ class HermesAppTest {
         }
 
         composeRule.onNodeWithText("Projects").assertIsDisplayed()
-        composeRule.onNodeWithText("Project Alpha").assertIsDisplayed()
+        composeRule.onNodeWithTag("Project home row:Project Alpha").assertIsDisplayed()
         composeRule.onNodeWithText("Recent Sessions").assertIsDisplayed()
         composeRule.onNodeWithText("Unscoped recent").assertIsDisplayed()
-        composeRule.onNodeWithText(scopedSession.title).assertDoesNotExist()
+        composeRule.onNodeWithText(scopedSession.title).assertIsDisplayed()
+    }
+
+    @Test
+    fun recentSessionWorkspaceJoinsAuthoritativeProjectIdentity() {
+        val projectId = ProjectId("project-workspace")
+        val project = ProjectSummary(projectId, "Project Alpha", "/workspace/alpha", 1, emptyList())
+        val session = SessionSummary(
+            id = DurableSessionId("workspace-session"),
+            title = "Workspace session",
+            workspacePath = "/workspace/alpha",
+        )
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            durableSessions = listOf(session),
+            projects = listOf(project),
+            projectState = ProjectLoadState.Loaded(
+                projects = listOf(project),
+                scopedSessionIds = setOf(session.id),
+            ),
+            scopedSessionIds = setOf(session.id),
+        )
+
+        composeRule.setContent {
+            HermesAndroidTheme { HermesApp(snapshot = snapshot) }
+        }
+
+        composeRule.onAllNodesWithText("Project Alpha").assertCountEquals(2)
+        composeRule.onAllNodesWithText("Durable session").assertCountEquals(0)
+    }
+
+    @Test
+    fun homeRecentSessionsShowsPreviewAndViewAllOpensPagedList() {
+        val previewSessions = (1..10).map { index ->
+            SessionSummary(
+                id = DurableSessionId("recent-$index"),
+                title = "Recent $index",
+                lastActiveEpochSeconds = index.toDouble(),
+            )
+        }
+        val allSessions = previewSessions + SessionSummary(
+            id = DurableSessionId("recent-11"),
+            title = "Recent 11",
+            lastActiveEpochSeconds = 0.0,
+        )
+        var loadCalls = 0
+        val snapshot = connectedSnapshot.copy(
+            authenticationState = AuthenticationState.Authenticated,
+            durableSessions = previewSessions,
+            recentSessions = RecentSessionsState(
+                sessions = allSessions,
+                total = 11,
+                nextOffset = 11,
+                hasMore = false,
+            ),
+        )
+
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = snapshot,
+                    onLoadRecentSessions = { loadCalls += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Recent 10").assertIsDisplayed()
+        composeRule.onNodeWithText("Recent 11").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("View all recent sessions").performClick()
+        composeRule.onNodeWithTag("Recent sessions full list").performScrollToIndex(10)
+        composeRule.onNodeWithText("Recent 11").assertIsDisplayed()
+        assertEquals(1, loadCalls)
     }
 
     @Test
@@ -3010,7 +3127,7 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithText("Project Alpha").performClick()
+        composeRule.onNodeWithTag("Project home row:Project Alpha").performClick()
         composeRule.onNodeWithText("Valid task").performClick()
         composeRule.onNode(hasSetTextAction()).performTextInput("Start valid task")
         composeRule.onNodeWithContentDescription("Send message").performClick()
@@ -3045,7 +3162,7 @@ class HermesAppTest {
             HermesAndroidTheme { HermesApp(snapshot = snapshot) }
         }
 
-        composeRule.onNodeWithText("Project Alpha").performClick()
+        composeRule.onNodeWithTag("Project home row:Project Alpha").performClick()
         composeRule.onNodeWithText("Needs workspace").performClick()
         composeRule.onNodeWithText("No workspace").assertIsDisplayed()
         composeRule.onNode(hasSetTextAction()).performTextInput("Keep editing")
@@ -3085,7 +3202,7 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithText("Project Alpha").performClick()
+        composeRule.onNodeWithTag("Project home row:Project Alpha").performClick()
         composeRule.onNodeWithText("New task").performClick()
         composeRule.onNodeWithText("Returned draft").assertIsDisplayed()
 
@@ -3114,7 +3231,7 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithText("Project Alpha").performClick()
+        composeRule.onNodeWithTag("Project home row:Project Alpha").performClick()
         composeRule.onNodeWithText("Loading project sessions").assertIsDisplayed()
         assertEquals(projectId, openedProject)
         assertEquals(null, openedSession)
@@ -3140,7 +3257,7 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithText("Project Alpha").performClick()
+        composeRule.onNodeWithTag("Project home row:Project Alpha").performClick()
         composeRule.onNodeWithText("temporary metadata outage").assertIsDisplayed()
         composeRule.runOnIdle { drillState = ProjectSessionLoadState.Unsupported }
         composeRule.onNodeWithText("Project sessions unavailable").assertIsDisplayed()
@@ -3172,7 +3289,7 @@ class HermesAppTest {
             }
         }
 
-        composeRule.onNodeWithText("Project Alpha").performClick()
+        composeRule.onNodeWithTag("Project home row:Project Alpha").performClick()
         composeRule.onNodeWithText("Project session").performClick()
         composeRule.waitForIdle()
 
@@ -3197,7 +3314,7 @@ class HermesAppTest {
             HermesAndroidTheme { HermesApp(snapshot = snapshot) }
         }
 
-        composeRule.onNodeWithText("Project Alpha").performClick()
+        composeRule.onNodeWithTag("Project home row:Project Alpha").performClick()
         composeRule.onNodeWithText("Project session").performClick()
         composeRule.onNodeWithContentDescription("Back").performClick()
         composeRule.onAllNodesWithText("Project Alpha").assertCountEquals(2)

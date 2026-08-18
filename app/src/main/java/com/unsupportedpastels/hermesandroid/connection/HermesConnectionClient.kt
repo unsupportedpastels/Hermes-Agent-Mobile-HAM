@@ -124,6 +124,9 @@ private data class HermesSessionRow(
 @Serializable
 private data class HermesSessionsResponse(
     val sessions: List<HermesSessionRow>,
+    val total: Int? = null,
+    val limit: Int? = null,
+    val offset: Int? = null,
 )
 
 @Serializable
@@ -145,6 +148,13 @@ data class SessionSearchResult(
     val title: String,
     val snippet: String,
     val role: String? = null,
+)
+
+data class SessionPage(
+    val sessions: List<SessionSummary>,
+    val total: Int? = null,
+    val limit: Int,
+    val offset: Int,
 )
 
 @Serializable
@@ -258,6 +268,16 @@ class HermesAuthenticationRejectedException(
     message: String,
 ) : HermesConnectionException(message)
 
+/**
+ * A protected REST request returned HTTP 401 with credentials attached. Distinct
+ * from [HermesAuthenticationRejectedException] (session-establishment rejection):
+ * this signals a mid-session token that the server no longer accepts, which a live
+ * refresh token can often heal by reconnecting rather than forcing a fresh sign-in.
+ */
+class HermesUnauthorizedException(
+    message: String = "Hermes request returned HTTP 401",
+) : HermesConnectionException(message)
+
 enum class CronRestEndpoint {
     Trigger,
     Runs,
@@ -292,6 +312,7 @@ private const val MAX_MODEL_OPTIONS_RESPONSE_BODY_BYTES = 1024 * 1024
 private const val MAX_TRANSCRIPT_REASONING_CHARS = 1024 * 1024
 private val TRANSCRIPT_PAGE_LIMITS = intArrayOf(100, 50, 25, 10, 5, 1)
 private const val MAX_DURABLE_SESSIONS = 20
+private const val MAX_SESSION_PAGE_SIZE = 500
 private const val MAX_HOST_DIRECTORY_ENTRIES = 500
 internal const val MAX_CRON_RUNS = 20
 private const val MAX_MANAGED_IMAGE_BYTES = 10 * 1024 * 1024
@@ -430,6 +451,25 @@ interface HermesConnectionClient {
         profile: String,
         archivedOnly: Boolean = false,
     ): List<SessionSummary> = authenticate(serverOrigin, accessToken).sessions
+
+    suspend fun loadSessionsPageForProfile(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        limit: Int = MAX_DURABLE_SESSIONS,
+        offset: Int = 0,
+        archivedOnly: Boolean = false,
+    ): SessionPage = SessionPage(
+        sessions = loadSessionsForProfile(
+            serverOrigin = serverOrigin,
+            accessToken = accessToken,
+            profile = profile,
+            archivedOnly = archivedOnly,
+        ),
+        total = null,
+        limit = limit,
+        offset = offset,
+    )
 
     suspend fun loadTranscript(
         serverOrigin: ServerOrigin,
@@ -1344,7 +1384,7 @@ class HttpHermesConnectionClient(
         val sessions = if (status.authRequired) {
             emptyList()
         } else {
-            loadSessions(serverOrigin, accessToken = null)
+            loadSessionsPage(serverOrigin, accessToken = null).sessions
         }
         HermesConnectionInfo(
             version = status.version,
@@ -1367,7 +1407,7 @@ class HttpHermesConnectionClient(
     ): AuthenticatedHermesConnection = try {
         authenticatedConnectionConcurrently(
             loadUser = { loadAuthenticatedUser(serverOrigin, accessToken) },
-            loadSessions = { loadSessions(serverOrigin, accessToken) },
+            loadSessions = { loadSessionsPage(serverOrigin, accessToken).sessions },
         )
     } catch (cancelled: CancellationException) {
         throw cancelled
@@ -1385,7 +1425,28 @@ class HttpHermesConnectionClient(
         accessToken: String,
         profile: String,
         archivedOnly: Boolean,
-    ): List<SessionSummary> = loadSessions(serverOrigin, accessToken, profile, archivedOnly)
+    ): List<SessionSummary> = loadSessionsPageForProfile(
+        serverOrigin = serverOrigin,
+        accessToken = accessToken,
+        profile = profile,
+        archivedOnly = archivedOnly,
+    ).sessions
+
+    override suspend fun loadSessionsPageForProfile(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+        profile: String,
+        limit: Int,
+        offset: Int,
+        archivedOnly: Boolean,
+    ): SessionPage = loadSessionsPage(
+        serverOrigin = serverOrigin,
+        accessToken = accessToken,
+        profile = profile,
+        limit = limit,
+        offset = offset,
+        archivedOnly = archivedOnly,
+    )
 
     private suspend fun loadAuthenticatedUser(
         serverOrigin: ServerOrigin,
@@ -1452,6 +1513,11 @@ class HttpHermesConnectionClient(
         }
         if (!response.status.isSuccess()) {
             response.readBodyTextBounded()
+            if (response.status.value == 401) {
+                throw HermesUnauthorizedException(
+                    "Hermes transcript returned HTTP 401",
+                )
+            }
             throw HermesConnectionException(
                 "Hermes transcript returned HTTP ${response.status.value}",
             )
@@ -1753,17 +1819,22 @@ class HttpHermesConnectionClient(
         throw HermesConnectionException("Could not download Hermes managed image", error)
     }
 
-    private suspend fun loadSessions(
+    private suspend fun loadSessionsPage(
         serverOrigin: ServerOrigin,
         accessToken: String?,
         profile: String = "default",
+        limit: Int = MAX_DURABLE_SESSIONS,
+        offset: Int = 0,
         archivedOnly: Boolean = false,
-    ): List<SessionSummary> {
+    ): SessionPage {
         val boundedProfile = profile.trim().takeIf { it.isNotEmpty() && it.length <= 64 }
             ?: throw HermesConnectionException("Hermes session profile is invalid")
+        val boundedLimit = limit.coerceIn(1, MAX_SESSION_PAGE_SIZE)
+        val boundedOffset = offset.coerceAtLeast(0)
         val sessionsResponse = client.get("${serverOrigin.value}/api/profiles/sessions") {
             accessToken?.let { bearerAuth(it) }
-            parameter("limit", MAX_DURABLE_SESSIONS)
+            parameter("limit", boundedLimit)
+            parameter("offset", boundedOffset)
             parameter("order", "recent")
             parameter("archived", if (archivedOnly) "only" else "exclude")
             parameter("profile", boundedProfile)
@@ -1779,9 +1850,10 @@ class HttpHermesConnectionClient(
             }
             throw HermesConnectionException(message)
         }
-        val sessions = json.decodeFromString<HermesSessionsResponse>(
+        val decoded = json.decodeFromString<HermesSessionsResponse>(
             sessionsResponse.readBodyTextBounded(),
-        ).sessions.mapNotNull { row ->
+        )
+        val sessions = decoded.sessions.mapNotNull { row ->
             val id = row.id?.takeIf(String::isNotBlank)
                 ?: row.sessionKey?.takeIf(String::isNotBlank)
                 ?: return@mapNotNull null
@@ -1799,8 +1871,13 @@ class HttpHermesConnectionClient(
                 archived = row.archived,
             )
         }.distinctBy { it.id }
-            .take(MAX_DURABLE_SESSIONS)
-        return sessions
+            .take(boundedLimit)
+        return SessionPage(
+            sessions = sessions,
+            total = decoded.total,
+            limit = decoded.limit?.coerceIn(1, MAX_SESSION_PAGE_SIZE) ?: boundedLimit,
+            offset = decoded.offset?.coerceAtLeast(0) ?: boundedOffset,
+        )
     }
 }
 

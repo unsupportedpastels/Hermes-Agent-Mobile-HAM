@@ -1,10 +1,10 @@
 name: Release
 
-# Builds a signed APK + AAB from main and publishes the APK as a GitHub
-# prerelease (side-load/testing artifact). The Play Store upload is intentionally
-# manual (workflow_dispatch) and self-guards on the publisher secret, so it stays
-# dormant until the one-time Play prerequisites are complete and never fails a
-# routine merge. See android-release-and-store-publishing skill for the runbook.
+# Builds a signed APK + AAB from main and publishes the APK as a GitHub release
+# (side-load artifact). The Play Store upload is intentionally manual
+# (workflow_dispatch) and self-guards on the publisher secret, so it stays dormant
+# until the one-time Play prerequisites are complete and never fails a routine
+# merge. See android-release-and-store-publishing skill for the runbook.
 on:
   push:
     branches: [main]
@@ -83,11 +83,11 @@ jobs:
         id: ver
         run: echo "name=$(grep -oP 'versionName\s*=\s*\"\K[^\"]+' app/build.gradle.kts)" >> "$GITHUB_OUTPUT"
 
-      - name: Publish GitHub prerelease (side-load APK)
+      - name: Publish GitHub release (side-load APK)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.ver.outputs.name }}-build.${{ github.run_number }}
-          prerelease: true
+          tag_name: v${{ steps.ver.outputs.name }}
+          prerelease: false
           fail_on_unmatched_files: true
           files: app/build/outputs/apk/release/app-release.apk
 
