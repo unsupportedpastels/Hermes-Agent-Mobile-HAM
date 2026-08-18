@@ -77,6 +77,9 @@ class MainActivity : ComponentActivity() {
     private val paneLayoutPreferencesViewModel by viewModels<PaneLayoutPreferencesViewModel> {
         PaneLayoutPreferencesViewModel.Factory(this)
     }
+    private val cloudViewModel by viewModels<com.unsupportedpastels.hermesandroid.connection.HermesCloudViewModel> {
+        com.unsupportedpastels.hermesandroid.connection.HermesCloudViewModel.Factory(this)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -113,6 +116,7 @@ class MainActivity : ComponentActivity() {
                 HermesAppHost(
                     viewModel = serverSettingsViewModel,
                     connectionViewModel = connectionViewModel,
+                    cloudViewModel = cloudViewModel,
                     projectIconViewModel = projectIconViewModel,
                     paneLayoutPreferencesViewModel = paneLayoutPreferencesViewModel,
                     snapshot = snapshot,
@@ -134,6 +138,15 @@ class MainActivity : ComponentActivity() {
                             launchBrowserAndAwaitReturn(HermesWindowFocus.state) {
                                 startActivity(
                                     Intent(Intent.ACTION_VIEW, authorizationUrl.toUri()),
+                                )
+                            }
+                        }
+                    },
+                    onCloudSignIn = {
+                        cloudViewModel.signIn { verificationUrl ->
+                            launchBrowserAndAwaitReturn(HermesWindowFocus.state) {
+                                startActivity(
+                                    Intent(Intent.ACTION_VIEW, verificationUrl.toUri()),
                                 )
                             }
                         }
@@ -202,6 +215,7 @@ internal fun voiceScreenOffPreferenceKey(origin: ServerOrigin?): String =
 internal fun HermesAppHost(
     viewModel: ServerSettingsViewModel,
     connectionViewModel: HermesConnectionViewModel? = null,
+    cloudViewModel: com.unsupportedpastels.hermesandroid.connection.HermesCloudViewModel? = null,
     projectIconViewModel: ProjectIconViewModel? = null,
     paneLayoutPreferencesViewModel: PaneLayoutPreferencesViewModel? = null,
     snapshot: HermesGatewaySnapshot,
@@ -214,6 +228,7 @@ internal fun HermesAppHost(
     requestedSessionRequestId: Long? = null,
     onVisibleSessionChanged: (DurableSessionId?) -> Unit = {},
     onSignIn: () -> Unit = {},
+    onCloudSignIn: () -> Unit = {},
     onOpenProject: (ProjectId) -> Unit = {},
     onCreateProjectSession: (ProjectId) -> DurableSessionId? = { null },
     onOpenSession: (DurableSessionId) -> Unit = {},
@@ -226,6 +241,18 @@ internal fun HermesAppHost(
     onStopSession: (DurableSessionId) -> Unit = {},
 ) {
     val serverSettingsState by viewModel.states.collectAsStateWithLifecycle()
+    val cloudConnectStateFlow = cloudViewModel?.state
+        ?: remember {
+            MutableStateFlow<com.unsupportedpastels.hermesandroid.connection.CloudConnectState>(
+                com.unsupportedpastels.hermesandroid.connection.CloudConnectState.SignedOut,
+            )
+        }
+    val cloudConnectState by cloudConnectStateFlow.collectAsStateWithLifecycle()
+    // Silently resume a persisted Hermes Cloud session so the roster is ready
+    // when the user opens the connect surface; no-op when nothing is stored.
+    LaunchedEffect(cloudViewModel) {
+        cloudViewModel?.resume()
+    }
     val projectIconAssignmentsFlow = projectIconViewModel?.assignments
         ?: remember {
             MutableStateFlow<ProjectIconAssignmentsState>(ProjectIconAssignmentsState.Loading)
@@ -343,6 +370,23 @@ internal fun HermesAppHost(
         onUpdateServerLabel = { entry -> viewModel.updateLabel(entry).await() },
         onSelectServerOrigin = { origin -> viewModel.select(origin).await() },
         onRemoveServerOrigin = { origin -> viewModel.remove(origin).await() },
+        cloudState = cloudConnectState,
+        onCloudSignIn = onCloudSignIn,
+        onCloudRefresh = { cloudViewModel?.refresh() },
+        onCloudSignOut = { cloudViewModel?.signOut() },
+        onCloudSelectOrg = { org -> cloudViewModel?.selectOrg(org) },
+        onCloudSelectAgent = { agent ->
+            val dashboard = agent.dashboardUrl
+                ?: return@HermesApp Result.failure(
+                    IllegalStateException("Agent is still provisioning"),
+                )
+            val origin = runCatching {
+                com.unsupportedpastels.hermesandroid.connection.ServerOrigin.parse(dashboard)
+            }.getOrElse {
+                return@HermesApp Result.failure(it)
+            }
+            viewModel.save(origin).await()
+        },
         onLoadManagementSettings = { profile -> connectionViewModel?.loadManagementSettings(profile) },
         onRefreshDurableSessions = { archivedOnly ->
             connectionViewModel?.refreshDurableSessions(archivedOnly)
