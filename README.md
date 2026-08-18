@@ -2,36 +2,57 @@
 
 ![Introducing HAM — Hermes Agent Mobile](docs/assets/readme/ham-hero.png)
 
-**HAM (Hermes Agent Mobile)** is an independent, open-source Android client for [Hermes Agent](https://github.com/NousResearch/hermes-agent). The hero artwork above introduces HAM as Android access to a self-hosted Hermes agent.
+**HAM (Hermes Agent Mobile)** is an independent, open-source Android client for [Hermes Agent](https://github.com/NousResearch/hermes-agent) — **Hermes Cloud** or your own **self-hosted** server. Live streaming, hands-free voice, artifacts, approvals, and full session control from anywhere.
 
-> **Unofficial client.** HAM is not affiliated with or endorsed by Nous Research. The Hermes Agent project remains independently maintained and is MIT-licensed.
+🌐 **Website:** [hermes-agent-mobile.com](https://hermes-agent-mobile.com/) · 📥 [Download the latest APK](https://github.com/unsupportedpastels/Hermes-Agent-Mobile-HAM/releases/latest) · 🔒 [Privacy](https://hermes-agent-mobile.com/privacy.html)
+
+> **Unofficial client.** HAM is not affiliated with or endorsed by Nous Research. It is built entirely on the official Hermes interfaces — no server changes, forks, or plugins required. Free and open source under the MIT license.
 
 ## What HAM does
 
 - Connects to an unchanged, officially compatible Hermes Agent backend supplied by `hermes dashboard` or headless `hermes serve`.
 - Browses projects and sessions, creates local drafts, and starts a remote runtime only when you send the first prompt.
-- Streams replies, tool activity, reasoning, approvals, clarifications, managed images, and remote attachments.
+- Streams replies token-by-token over a direct WebSocket, with tool activity, code blocks, and reasoning rendered inline as they happen.
+- Posts push notifications the instant a turn completes or the agent needs a decision — with the reply inline and an _Open session_ tap that drops you right back in. Kick off a long run, lock the phone, and get on with your day.
+- Responds to tool approvals, clarify questions, and secret prompts from the phone; parked requests return correctly after a reconnect.
+- Opens artifacts and browses host files the agent produced, with images and documents rendered natively.
+- Shares images, PDFs, and text from any Android app straight into a session — staged in the composer for review, never auto-sent.
 - Supports native Nous OAuth with system-browser PKCE, origin-scoped encrypted credentials, refresh, and reconnect/reconciliation.
 - Adapts cleanly across compact phones, Fold cover screens, unfolded layouts, split screen, freeform windows, and DeX.
-- Preserves a HAM-started live turn when you navigate away; it does not take over or close another client’s runtime.
-- Speaks and listens through your server's audited voice stack: tap/hold dictation into the draft, per-message read-aloud, streaming speech that overlaps generation, a hands-free voice conversation with spoken stop phrases and barge-in, and server-backed voice settings (`voice.auto_tts`, ElevenLabs voice). Voice controls appear only when the connected server exposes the official `/api/audio/…` routes, audio is never persisted on the device, and the microphone permission is requested only when you first use voice.
+- Preserves a HAM-started live turn when you navigate away; it does not take over or close another client's runtime.
+- Speaks and listens through your server's audited voice stack: app-owned dictation into the composer with a stop control, per-message read-aloud, streaming speech that overlaps generation, and a hands-free voice conversation with spoken stop phrases and barge-in. Voice controls appear only when the connected server exposes the official `/api/audio/…` routes, audio is never persisted on the device, and the microphone permission is requested only when you first use voice.
 
-## Designed for foldables and tablets
+## Real screens, real agent
 
-HAM uses the available window and posture—not a device name or orientation—to move from a focused compact layout to a wider multi-pane workspace. It preserves the selected session and active work across resize and fold/unfold transitions.
+Real captures from a live session on device — no mockups, no staged data.
 
 <p align="center">
-  <img src="docs/assets/readme/ham-cover-projects.png" alt="HAM project list on a compact cover display" width="260" />
-  <img src="docs/assets/readme/ham-unfolded-workspace-primary.jpg" alt="HAM multi-pane session workspace on an unfolded or tablet-size display" width="620" />
+  <img src="docs/assets/readme/ham-chat-session.png" alt="A live HAM agent session: session title, a terminal tool card, a collapsible Thinking block, streamed markdown, an inline-rendered image artifact, and the mic/voice composer below." width="300" />
+  &nbsp;&nbsp;
+  <img src="docs/assets/readme/ham-notification.png" alt="The Android notification shade showing HAM's 'Hermes finished' notification with the assistant's reply text and an Open session action." width="300" />
 </p>
 
 <p align="center">
-  <img src="docs/assets/readme/ham-unfolded-workspace-secondary.jpg" alt="HAM expanded workspace with project navigation and session detail" width="760" />
+  <em>Left: a live session streaming tool activity, reasoning, and artifacts. Right: the turn-complete notification — even when the app is closed, HAM taps you on the shoulder.</em>
+</p>
+
+## Designed for foldables and tablets
+
+HAM uses the available window and posture — not a device name or orientation — to move from a focused compact layout to a wider multi-pane workspace. Unfold the phone or open it on a tablet and the layout earns the space: project navigation on the left, sessions in the middle, and the live agent workspace on the right. It preserves the selected session and active work across resize and fold/unfold transitions.
+
+<p align="center">
+  <img src="docs/assets/readme/ham-foldable-wide.png" alt="HAM running on an unfolded Samsung Fold in a three-pane layout with project navigation, a session list, and a live agent workspace." width="820" />
+</p>
+
+<p align="center">
+  <em>A live HAM session in expanded mode on an unfolded Samsung Fold — project rail, session list, and live workspace at once.</em>
 </p>
 
 ## Connect to your Hermes host
 
-HAM is a client, not an agent host. Install and configure Hermes Agent on a machine you control, then keep a compatible Hermes backend running before connecting from Android. The host remains authoritative for your agent, tools, files, sessions, and data.
+HAM is a client, not an agent host. Install and configure Hermes Agent on a machine you control (or deploy an always-on **Hermes Cloud** instance from the [Nous Portal](https://portal.nousresearch.com/cloud)), then keep a compatible Hermes backend running before connecting from Android. The host remains authoritative for your agent, tools, files, sessions, and data.
+
+Both paths authenticate the same way — **Sign in with Nous**. For a managed Hermes Cloud instance the endpoints are already live: enter your Cloud instance's origin on HAM's Connect screen and sign in. The rest of this section covers self-hosting.
 
 ### Recommended public access: HTTPS through Cloudflare Tunnel
 
@@ -63,13 +84,17 @@ For a remote phone connection, keep Hermes bound to loopback and publish only a 
 
 Cloudflare terminates public TLS while the tunnel carries traffic back to the loopback-only Hermes server. See Cloudflare's [published-application routing](https://developers.cloudflare.com/tunnel/routing/) and [configuration-file](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/configure-tunnels/local-management/configuration-file/) guides for current setup details.
 
-`hermes serve` is the headless alternative for hosts that only need native/remote clients and do not need the web dashboard. It and `hermes dashboard` default to the same port, so run one or the other—not both on port 9119. The separate `hermes gateway` service runs messaging platforms such as Telegram or Discord; it does not replace the backend required by HAM.
+`hermes serve` is the headless alternative for hosts that only need native/remote clients and do not need the web dashboard. It and `hermes dashboard` default to the same port, so run one or the other — not both on port 9119. The separate `hermes gateway` service runs messaging platforms such as Telegram or Discord; it does not replace the backend required by HAM.
 
 ### Private access through Tailscale
 
 If the phone and Hermes host belong to the same Tailnet, [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) is a private alternative to publishing a public hostname. Keep Hermes authentication enabled, expose it with Tailscale Serve, and enter the exact HTTPS `.ts.net` address reported by `tailscale serve status` in HAM. Install and sign in to Tailscale on the phone before connecting.
 
 Tailscale is appropriate for private Tailnet-only access; use the Cloudflare plus OAuth path when the host must be reachable outside the Tailnet. Do not use plain HTTP or expose port 9119 directly to the internet.
+
+### Already running the dashboard for the desktop app?
+
+If you've already run `hermes dashboard` with Nous Portal auth for the Hermes desktop app, you're set — just make sure it's bound to an address your phone can reach (not `127.0.0.1`) and go straight to HAM's Connect screen. Verify the surface HAM needs with `GET /api/status`: it should report `auth_required: true` and list `native_pkce` in `auth_flows`.
 
 ### Keeping it available and troubleshooting
 
@@ -83,14 +108,22 @@ The Hermes backend is long-running: if it stops, HAM cannot connect. Run the rec
 
 These are connection examples, not a server provisioner: HAM does not create or modify your Hermes host, OAuth setup, Cloudflare tunnel, or Tailscale configuration.
 
+## Install the APK
+
+1. Download the [latest signed APK](https://github.com/unsupportedpastels/Hermes-Agent-Mobile-HAM/releases/latest) (Android 10+ / API 29).
+2. Tap the file and allow installs from your browser when Android asks.
+3. On first launch, enter your server origin and **Sign in with Nous**.
+
+Releases are built and signed in CI. Verify the signature with `apksigner verify --verbose` before installing if you like. A Play Store listing is in progress; until then the signed APK on GitHub Releases is the official build. The sideload APK and a future Play install are signed differently and won't upgrade over each other.
+
 ## Security & privacy
 
 HAM connects only to the server origin you configure. It does not include a hosted Hermes service, telemetry SDK, analytics SDK, ad network, or hard-coded remote endpoint.
 
-- Credentials, cookies, connection state, and cached transcripts are scoped to the normalized server origin.
+- Credentials, cookies, connection state, and cached transcripts are scoped to the normalized server origin and stored with Android Keystore-backed encryption.
 - WebSocket tickets are fresh, single-use, and held in memory only.
 - Production connections should use HTTPS. Cleartext traffic is disabled in the manifest.
-- Your prompts, attachments, and transcript data are processed by the Hermes server you choose—not by a HAM-operated service.
+- Your prompts, attachments, and transcript data are processed by the Hermes server you choose — not by a HAM-operated service. No telemetry, no analytics, no third-party servers.
 
 See [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md) for details.
 
@@ -103,7 +136,7 @@ HAM is pre-release software. It is being prepared for an initial Google Play rel
 ### Prerequisites
 
 - JDK 17
-- Android SDK platform corresponding to the project’s configured `compileSdk`
+- Android SDK platform corresponding to the project's configured `compileSdk`
 - An Android device or emulator for runtime verification
 
 Create an untracked `local.properties` with your SDK path, then run:
@@ -118,7 +151,7 @@ For local setup and runtime checks, see [docs/setup.md](docs/setup.md) and [docs
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) before opening an issue or pull request. HAM must stay a client of released, official Hermes interfaces—no private backend route, plugin, dashboard extension, gateway worker, or server fork is a requirement for the app.
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) before opening an issue or pull request. HAM must stay a client of released, official Hermes interfaces — no private backend route, plugin, dashboard extension, gateway worker, or server fork is a requirement for the app. Kotlin, Jetpack Compose, Material 3, built against the official `hermes serve` interfaces.
 
 ## License
 
