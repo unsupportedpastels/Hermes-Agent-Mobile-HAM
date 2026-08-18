@@ -411,10 +411,6 @@ internal fun HermesAppHost(
             connectionViewModel?.let { vm -> resultPreservingCancellation { vm.removeSessionFilter(name) } }
                 ?: Result.failure(IllegalStateException("Saved session filters unavailable"))
         },
-        onBulkDeleteSessions = { sessionIds ->
-            connectionViewModel?.let { vm -> resultPreservingCancellation { vm.bulkDeleteSessions(sessionIds) } }
-                ?: Result.failure(IllegalStateException("Bulk session deletion unavailable"))
-        },
         onSearchTranscripts = { query -> connectionViewModel?.searchTranscripts(query) },
         readAloud = messageReadAloud,
         voiceConversation = composerVoiceConversation,
