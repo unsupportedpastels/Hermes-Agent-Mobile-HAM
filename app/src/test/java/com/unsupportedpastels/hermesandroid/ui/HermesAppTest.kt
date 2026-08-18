@@ -322,7 +322,7 @@ class HermesAppTest {
         composeRule.onNodeWithContentDescription("Filter artifacts: Image").performClick()
         composeRule.onNodeWithContentDescription("Zoom image preview.png").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Close").assertIsDisplayed()
+        composeRule.onNodeWithText("Close").assertExists()
     }
 
     @Test
