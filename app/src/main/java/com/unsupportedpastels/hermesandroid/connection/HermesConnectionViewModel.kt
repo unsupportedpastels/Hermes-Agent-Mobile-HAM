@@ -533,6 +533,7 @@ class HermesConnectionViewModel(
                 activeTokens = null
                 setSessionFilterScope(null, null)
                 activeOrigin = nextOrigin
+                lastReadySettings = settingsState as? ServerSettingsState.Ready
                 profileGeneration += 1
                 when (settingsState) {
                     ServerSettingsState.Loading -> {
@@ -544,7 +545,6 @@ class HermesConnectionViewModel(
                         )
                     }
                     is ServerSettingsState.Ready -> {
-                        lastReadySettings = settingsState
                         mutableSnapshots.value = HermesGatewaySnapshot()
                         setSessionFilterScope(settingsState.activeOrigin, "default")
                         cacheLoadJob = viewModelScope.launch {
@@ -593,6 +593,7 @@ class HermesConnectionViewModel(
 
     private suspend fun reconnectActiveOrigin() {
         val settings = lastReadySettings ?: return
+        if (activeOrigin != settings.activeOrigin) return
         if (mutableSnapshots.value.connectionState == ConnectionState.Connecting) return
         val currentGeneration = ++generation
         connectionJob?.cancel()
@@ -1882,7 +1883,10 @@ class HermesConnectionViewModel(
             )
             try {
                 val token = accessTokenForRequest(origin, expectedGeneration)
-                if (token == null) {
+                if (
+                    token == null &&
+                    mutableSnapshots.value.authenticationState != AuthenticationState.NotRequired
+                ) {
                     if (activeOrigin == origin && generation == expectedGeneration) {
                         mutableSnapshots.value = mutableSnapshots.value.copy(
                             recentSessions = mutableSnapshots.value.recentSessions.copy(
@@ -2635,7 +2639,7 @@ class HermesConnectionViewModel(
         chatJobs.remove(durableSessionId)?.cancel()
         val job = viewModelScope.launch {
             val origin = activeOrigin ?: return@launch
-            val originGeneration = generation
+            var originGeneration = generation
             val expectedProfileGeneration = profileGeneration
             val profile = mutableSnapshots.value.selectedProfile
             if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
@@ -2661,28 +2665,48 @@ class HermesConnectionViewModel(
             }
             updateChat(durableSessionId) { it.copy(isLoading = !hasCachedMessages, error = null) }
             try {
-                val accessToken = accessTokenForRequest(origin, originGeneration)
-                if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
-                val messages = client.loadTranscript(
-                    origin,
-                    accessToken,
-                    serverDurableId(durableSessionId),
-                )
-                if (
-                    !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
-                    profileGeneration != expectedProfileGeneration ||
-                    mutableSnapshots.value.selectedProfile != profile
-                ) return@launch
+                var accessToken: String? = null
+                var messages: List<ChatMessage>? = null
+                var retriedAfterUnauthorized = false
+                while (messages == null) {
+                    try {
+                        accessToken = accessTokenForRequest(origin, originGeneration)
+                        if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
+                        messages = client.loadTranscript(
+                            origin,
+                            accessToken,
+                            serverDurableId(durableSessionId),
+                        )
+                        if (
+                            !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+                            profileGeneration != expectedProfileGeneration ||
+                            mutableSnapshots.value.selectedProfile != profile
+                        ) return@launch
+                    } catch (unauthorized: HermesUnauthorizedException) {
+                        if (retriedAfterUnauthorized) throw unauthorized
+                        retriedAfterUnauthorized = true
+                        retryConnection().join()
+                        if (
+                            activeOrigin != origin ||
+                            mutableSnapshots.value.authenticationState !in setOf(
+                                AuthenticationState.Authenticated,
+                                AuthenticationState.NotRequired,
+                            )
+                        ) return@launch
+                        originGeneration = generation
+                    }
+                }
+                val loadedMessages = messages
                 updateChat(durableSessionId) {
                     it.copy(
-                        messages = messages,
+                        messages = loadedMessages,
                         isLoading = false,
                         error = null,
                         transcriptSource = CacheSource.Live,
                     )
                 }
                 cachedSummary(durableSessionId)?.let { summary ->
-                    persistCachedTranscript(origin, profile, summary, messages, originGeneration)
+                    persistCachedTranscript(origin, profile, summary, loadedMessages, originGeneration)
                 }
                 if (
                     accessToken != null &&
@@ -2718,15 +2742,6 @@ class HermesConnectionViewModel(
                 if (isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) {
                     disconnectChat()
                     publishSignInRequired()
-                }
-            } catch (_: HermesUnauthorizedException) {
-                // A mid-session 401 with a live refresh token: don't dead-end on a
-                // raw error. Trigger a reconnect (which refreshes the access token
-                // or, if the RT is also dead, routes to sign-in) so the app heals
-                // itself instead of stranding the user on "HTTP 401".
-                if (isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) {
-                    updateChat(durableSessionId) { it.copy(isLoading = false, error = null) }
-                    retryConnection()
                 }
             } catch (error: Exception) {
                 if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch

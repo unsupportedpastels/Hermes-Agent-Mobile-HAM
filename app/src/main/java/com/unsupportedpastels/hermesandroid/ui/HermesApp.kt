@@ -3283,7 +3283,11 @@ private fun RecentSessionsScreen(
         .toSet()
 
     LaunchedEffect(snapshot.selectedProfile, snapshot.authenticationState) {
-        if (snapshot.authenticationState == AuthenticationState.Authenticated) onLoad()
+        if (snapshot.authenticationState in setOf(
+                AuthenticationState.Authenticated,
+                AuthenticationState.NotRequired,
+            )
+        ) onLoad()
     }
     LaunchedEffect(listState, state.hasMore) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }

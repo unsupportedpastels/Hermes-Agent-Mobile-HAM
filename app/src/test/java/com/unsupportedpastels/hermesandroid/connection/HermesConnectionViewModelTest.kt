@@ -157,6 +157,25 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
+    fun serverWithoutAuthenticationLoadsRecentSessionsWithoutAToken() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = UnauthenticatedRecentSessionsClient()
+        val viewModel = HermesConnectionViewModel(settings, client)
+
+        advanceUntilIdle()
+        viewModel.loadRecentSessions().join()
+
+        assertEquals(1, client.recentSessionPageCalls)
+        assertTrue(client.sawNullAccessToken)
+        assertEquals(
+            listOf("Public session"),
+            viewModel.snapshots.value.recentSessions.sessions.map { it.title },
+        )
+        assertEquals(null, viewModel.snapshots.value.recentSessions.error)
+    }
+
+    @Test
     fun failedConnectionPreservesSessionsLoadedFromOfflineCache() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val cached = SessionSummary(DurableSessionId("cached-1"), "Cached session")
@@ -3199,6 +3218,42 @@ private class FakeHermesConnectionClient : HermesConnectionClient {
     override suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo {
         probedOrigins += serverOrigin
         return response.await()
+    }
+}
+
+private class UnauthenticatedRecentSessionsClient : HermesConnectionClient {
+    var recentSessionPageCalls = 0
+    var sawNullAccessToken = false
+
+    override suspend fun probe(serverOrigin: ServerOrigin) = HermesConnectionInfo(
+        version = "0.20.0",
+        authRequired = false,
+        nativeOAuthSupported = false,
+        providers = emptyList(),
+        sessions = emptyList(),
+    )
+
+    override suspend fun loadSessionsPageForProfile(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        profile: String,
+        limit: Int,
+        offset: Int,
+        archivedOnly: Boolean,
+    ): SessionPage {
+        recentSessionPageCalls += 1
+        sawNullAccessToken = accessToken == null
+        return SessionPage(
+            sessions = listOf(
+                SessionSummary(
+                    com.unsupportedpastels.hermesandroid.app.DurableSessionId("public-1"),
+                    "Public session",
+                ),
+            ),
+            total = 1,
+            limit = limit,
+            offset = offset,
+        )
     }
 }
 

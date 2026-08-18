@@ -3003,6 +3003,26 @@ class HermesAppTest {
     }
 
     @Test
+    fun authenticationFreeRecentSessionsStillTriggersLoad() {
+        var loadCalls = 0
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = connectedSnapshot.copy(
+                        authenticationState = AuthenticationState.NotRequired,
+                    ),
+                    onLoadRecentSessions = { loadCalls += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("View all recent sessions").performClick()
+        composeRule.waitForIdle()
+
+        assertEquals(1, loadCalls)
+    }
+
+    @Test
     fun unsupportedProjectsFallBackToAllDurableRecentSessions() {
         val snapshot = connectedSnapshot.copy(
             durableSessions = sessions,

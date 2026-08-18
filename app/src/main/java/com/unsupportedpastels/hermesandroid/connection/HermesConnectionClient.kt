@@ -454,18 +454,20 @@ interface HermesConnectionClient {
 
     suspend fun loadSessionsPageForProfile(
         serverOrigin: ServerOrigin,
-        accessToken: String,
+        accessToken: String?,
         profile: String,
         limit: Int = MAX_DURABLE_SESSIONS,
         offset: Int = 0,
         archivedOnly: Boolean = false,
     ): SessionPage = SessionPage(
-        sessions = loadSessionsForProfile(
-            serverOrigin = serverOrigin,
-            accessToken = accessToken,
-            profile = profile,
-            archivedOnly = archivedOnly,
-        ),
+        sessions = accessToken?.let {
+            loadSessionsForProfile(
+                serverOrigin = serverOrigin,
+                accessToken = it,
+                profile = profile,
+                archivedOnly = archivedOnly,
+            )
+        }.orEmpty(),
         total = null,
         limit = limit,
         offset = offset,
@@ -1434,7 +1436,7 @@ class HttpHermesConnectionClient(
 
     override suspend fun loadSessionsPageForProfile(
         serverOrigin: ServerOrigin,
-        accessToken: String,
+        accessToken: String?,
         profile: String,
         limit: Int,
         offset: Int,

@@ -986,6 +986,55 @@ class HermesChatIntegrationTest {
     }
 
     @Test
+    fun foregroundReconnectDoesNotUseReadySettingsAfterTheOriginIsRemoved() = runTest(dispatcher) {
+        val foreground = MutableStateFlow(false)
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = FailThenSucceedConnectionClient(failuresBeforeSuccess = 1)
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = settings,
+            client = client,
+            tokenStore = MemoryTokenStore(tokens),
+            nowEpochSeconds = { 1_900_000_000 },
+            appForegroundStates = foreground,
+        )
+
+        advanceUntilIdle()
+        assertEquals(ConnectionState.Disconnected, viewModel.snapshots.value.connectionState)
+        val probesBeforeSettingsRemoval = client.probeAttempts
+
+        settings.value = ServerSettingsState.Unavailable
+        runCurrent()
+        foreground.value = true
+        advanceUntilIdle()
+
+        assertEquals(probesBeforeSettingsRemoval, client.probeAttempts)
+        assertEquals(ConnectionState.Disconnected, viewModel.snapshots.value.connectionState)
+        assertEquals("Server settings unavailable", viewModel.snapshots.value.connectionError)
+    }
+
+    @Test
+    fun unauthorizedTranscriptLoadReconnectsAndRetriesTheSameSession() = runTest(dispatcher) {
+        val client = UnauthorizedOnceTranscriptClient()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = MemoryTokenStore(tokens),
+            nowEpochSeconds = { 1_900_000_000 },
+        )
+
+        advanceUntilIdle()
+        viewModel.openSession(durableId)
+        advanceUntilIdle()
+
+        val chat = viewModel.snapshots.value.chatSessions.getValue(durableId)
+        assertEquals(2, client.transcriptLoads)
+        assertEquals(listOf("Recovered question"), chat.messages.map { it.text })
+        assertFalse(chat.isLoading)
+        assertEquals(null, chat.error)
+        assertTrue(client.authenticateCalls >= 2)
+    }
+
+    @Test
     fun reconnectReplacesLocalPartialWithInflightSnapshot() = runTest(dispatcher) {
         val first = ReconnectingChatSession(
             runtimeId = "runtime-1",
@@ -2472,6 +2521,42 @@ private class ChatConnectionClient : HermesConnectionClient {
         return listOf(
             com.unsupportedpastels.hermesandroid.gateway.ChatMessage(ChatMessageRole.User, "Earlier question"),
             com.unsupportedpastels.hermesandroid.gateway.ChatMessage(ChatMessageRole.Assistant, "Earlier answer"),
+        )
+    }
+}
+
+private class UnauthorizedOnceTranscriptClient : HermesConnectionClient {
+    private val durableId = DurableSessionId("durable-1")
+    var authenticateCalls = 0
+    var transcriptLoads = 0
+
+    override suspend fun probe(serverOrigin: ServerOrigin) = HermesConnectionInfo(
+        version = "0.20.0",
+        authRequired = true,
+        nativeOAuthSupported = true,
+        providers = listOf(HermesAuthProvider("nous")),
+    )
+
+    override suspend fun authenticate(
+        serverOrigin: ServerOrigin,
+        accessToken: String,
+    ) = AuthenticatedHermesConnection(
+        userId = "user-1",
+        sessions = listOf(SessionSummary(durableId, "Test session")),
+    ).also { authenticateCalls += 1 }
+
+    override suspend fun loadTranscript(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        durableSessionId: DurableSessionId,
+    ): List<com.unsupportedpastels.hermesandroid.gateway.ChatMessage> {
+        transcriptLoads += 1
+        if (transcriptLoads == 1) throw HermesUnauthorizedException()
+        return listOf(
+            com.unsupportedpastels.hermesandroid.gateway.ChatMessage(
+                ChatMessageRole.User,
+                "Recovered question",
+            ),
         )
     }
 }
