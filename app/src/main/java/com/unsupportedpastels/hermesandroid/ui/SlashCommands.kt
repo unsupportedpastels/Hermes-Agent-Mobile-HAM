@@ -7,6 +7,11 @@ private val SlashCommandPattern = Regex("^/[^\\s/]*(?:\\s|$)")
 
 fun isModelPickerCommand(text: String): Boolean = text.trim() == "/model"
 
+fun isSteerCommand(text: String): Boolean {
+    val command = text.trimStart()
+    return command == "/steer" || command.startsWith("/steer ")
+}
+
 fun reasoningEffortCommand(text: String): String? {
     val tokens = text.trim().split(Regex("\\s+"))
     if (tokens.size != 2 || tokens[0] != "/reasoning") return null

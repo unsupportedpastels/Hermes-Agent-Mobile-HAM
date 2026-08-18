@@ -361,6 +361,7 @@ internal fun HermesAppHost(
         },
         onLogout = { connectionViewModel?.logout() },
         onSignIn = onSignIn,
+        onRetryConnection = { connectionViewModel?.retryConnection() },
         onOpenProject = onOpenProject,
         onCreateProjectSession = onCreateProjectSession,
         onOpenSession = onOpenSession,
@@ -390,6 +391,8 @@ internal fun HermesAppHost(
         },
         isHomeRefreshing = homeRefreshing,
         onRefreshHome = { connectionViewModel?.refreshHomeData() },
+        onLoadRecentSessions = { connectionViewModel?.loadRecentSessions() },
+        onLoadMoreRecentSessions = { connectionViewModel?.loadMoreRecentSessions() },
         onRenameSession = { sessionId, title ->
             connectionViewModel?.let { vm -> resultPreservingCancellation { vm.renameSession(sessionId, title) } }
                 ?: Result.failure(IllegalStateException("Session management unavailable"))
@@ -449,9 +452,6 @@ internal fun HermesAppHost(
         onApprovalResponse = onApprovalResponse,
         onBlockingResponse = onBlockingResponse,
         onStopSession = onStopSession,
-        onSteerSession = { sessionId, text ->
-            connectionViewModel?.steerSession(sessionId, text)
-        },
         onSetDelegationPaused = { sessionId, paused ->
             connectionViewModel?.setDelegationPaused(sessionId, paused)
         },

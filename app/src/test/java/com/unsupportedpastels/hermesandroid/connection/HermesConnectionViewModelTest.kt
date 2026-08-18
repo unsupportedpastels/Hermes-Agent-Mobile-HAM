@@ -157,6 +157,25 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
+    fun serverWithoutAuthenticationLoadsRecentSessionsWithoutAToken() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
+        val client = UnauthenticatedRecentSessionsClient()
+        val viewModel = HermesConnectionViewModel(settings, client)
+
+        advanceUntilIdle()
+        viewModel.loadRecentSessions().join()
+
+        assertEquals(1, client.recentSessionPageCalls)
+        assertTrue(client.sawNullAccessToken)
+        assertEquals(
+            listOf("Public session"),
+            viewModel.snapshots.value.recentSessions.sessions.map { it.title },
+        )
+        assertEquals(null, viewModel.snapshots.value.recentSessions.error)
+    }
+
+    @Test
     fun failedConnectionPreservesSessionsLoadedFromOfflineCache() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val cached = SessionSummary(DurableSessionId("cached-1"), "Cached session")
@@ -1985,6 +2004,90 @@ class HermesConnectionViewModelTest {
     }
 
     @Test
+    fun staleProjectMetadataConnectionIsReplacedAndRetriedOnTransportFailure() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val projectId = ProjectId("project-1")
+        val project = ProjectSummary(projectId, "App", "/workspace/app", 1, emptyList())
+        val tree = ProjectTreeResult(projects = listOf(project))
+        // Simulates the WebSocket the OS killed while the app was locked/backgrounded:
+        // the cached metadata session fails its next RPC with the closed-transport error.
+        val staleSession = MetadataOnlyProjectSession.forTreeAndSessionsFailure(
+            tree = tree,
+            failure = HermesChatTransportException("Hermes chat connection is closed"),
+        )
+        val healthySession = MetadataOnlyProjectSession.forTreeAndSessions(
+            tree = tree,
+            sessions = ProjectSessionsResult(
+                project = project,
+                sessions = listOf(SessionSummary(DurableSessionId("stored-1"), "Session")),
+            ),
+        )
+        var connections = 0
+        val client = AuthenticatingHermesConnectionClient()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = FixedTokenStore(),
+            projectConnector = HermesChatConnector { _, _ ->
+                connections += 1
+                if (connections == 1) staleSession else healthySession
+            },
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+        assertEquals(1, connections)
+
+        viewModel.openProject(projectId).join()
+
+        // Self-healing: the stale cached connection is closed, a fresh one is
+        // established, and the RPC is retried instead of surfacing a raw error.
+        assertEquals(2, connections)
+        assertEquals(true, staleSession.closed)
+        val loaded = viewModel.snapshots.value.projectSessionStates.getValue(projectId)
+            as ProjectSessionLoadState.Loaded
+        assertEquals("Session", loaded.sessions.single().title)
+    }
+
+    @Test
+    fun freshProjectMetadataConnectionFailureSurfacesWithoutRetryLoop() = runTest(dispatcher) {
+        val origin = ServerOrigin.parse("https://hermes.example")
+        val projectId = ProjectId("project-1")
+        val project = ProjectSummary(projectId, "App", "/workspace/app", 1, emptyList())
+        val tree = ProjectTreeResult(projects = listOf(project))
+        var connections = 0
+        val client = AuthenticatingHermesConnectionClient()
+        val viewModel = HermesConnectionViewModel(
+            settingsStates = MutableStateFlow(ServerSettingsState.Ready(origin)),
+            client = client,
+            tokenStore = FixedTokenStore(),
+            projectConnector = HermesChatConnector { _, _ ->
+                connections += 1
+                MetadataOnlyProjectSession.forTreeAndSessionsFailure(
+                    tree = tree,
+                    failure = HermesChatTransportException("Hermes chat connection is closed"),
+                )
+            },
+        )
+        runCurrent()
+        client.probeResponse.complete(authRequiredInfo())
+        runCurrent()
+        client.authenticationResponse.complete(AuthenticatedHermesConnection("user", emptyList()))
+        advanceUntilIdle()
+        assertEquals(1, connections)
+
+        viewModel.openProject(projectId).join()
+
+        // One healing retry on a fresh connection, then the error surfaces —
+        // a genuinely unreachable host must not spin reconnect attempts.
+        assertEquals(2, connections)
+        val state = viewModel.snapshots.value.projectSessionStates.getValue(projectId)
+        assertEquals(true, state is ProjectSessionLoadState.TransientError)
+    }
+
+    @Test
     fun openProjectReconcilesProjectSummarySessionCountFromDrillIn() = runTest(dispatcher) {
         val origin = ServerOrigin.parse("https://hermes.example")
         val settings = MutableStateFlow<ServerSettingsState>(ServerSettingsState.Ready(origin))
@@ -3115,6 +3218,42 @@ private class FakeHermesConnectionClient : HermesConnectionClient {
     override suspend fun probe(serverOrigin: ServerOrigin): HermesConnectionInfo {
         probedOrigins += serverOrigin
         return response.await()
+    }
+}
+
+private class UnauthenticatedRecentSessionsClient : HermesConnectionClient {
+    var recentSessionPageCalls = 0
+    var sawNullAccessToken = false
+
+    override suspend fun probe(serverOrigin: ServerOrigin) = HermesConnectionInfo(
+        version = "0.20.0",
+        authRequired = false,
+        nativeOAuthSupported = false,
+        providers = emptyList(),
+        sessions = emptyList(),
+    )
+
+    override suspend fun loadSessionsPageForProfile(
+        serverOrigin: ServerOrigin,
+        accessToken: String?,
+        profile: String,
+        limit: Int,
+        offset: Int,
+        archivedOnly: Boolean,
+    ): SessionPage {
+        recentSessionPageCalls += 1
+        sawNullAccessToken = accessToken == null
+        return SessionPage(
+            sessions = listOf(
+                SessionSummary(
+                    com.unsupportedpastels.hermesandroid.app.DurableSessionId("public-1"),
+                    "Public session",
+                ),
+            ),
+            total = 1,
+            limit = limit,
+            offset = offset,
+        )
     }
 }
 

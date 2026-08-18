@@ -51,6 +51,7 @@ import com.unsupportedpastels.hermesandroid.gateway.HermesChatSession
 import com.unsupportedpastels.hermesandroid.gateway.HermesChatTransportException
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryListing
+import com.unsupportedpastels.hermesandroid.gateway.RecentSessionsState
 import com.unsupportedpastels.hermesandroid.gateway.HERMES_CHAT_MAX_FRAME_BYTES
 import com.unsupportedpastels.hermesandroid.gateway.HERMES_CHAT_MAX_MESSAGE_TEXT_CHARS
 import com.unsupportedpastels.hermesandroid.gateway.KtorChatWebSocketFactory
@@ -136,6 +137,7 @@ private const val MAX_CHAT_RECOVERIES_PER_OPERATION = 2
 private const val MAX_SESSION_TITLE_CHARS = 256
 private const val SLASH_COMPLETION_DEBOUNCE_MS = 60L
 private const val OPERATIONAL_STATUS_POLL_INTERVAL_MILLIS = 60_000L
+private const val RECENT_SESSIONS_PAGE_SIZE = 20
 
 internal suspend fun <Probe, SavedToken : Any> probeAndLoadSavedTokenConcurrently(
     probe: suspend () -> Probe,
@@ -351,6 +353,8 @@ class HermesConnectionViewModel(
     private var connectionJob: Job? = null
     private var projectLoadJob: Job? = null
     private var refreshHomeJob: Job? = null
+    private var recentSessionsJob: Job? = null
+    private var recentSessionsScopeKey: String? = null
     private var managementJob: Job? = null
     private var managementRequestGeneration = 0L
     private var operationalStatusJob: Job? = null
@@ -368,6 +372,11 @@ class HermesConnectionViewModel(
     private var activeProjectMetadataSession: ProjectMetadataSessionRecord? = null
     private var signInJob: Job? = null
     private var nextChatOperationGeneration = 0L
+    // The most recent Ready settings, kept so a transient connection failure can be
+    // retried (manual "Retry" or automatic on app foreground) without waiting for a
+    // settings change. Cleared only when the active origin actually changes.
+    private var lastReadySettings: ServerSettingsState.Ready? = null
+    private var foregroundReconnectJob: Job? = null
     private val chatJobs = mutableMapOf<DurableSessionId, Job>()
     private val chatOperationGenerations = mutableMapOf<DurableSessionId, Long>()
     private val liveControllers = mutableMapOf<DurableSessionId, LiveChatController>()
@@ -487,6 +496,9 @@ class HermesConnectionViewModel(
                 projectLoadJob = null
                 refreshHomeJob?.cancel()
                 refreshHomeJob = null
+                recentSessionsJob?.cancel()
+                recentSessionsJob = null
+                recentSessionsScopeKey = null
                 managementJob?.cancel()
                 managementJob = null
                 managementRequestGeneration += 1
@@ -521,6 +533,7 @@ class HermesConnectionViewModel(
                 activeTokens = null
                 setSessionFilterScope(null, null)
                 activeOrigin = nextOrigin
+                lastReadySettings = settingsState as? ServerSettingsState.Ready
                 profileGeneration += 1
                 when (settingsState) {
                     ServerSettingsState.Loading -> {
@@ -549,6 +562,46 @@ class HermesConnectionViewModel(
                 }
             }
         }
+        // Self-healing on resume: when the app returns to the foreground and the
+        // connection has dropped to a transient Disconnected state (e.g. the
+        // process was backgrounded across a token expiry, or a network blip hit
+        // the resume-time load), re-run connect() automatically. Deliberate
+        // sign-in-required and healthy connected/connecting states are left alone.
+        viewModelScope.launch {
+            appForegroundStates.collect { foreground ->
+                if (foreground) maybeReconnectOnForeground()
+            }
+        }
+    }
+
+    /**
+     * Re-attempts the connection for the current Ready settings without waiting for
+     * a settings change. Used by the manual "Retry" affordance and the automatic
+     * foreground recovery. No-op when there is no configured origin or a connection
+     * attempt is already in flight.
+     */
+    fun retryConnection(): Job = viewModelScope.launch { reconnectActiveOrigin() }
+
+    private fun maybeReconnectOnForeground() {
+        // Only heal a dropped connection; never disturb a live session, an
+        // in-progress attempt, or a deliberate sign-in prompt.
+        if (mutableSnapshots.value.connectionState != ConnectionState.Disconnected) return
+        if (mutableSnapshots.value.authenticationState == AuthenticationState.SignInRequired) return
+        if (foregroundReconnectJob?.isActive == true) return
+        foregroundReconnectJob = viewModelScope.launch { reconnectActiveOrigin() }
+    }
+
+    private suspend fun reconnectActiveOrigin() {
+        val settings = lastReadySettings ?: return
+        if (activeOrigin != settings.activeOrigin) return
+        if (mutableSnapshots.value.connectionState == ConnectionState.Connecting) return
+        val currentGeneration = ++generation
+        connectionJob?.cancel()
+        val job = viewModelScope.launch {
+            connect(settings.activeOrigin, currentGeneration)
+        }
+        connectionJob = job
+        job.join()
     }
 
     private suspend fun loadCachedMetadata(
@@ -1143,21 +1196,34 @@ class HermesConnectionViewModel(
         accessToken: String,
         block: suspend (HermesChatSession) -> T,
     ): T {
-        val session = acquireProjectMetadataSession(
-            serverOrigin = serverOrigin,
-            originGeneration = originGeneration,
-            accessToken = accessToken,
-        )
-        return try {
-            val result = block(session)
-            currentCoroutineContext().ensureActive()
-            if (!isCurrentProjectLoad(serverOrigin, originGeneration)) {
-                throw CancellationException("Server origin was replaced")
+        // The OS can silently kill the metadata WebSocket while the app is
+        // locked/backgrounded. The cached session then fails its next RPC with a
+        // closed-transport error. Self-heal: replace the dead connection and retry
+        // the RPC once on a fresh session instead of surfacing a raw transport
+        // error. A second failure surfaces — a genuinely unreachable host must not
+        // spin reconnect attempts.
+        var healedOnce = false
+        while (true) {
+            val session = acquireProjectMetadataSession(
+                serverOrigin = serverOrigin,
+                originGeneration = originGeneration,
+                accessToken = accessToken,
+            )
+            try {
+                val result = block(session)
+                currentCoroutineContext().ensureActive()
+                if (!isCurrentProjectLoad(serverOrigin, originGeneration)) {
+                    throw CancellationException("Server origin was replaced")
+                }
+                return result
+            } catch (error: HermesChatTransportException) {
+                invalidateProjectMetadataSession(session)
+                currentCoroutineContext().ensureActive()
+                if (healedOnce || !isCurrentProjectLoad(serverOrigin, originGeneration)) {
+                    throw error
+                }
+                healedOnce = true
             }
-            result
-        } catch (error: HermesChatTransportException) {
-            invalidateProjectMetadataSession(session)
-            throw error
         }
     }
 
@@ -1772,6 +1838,120 @@ class HermesConnectionViewModel(
                 )
             }
         }
+    }
+
+    fun loadRecentSessions(): Job {
+        val snapshot = mutableSnapshots.value
+        val origin = activeOrigin ?: return viewModelScope.launch { }
+        val profile = snapshot.selectedProfile.trim().take(64).ifEmpty { "default" }
+        val scopeKey = "${origin.value}\u0000$profile"
+        if (recentSessionsScopeKey != scopeKey) {
+            recentSessionsScopeKey = scopeKey
+            recentSessionsJob?.cancel()
+            mutableSnapshots.value = snapshot.copy(recentSessions = RecentSessionsState())
+        }
+        if (
+            mutableSnapshots.value.recentSessions.sessions.isNotEmpty() ||
+            mutableSnapshots.value.recentSessions.isLoading
+        ) {
+            return viewModelScope.launch { }
+        }
+        return loadRecentSessionsPage(loadMore = false)
+    }
+
+    fun loadMoreRecentSessions(): Job {
+        val state = mutableSnapshots.value.recentSessions
+        if (!state.hasMore || state.isLoading || state.isLoadingMore) {
+            return viewModelScope.launch { }
+        }
+        return loadRecentSessionsPage(loadMore = true)
+    }
+
+    private fun loadRecentSessionsPage(loadMore: Boolean): Job {
+        val origin = activeOrigin ?: return viewModelScope.launch { }
+        val expectedGeneration = generation
+        val profile = mutableSnapshots.value.selectedProfile.trim().take(64).ifEmpty { "default" }
+        val previous = mutableSnapshots.value.recentSessions
+        val offset = if (loadMore) previous.nextOffset else 0
+        val job = viewModelScope.launch {
+            mutableSnapshots.value = mutableSnapshots.value.copy(
+                recentSessions = previous.copy(
+                    isLoading = !loadMore,
+                    isLoadingMore = loadMore,
+                    error = null,
+                ),
+            )
+            try {
+                val token = accessTokenForRequest(origin, expectedGeneration)
+                if (
+                    token == null &&
+                    mutableSnapshots.value.authenticationState != AuthenticationState.NotRequired
+                ) {
+                    if (activeOrigin == origin && generation == expectedGeneration) {
+                        mutableSnapshots.value = mutableSnapshots.value.copy(
+                            recentSessions = mutableSnapshots.value.recentSessions.copy(
+                                isLoading = false,
+                                isLoadingMore = false,
+                                error = "Sign in required",
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+                val page = client.loadSessionsPageForProfile(
+                    serverOrigin = origin,
+                    accessToken = token,
+                    profile = profile,
+                    limit = RECENT_SESSIONS_PAGE_SIZE,
+                    offset = offset,
+                    archivedOnly = false,
+                )
+                currentCoroutineContext().ensureActive()
+                val current = mutableSnapshots.value.recentSessions
+                val combined = (if (loadMore) current.sessions else emptyList())
+                    .plus(page.sessions)
+                    .distinctBy(SessionSummary::id)
+                val nextOffset = page.offset + page.sessions.size
+                val total = page.total
+                val hasMore = if (total != null) {
+                    nextOffset < total
+                } else {
+                    page.sessions.size >= page.limit
+                }
+                if (
+                    activeOrigin == origin &&
+                    generation == expectedGeneration &&
+                    mutableSnapshots.value.selectedProfile == profile
+                ) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(
+                        recentSessions = RecentSessionsState(
+                            sessions = combined,
+                            total = page.total,
+                            nextOffset = nextOffset,
+                            hasMore = hasMore,
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (
+                    activeOrigin == origin &&
+                    generation == expectedGeneration &&
+                    mutableSnapshots.value.selectedProfile == profile
+                ) {
+                    mutableSnapshots.value = mutableSnapshots.value.copy(
+                        recentSessions = mutableSnapshots.value.recentSessions.copy(
+                            isLoading = false,
+                            isLoadingMore = false,
+                            error = "Could not load recent sessions",
+                        ),
+                    )
+                }
+            }
+        }
+        recentSessionsJob = job
+        return job
     }
 
     private fun isCurrentManagementRequest(
@@ -2431,6 +2611,10 @@ class HermesConnectionViewModel(
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
+            } catch (_: HermesUnauthorizedException) {
+                if (!isCurrentOrigin(origin, originGeneration)) return@launch
+                updateChat(durableSessionId) { it.copy(isLoading = false, error = null) }
+                retryConnection()
             } catch (error: Exception) {
                 if (!isCurrentOrigin(origin, originGeneration)) return@launch
                 updateChat(durableSessionId) {
@@ -2455,7 +2639,7 @@ class HermesConnectionViewModel(
         chatJobs.remove(durableSessionId)?.cancel()
         val job = viewModelScope.launch {
             val origin = activeOrigin ?: return@launch
-            val originGeneration = generation
+            var originGeneration = generation
             val expectedProfileGeneration = profileGeneration
             val profile = mutableSnapshots.value.selectedProfile
             if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
@@ -2481,28 +2665,48 @@ class HermesConnectionViewModel(
             }
             updateChat(durableSessionId) { it.copy(isLoading = !hasCachedMessages, error = null) }
             try {
-                val accessToken = accessTokenForRequest(origin, originGeneration)
-                if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
-                val messages = client.loadTranscript(
-                    origin,
-                    accessToken,
-                    serverDurableId(durableSessionId),
-                )
-                if (
-                    !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
-                    profileGeneration != expectedProfileGeneration ||
-                    mutableSnapshots.value.selectedProfile != profile
-                ) return@launch
+                var accessToken: String? = null
+                var messages: List<ChatMessage>? = null
+                var retriedAfterUnauthorized = false
+                while (messages == null) {
+                    try {
+                        accessToken = accessTokenForRequest(origin, originGeneration)
+                        if (!isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration)) return@launch
+                        messages = client.loadTranscript(
+                            origin,
+                            accessToken,
+                            serverDurableId(durableSessionId),
+                        )
+                        if (
+                            !isCurrentChatOperation(durableSessionId, origin, originGeneration, operationGeneration) ||
+                            profileGeneration != expectedProfileGeneration ||
+                            mutableSnapshots.value.selectedProfile != profile
+                        ) return@launch
+                    } catch (unauthorized: HermesUnauthorizedException) {
+                        if (retriedAfterUnauthorized) throw unauthorized
+                        retriedAfterUnauthorized = true
+                        retryConnection().join()
+                        if (
+                            activeOrigin != origin ||
+                            mutableSnapshots.value.authenticationState !in setOf(
+                                AuthenticationState.Authenticated,
+                                AuthenticationState.NotRequired,
+                            )
+                        ) return@launch
+                        originGeneration = generation
+                    }
+                }
+                val loadedMessages = messages
                 updateChat(durableSessionId) {
                     it.copy(
-                        messages = messages,
+                        messages = loadedMessages,
                         isLoading = false,
                         error = null,
                         transcriptSource = CacheSource.Live,
                     )
                 }
                 cachedSummary(durableSessionId)?.let { summary ->
-                    persistCachedTranscript(origin, profile, summary, messages, originGeneration)
+                    persistCachedTranscript(origin, profile, summary, loadedMessages, originGeneration)
                 }
                 if (
                     accessToken != null &&
@@ -5245,14 +5449,31 @@ class HermesConnectionViewModel(
                 current.requestId != operation.requestId ||
                 current.lifecycle != RunInteractionLifecycle.Responding
             ) return
+            // A successful answer clears the card immediately: HAM's clarification
+            // is transient run state (not a persisted transcript card like the
+            // desktop settled Q&A), so it should disappear the moment the user
+            // responds rather than lingering until the next turn. A failed send
+            // reverts to Pending so the user can retry; an expiry keeps the
+            // informational settled state.
+            val nextRunState = when (lifecycle) {
+                RunInteractionLifecycle.Resolved ->
+                    chat.runState.copy(clarification = null)
+                RunInteractionLifecycle.Failed ->
+                    chat.runState.transitionClarificationLifecycle(
+                        checkNotNull(operation.requestId),
+                        RunInteractionLifecycle.Pending,
+                    )
+                else ->
+                    chat.runState.transitionClarificationLifecycle(
+                        checkNotNull(operation.requestId),
+                        lifecycle,
+                    )
+            }
             mutableSnapshots.value = snapshot.copy(
                 chatSessions = snapshot.chatSessions + (
                     operation.durableSessionId to chat.copy(
                         error = null,
-                        runState = chat.runState.transitionClarificationLifecycle(
-                            checkNotNull(operation.requestId),
-                            lifecycle,
-                        ),
+                        runState = nextRunState,
                     )
                     ),
             )

@@ -115,6 +115,7 @@ data class HermesGatewaySnapshot(
     val authProviders: List<HermesAuthProvider> = emptyList(),
     val connectionError: String? = null,
     val durableSessions: List<SessionSummary> = emptyList(),
+    val recentSessions: RecentSessionsState = RecentSessionsState(),
     val sessionMetadataSource: CacheSource = CacheSource.Live,
     val projects: List<ProjectSummary> = emptyList(),
     val projectState: ProjectLoadState = ProjectLoadState.Loaded(emptyList()),
@@ -154,6 +155,16 @@ data class HermesGatewaySnapshot(
     val searchLoading: Boolean = false,
     val searchError: String? = null,
     val lastBranchedSessionId: DurableSessionId? = null,
+)
+
+data class RecentSessionsState(
+    val sessions: List<SessionSummary> = emptyList(),
+    val total: Int? = null,
+    val nextOffset: Int = 0,
+    val hasMore: Boolean = false,
+    val isLoading: Boolean = false,
+    val isLoadingMore: Boolean = false,
+    val error: String? = null,
 )
 
 interface HermesGateway {

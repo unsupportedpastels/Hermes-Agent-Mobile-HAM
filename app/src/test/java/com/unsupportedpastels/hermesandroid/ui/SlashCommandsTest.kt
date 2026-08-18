@@ -17,6 +17,14 @@ class SlashCommandsTest {
     }
 
     @Test
+    fun steerCommandIsAllowedDuringAnActiveTurn() {
+        assertTrue(isSteerCommand("/steer"))
+        assertTrue(isSteerCommand("  /steer Focus on the tests"))
+        assertFalse(isSteerCommand("/steering Focus on the tests"))
+        assertFalse(isSteerCommand("please /steer Focus on the tests"))
+    }
+
+    @Test
     fun reasoningCommandRequiresOneCanonicalEffort() {
         assertEquals("medium", reasoningEffortCommand("/reasoning medium"))
         assertEquals("xhigh", reasoningEffortCommand("  /reasoning XHIGH\n"))

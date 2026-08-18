@@ -2,8 +2,11 @@ package com.unsupportedpastels.hermesandroid.ui
 
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -62,22 +65,22 @@ class ActiveTurnSteerUiTest {
                     ),
                     initialRoute = SessionDetailRoute(sessionId),
                     serverSettingsState = ServerSettingsState.Ready(null),
-                    onSteerSession = { id, text -> steered = id to text },
+                    onSendMessage = { id, text -> steered = id to text },
                 )
             }
         }
 
-        onNodeWithComposerInput().performTextInput("  Focus on the failing test  ")
-        composeRule.onNodeWithContentDescription("Steer Hermes response").assertIsDisplayed().performClick()
+        onNodeWithComposerInput().performTextInput("/steer Focus on the failing test")
+        composeRule.onNodeWithContentDescription("Send message").assertIsDisplayed().performClick()
 
-        composeRule.onNodeWithText("Stop").assertIsDisplayed()
-        composeRule.onNodeWithText("Steer").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Send message").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Stop Hermes response").assertIsDisplayed()
+        composeRule.onAllNodesWithContentDescription("Send message").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Steer").assertCountEquals(0)
         composeRule.onNodeWithContentDescription("Attach files").assertIsNotEnabled()
         composeRule.onNodeWithText("Guidance queued for the active turn").assertIsDisplayed()
         composeRule.onNodeWithText("A later steer was rejected").assertIsDisplayed()
         composeRule.runOnIdle {
-            assertEquals(sessionId to "Focus on the failing test", steered)
+            assertEquals(sessionId to "/steer Focus on the failing test", steered)
         }
     }
 

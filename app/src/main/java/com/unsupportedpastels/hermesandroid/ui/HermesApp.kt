@@ -8,6 +8,10 @@ import android.provider.OpenableColumns
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
@@ -129,8 +133,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
@@ -188,6 +194,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -245,6 +252,7 @@ import com.unsupportedpastels.hermesandroid.connection.ServerCatalogEntry
 import com.unsupportedpastels.hermesandroid.connection.MAX_SERVER_LABEL_CHARS
 import com.unsupportedpastels.hermesandroid.connection.ModelPickerState
 import com.unsupportedpastels.hermesandroid.connection.ServerSettingsState
+import com.unsupportedpastels.hermesandroid.connection.SessionSearchResult
 
 import com.unsupportedpastels.hermesandroid.connection.SlashCompletionState
 import com.unsupportedpastels.hermesandroid.gateway.AuthenticationState
@@ -270,6 +278,7 @@ import com.unsupportedpastels.hermesandroid.files.HostFileContent
 import com.unsupportedpastels.hermesandroid.files.HostFileListing
 import com.unsupportedpastels.hermesandroid.navigation.HomeRoute
 import com.unsupportedpastels.hermesandroid.navigation.ProjectRoute
+import com.unsupportedpastels.hermesandroid.navigation.RecentSessionsRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import com.unsupportedpastels.hermesandroid.navigation.ServerSettingsRoute
 import com.unsupportedpastels.hermesandroid.navigation.SettingsServersRoute
@@ -318,6 +327,58 @@ private const val SESSION_STATUS_PULSE_MILLIS = 900
  * window, not the device screen, so split-screen windows below this width hide the dock.
  */
 private const val PROJECT_DOCK_MIN_WIDTH_DP = 800
+private const val HOME_RECENT_SESSION_PREVIEW_LIMIT = 10
+
+private fun mergeSessionCollections(
+    durableSessions: List<SessionSummary>,
+    projectSessions: List<SessionSummary>,
+    searchResults: List<SessionSearchResult>,
+): List<SessionSummary> {
+    val merged = linkedMapOf<DurableSessionId, SessionSummary>()
+    durableSessions.forEach { session -> merged[session.id] = session }
+    projectSessions.forEach { projectSession ->
+        val existing = merged[projectSession.id]
+        merged[projectSession.id] = if (existing == null) {
+            projectSession
+        } else {
+            existing.copy(
+                projectId = existing.projectId ?: projectSession.projectId,
+                workspacePath = existing.workspacePath ?: projectSession.workspacePath,
+            )
+        }
+    }
+    searchResults.forEach { result ->
+        if (result.sessionId !in merged) {
+            merged[result.sessionId] = SessionSummary(
+                id = result.sessionId,
+                title = result.title,
+                preview = result.snippet,
+            )
+        }
+    }
+    return merged.values.toList()
+}
+
+private fun projectForSessionWorkspace(
+    session: SessionSummary,
+    projects: List<ProjectSummary>,
+): ProjectSummary? {
+    val workspace = validProjectWorkspacePath(session.workspacePath)
+        ?.trimEnd('/', '\\')
+        ?: return null
+    return projects.asSequence()
+        .filter { project ->
+            val projectPath = validProjectWorkspacePath(project.primaryPath)
+                ?.trimEnd('/', '\\')
+                ?: return@filter false
+            workspace == projectPath ||
+                workspace.startsWith("$projectPath/") ||
+                workspace.startsWith("$projectPath\\")
+        }
+        .maxByOrNull { project ->
+            validProjectWorkspacePath(project.primaryPath)?.length ?: 0
+        }
+}
 
 internal fun sessionStatusPulseAlphaAt(playTimeMillis: Long): Float {
     val boundedTime = playTimeMillis.coerceAtLeast(0L) % (SESSION_STATUS_PULSE_MILLIS * 2L)
@@ -373,6 +434,7 @@ fun HermesApp(
     onSetModelReasoningOverride: suspend (ModelSelection, String) -> Result<Unit> = { _, _ -> Result.success(Unit) },
     onLogout: suspend () -> Unit = {},
     onSignIn: () -> Unit = {},
+    onRetryConnection: () -> Unit = {},
     onOpenProject: (ProjectId) -> Unit = {},
     onOpenSession: (DurableSessionId) -> Unit = {},
     onLoadSessionInsights: (DurableSessionId) -> Unit = {},
@@ -385,6 +447,8 @@ fun HermesApp(
     onToggleCronJobRuns: (String) -> Unit = {},
     isHomeRefreshing: Boolean = false,
     onRefreshHome: () -> Unit = {},
+    onLoadRecentSessions: () -> Unit = {},
+    onLoadMoreRecentSessions: () -> Unit = {},
     onRenameSession: suspend (DurableSessionId, String) -> Result<Unit> = { _, _ -> Result.success(Unit) },
     onSetSessionPinned: suspend (DurableSessionId, Boolean) -> Result<Unit> = { _, _ -> Result.success(Unit) },
     onSetSessionArchived: suspend (DurableSessionId, Boolean) -> Result<Unit> = { _, _ -> Result.success(Unit) },
@@ -406,7 +470,6 @@ fun HermesApp(
     onApprovalResponse: (DurableSessionId, String, Boolean) -> Unit = { _, _, _ -> },
     onBlockingResponse: (DurableSessionId, UnsupportedBlockingKind, String, String) -> Unit = { _, _, _, _ -> },
     onStopSession: (DurableSessionId) -> Unit = {},
-    onSteerSession: (DurableSessionId, String) -> Unit = { _, _ -> },
     onSetDelegationPaused: (DurableSessionId, Boolean) -> Unit = { _, _ -> },
     onSteerSubagent: (DurableSessionId, String, String) -> Unit = { _, _, _ -> },
     onInterruptSubagent: (DurableSessionId, String) -> Unit = { _, _ -> },
@@ -446,33 +509,19 @@ fun HermesApp(
         Result.success(Unit)
     },
 ) {
-    val durableSessions = snapshot.durableSessions
-    val sessions = buildList {
-        addAll(durableSessions)
-        snapshot.projectSessions.values.flatten().forEach { projectSession ->
-            if (none { it.id == projectSession.id }) add(projectSession)
-        }
-        snapshot.transcriptSearchResults.forEach { result ->
-            if (none { it.id == result.sessionId }) {
-                add(
-                    SessionSummary(
-                        id = result.sessionId,
-                        title = result.title,
-                        preview = result.snippet,
-                        profile = snapshot.selectedProfile,
-                    ),
-                )
-            }
-        }
-    }
+    val mergedSessions = mergeSessionCollections(
+        durableSessions = snapshot.durableSessions,
+        projectSessions = snapshot.projectSessions.values.flatten() + snapshot.recentSessions.sessions,
+        searchResults = snapshot.transcriptSearchResults,
+    )
     val loadedProjectState = snapshot.projectState as? ProjectLoadState.Loaded
     val projects = loadedProjectState?.projects ?: snapshot.projects
-    val scopedSessionIds = loadedProjectState?.scopedSessionIds.orEmpty()
-    val recentSessions = if (loadedProjectState == null) {
-        sessions
-    } else {
-        sessions.filterNot { it.id in scopedSessionIds }
+    val sessions = mergedSessions.map { session ->
+        session.copy(projectId = session.projectId ?: projectForSessionWorkspace(session, projects)?.id)
     }
+    val recentSessions = sessions
+        .sortedByDescending { it.lastActiveEpochSeconds ?: Double.NEGATIVE_INFINITY }
+        .take(HOME_RECENT_SESSION_PREVIEW_LIMIT)
     val serverOrigin = (serverSettingsState as? ServerSettingsState.Ready)?.activeOrigin
     val effectiveServerCatalog = when (val ready = serverSettingsState) {
         is ServerSettingsState.Ready -> if (serverCatalog.entries.isEmpty()) ready.catalog else serverCatalog
@@ -596,6 +645,12 @@ fun HermesApp(
             backStack.removeLastOrNull()
         }
         backStack.add(SessionDetailRoute(sessionId))
+        Unit
+    }
+    val navigateToRecentSessions = {
+        if (backStack.lastOrNull() !is RecentSessionsRoute) {
+            backStack.add(RecentSessionsRoute)
+        }
         Unit
     }
     val stageShareIntoSession = { sessionId: DurableSessionId ->
@@ -827,9 +882,11 @@ fun HermesApp(
                     onLoadManagementSettings = onLoadManagementSettings,
                     onRefreshDurableSessions = onRefreshDurableSessions,
                     onConfigureServer = openServerSettings,
+                    onRetryConnection = onRetryConnection,
                     onSignIn = onSignIn,
                     onProjectSelected = navigateToProject,
                     onSessionSelected = navigateToSession,
+                    onRecentSessionsSelected = navigateToRecentSessions,
                     onRenameSession = onRenameSession,
                     onSetSessionPinned = onSetSessionPinned,
                     onSetSessionArchived = onSetSessionArchived,
@@ -843,6 +900,19 @@ fun HermesApp(
                         val newSessionId = onCreateSession()
                         if (newSessionId != null) navigateToSession(newSessionId)
                     },
+                )
+            }
+            entry<RecentSessionsRoute>(
+                metadata = ListDetailSceneStrategy.detailPane(),
+            ) {
+                RecentSessionsScreen(
+                    snapshot = snapshot,
+                    projects = projects,
+                    showBack = !supportsListDetail,
+                    onBack = navigateBack,
+                    onLoad = onLoadRecentSessions,
+                    onLoadMore = onLoadMoreRecentSessions,
+                    onSessionSelected = navigateToSession,
                 )
             }
             entry<ProjectRoute>(
@@ -1004,8 +1074,6 @@ fun HermesApp(
                         showStop = chat.isSending && hasControllerRuntime,
                         stopping = chat.isStopping,
                         onStop = { onStopSession(session.id) },
-                        steeringAvailable = chat.isSending && hasControllerRuntime,
-                        onSteer = { guidance -> onSteerSession(session.id, guidance) },
                         delegationStatus = snapshot.delegationStatus,
                         delegationAvailable = hasControllerRuntime &&
                             snapshot.delegationStatus.active.isNotEmpty(),
@@ -2232,9 +2300,11 @@ private fun SessionListScreen(
     onLoadManagementSettings: (String) -> Unit = {},
     onRefreshDurableSessions: (Boolean) -> Unit = {},
     onConfigureServer: () -> Unit,
+    onRetryConnection: () -> Unit = {},
     onSignIn: () -> Unit,
     onProjectSelected: (ProjectId) -> Unit,
     onSessionSelected: (DurableSessionId) -> Unit,
+    onRecentSessionsSelected: () -> Unit,
     onRenameSession: suspend (DurableSessionId, String) -> Result<Unit>,
     onSetSessionPinned: suspend (DurableSessionId, Boolean) -> Result<Unit>,
     onSetSessionArchived: suspend (DurableSessionId, Boolean) -> Result<Unit>,
@@ -2581,7 +2651,12 @@ private fun SessionListScreen(
                             connectionState == ConnectionState.Disconnected &&
                             serverSettingsState is ServerSettingsState.Ready
                         ) {
-                            Button(onClick = dropUnlessResumed { onConfigureServer() }) {
+                            if (serverOrigin != null) {
+                                Button(onClick = dropUnlessResumed { onRetryConnection() }) {
+                                    Text("Retry")
+                                }
+                            }
+                            TextButton(onClick = dropUnlessResumed { onConfigureServer() }) {
                                 Text(if (serverOrigin == null) "Configure server" else "Edit server")
                             }
                         }
@@ -2695,12 +2770,25 @@ private fun SessionListScreen(
                     }
                 }
                 item(key = "recent-sessions-heading") {
-                    Text(
-                        "Recent Sessions",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Recent Sessions",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = dropUnlessResumed { onRecentSessionsSelected() },
+                            modifier = Modifier.semantics {
+                                contentDescription = "View all recent sessions"
+                            },
+                        ) { Text("View all") }
+                    }
                 }
                 if (visibleSessions.isEmpty()) {
                     item(key = "recent-sessions-empty") {
@@ -2716,6 +2804,8 @@ private fun SessionListScreen(
                         val row: @Composable () -> Unit = {
                             RecentSessionHomeRow(
                                 session = session,
+                                projectLabel = session.projectId
+                                    ?.let { projectId -> projects.firstOrNull { it.id == projectId }?.label },
                                 current = isCurrent,
                                 onClick = dropUnlessResumed {
                                     onSessionSelected(session.id)
@@ -3040,6 +3130,7 @@ private fun ProjectHomeRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
+            .testTag("Project home row:${project.label}")
             .semantics(mergeDescendants = true) {
                 selected = working
                 contentDescription = description
@@ -3094,6 +3185,7 @@ private fun ProjectHomeRow(
 @Composable
 private fun RecentSessionHomeRow(
     session: SessionSummary,
+    projectLabel: String? = null,
     current: Boolean,
     onClick: () -> Unit,
     onRename: () -> Unit,
@@ -3111,6 +3203,7 @@ private fun RecentSessionHomeRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
+            .testTag("Recent session row:${session.id.value}")
             .combinedClickable(onClick = onClick, onLongClick = onRename)
             .semantics(mergeDescendants = true) {
                 if (current) stateDescription = "Current controller session"
@@ -3125,23 +3218,244 @@ private fun RecentSessionHomeRow(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
+                val supportingLabel = listOfNotNull(
+                    if (session.isLocalDraft) "Draft" else null,
+                    if (current) "Controller active" else null,
+                    projectLabel,
+                ).joinToString(" · ")
                 Text(
                     session.title,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.titleSmall,
                 )
-                Text(
-                    if (current) "Controller active" else "Durable session",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (current) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
+                if (supportingLabel.isNotEmpty()) {
+                    Text(
+                        supportingLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (current) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
             }
             Text("›", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RecentSessionsScreen(
+    snapshot: HermesGatewaySnapshot,
+    projects: List<ProjectSummary>,
+    showBack: Boolean,
+    onBack: () -> Unit,
+    onLoad: () -> Unit,
+    onLoadMore: () -> Unit,
+    onSessionSelected: (DurableSessionId) -> Unit,
+) {
+    val state = snapshot.recentSessions
+    val listState = rememberLazyListState()
+    val projectBySessionId = buildMap {
+        snapshot.projectSessions.forEach { (projectId, sessions) ->
+            sessions.forEach { session -> put(session.id, projectId) }
+        }
+    }
+    val projectById = projects.associateBy(ProjectSummary::id)
+    val sessions = state.sessions.map { session ->
+        val projectId = session.projectId
+            ?: projectBySessionId[session.id]
+            ?: projectForSessionWorkspace(session, projects)?.id
+        val projectSession = projectId?.let { id ->
+            snapshot.projectSessions[id]?.firstOrNull { it.id == session.id }
+        }
+        session.copy(
+            projectId = projectId,
+            workspacePath = session.workspacePath ?: projectSession?.workspacePath,
+        )
+    }
+    val activeControllerSessionIds = snapshot.activeRuntimes
+        .filter { it.access == RuntimeAccess.Controller }
+        .mapNotNull { it.durableSessionId }
+        .toSet()
+
+    LaunchedEffect(snapshot.selectedProfile, snapshot.authenticationState) {
+        if (snapshot.authenticationState in setOf(
+                AuthenticationState.Authenticated,
+                AuthenticationState.NotRequired,
+            )
+        ) onLoad()
+    }
+    LaunchedEffect(listState, state.hasMore) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+            .collect { lastVisibleIndex ->
+                if (lastVisibleIndex >= sessions.size - 5) onLoadMore()
+            }
+    }
+
+    Scaffold(
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Recent Sessions")
+                        val count = state.total ?: sessions.size
+                        Text(
+                            "$count across all projects",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                },
+                navigationIcon = {
+                    if (showBack) {
+                        TextButton(onClick = dropUnlessResumed { onBack() }) {
+                            Text("Back")
+                        }
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("Recent sessions full list"),
+            contentPadding = PaddingValues(
+                top = innerPadding.calculateTopPadding(),
+                bottom = innerPadding.calculateBottomPadding(),
+            ),
+        ) {
+            if (state.isLoading && sessions.isEmpty()) {
+                item(key = "recent-sessions-loading") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    }
+                }
+            } else if (state.error != null && sessions.isEmpty()) {
+                item(key = "recent-sessions-error") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(state.error, color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = onLoad) { Text("Retry") }
+                    }
+                }
+            } else if (sessions.isEmpty()) {
+                item(key = "recent-sessions-page-empty") {
+                    Text(
+                        "No recent sessions",
+                        modifier = Modifier.padding(24.dp),
+                    )
+                }
+            } else {
+                items(sessions, key = { "recent-page-session:${it.id.value}" }) { session ->
+                    val projectLabel = session.projectId
+                        ?.let(projectById::get)
+                        ?.label
+                        ?: session.projectId?.value
+                        ?: "No project"
+                    RecentSessionFullRow(
+                        session = session,
+                        projectLabel = projectLabel,
+                        current = session.id in activeControllerSessionIds,
+                        onClick = dropUnlessResumed { onSessionSelected(session.id) },
+                    )
+                }
+                if (state.isLoadingMore) {
+                    item(key = "recent-sessions-loading-more") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                        }
+                    }
+                } else if (state.error != null) {
+                    item(key = "recent-sessions-load-more-error") {
+                        TextButton(
+                            onClick = onLoadMore,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Could not load more · Retry") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentSessionFullRow(
+    session: SessionSummary,
+    projectLabel: String,
+    current: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        shape = MaterialTheme.shapes.medium,
+        color = if (current) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f)
+        } else {
+            MaterialTheme.colorScheme.surfaceContainer
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .semantics(mergeDescendants = true) {
+                if (current) stateDescription = "Current controller session"
+            },
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(
+                session.title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                projectLabel,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            session.workspacePath?.let { workspace ->
+                Text(
+                    workspace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            session.preview?.let { preview ->
+                Text(
+                    preview,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
         }
     }
 }
@@ -4503,8 +4817,6 @@ private fun SessionDetailScreen(
     showStop: Boolean,
     stopping: Boolean,
     onStop: () -> Unit,
-    steeringAvailable: Boolean,
-    onSteer: (String) -> Unit,
     delegationStatus: DelegationStatus,
     delegationAvailable: Boolean,
     onSetDelegationPaused: (Boolean) -> Unit,
@@ -4742,11 +5054,11 @@ private fun SessionDetailScreen(
                     val transcriptEntries = remember(chat.messages) {
                         coalesceTranscriptEntries(chat.messages)
                     }
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                     LazyColumn(
                         state = transcriptListState,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
+                            .fillMaxSize()
                             .testTag("Session timeline"),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
@@ -4898,6 +5210,48 @@ private fun SessionDetailScreen(
                             }
                         }
                     }
+                        // Discord-style jump-to-bottom pill: shown only when the
+                        // user has scrolled up off the latest message. Hidden when
+                        // a pending interactive card (clarification/approval/secure
+                        // input) is at the tail: those own the bottom-end corner
+                        // with their own action buttons, and the user is already at
+                        // the bottom, so the FAB would only obstruct them.
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = !pinnedToBottom && !hasPendingTailInteraction(chat.runState),
+                            enter = fadeIn() + scaleIn(initialScale = 0.8f),
+                            exit = fadeOut() + scaleOut(targetScale = 0.8f),
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(bottom = 8.dp),
+                        ) {
+                            Surface(
+                                onClick = {
+                                    followBottom = true
+                                    transcriptScope.launch {
+                                        transcriptListState.animateScrollToItem(
+                                            timelineLastIndex,
+                                            TranscriptEndScrollOffset,
+                                        )
+                                    }
+                                },
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                shadowElevation = 4.dp,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .semantics { contentDescription = "Scroll to latest message" },
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        Icons.Outlined.ArrowDownward,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
             chat.error
@@ -4983,8 +5337,12 @@ private fun SessionDetailScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            val composerEnabled = (!chat.isSending || steeringAvailable) && !chat.isLoading
-            val attachmentsEnabled = canSend && composerEnabled && !steeringAvailable
+            // Keep the composer available during a controlled turn so the user can
+            // issue the server's /steer command through the normal send path.
+            val composerEnabled = !chat.isLoading
+            val attachmentsEnabled = canSend && composerEnabled && !chat.isSending
+            val canSubmitDuringActiveTurn = !chat.isSending ||
+                (attachments.isEmpty() && isSteerCommand(draft))
             val voiceHost = rememberVoiceConversationHost(
                 conversation = voiceConversation,
                 sessionId = session.id.value,
@@ -5167,97 +5525,75 @@ private fun SessionDetailScreen(
                             )
                         }
                     }
-                    if (showStop) {
-                        if (steeringAvailable) {
-                            Button(
-                                enabled = !stopping && draft.isNotBlank(),
-                                onClick = {
-                                    val guidance = draft.trim()
-                                    if (guidance.isNotEmpty()) {
-                                        keyboardController?.hide()
-                                        focusManager.clearFocus()
-                                        onSteer(guidance)
-                                        onDraftChanged("")
-                                    }
-                                },
-                                contentPadding = PaddingValues(horizontal = 14.dp),
-                                modifier = Modifier
-                                    .heightIn(min = 40.dp)
-                                    .semantics {
-                                        contentDescription = "Steer Hermes response"
-                                        stateDescription = if (stopping) "Steering unavailable while stopping" else "Ready to steer"
-                                    },
-                            ) {
-                                Text("Steer")
-                            }
-                        }
-                        Button(
+                    if (showStop && !canSubmitDuringActiveTurn) {
+                        FilledIconButton(
                             enabled = !stopping,
-                            colors = ButtonDefaults.buttonColors(
+                            colors = IconButtonDefaults.filledIconButtonColors(
                                 containerColor = semanticColors.active,
                                 contentColor = semanticColors.onActive,
                                 disabledContainerColor = semanticColors.active.copy(alpha = 0.38f),
                                 disabledContentColor = semanticColors.onActive.copy(alpha = 0.38f),
                             ),
-                            contentPadding = PaddingValues(horizontal = 14.dp),
                             onClick = dropUnlessResumed { onStop() },
                             modifier = Modifier
-                                .heightIn(min = 40.dp)
+                                .size(40.dp)
                                 .semantics {
                                     contentDescription = "Stop Hermes response"
                                     stateDescription = if (stopping) "Stopping" else "Ready to stop"
                                 },
                         ) {
-                            Text(if (stopping) "Stopping…" else "Stop")
+                            Icon(Icons.Outlined.Close, contentDescription = null)
                         }
                     } else {
                         FilledIconButton(
-                            onClick = {
-                                deviceSpeechController.finish()
-                                val message = draft.trim()
-                                val reasoningEffort = reasoningEffortCommand(message)
-                                keyboardController?.hide()
-                                focusManager.clearFocus()
-                                when {
-                                    isModelPickerCommand(message) -> {
-                                        pendingSend = null
-                                        onDraftChanged("")
-                                        onOpenModelPicker()
-                                    }
-                                    reasoningEffort != null -> {
-                                        pendingSend = null
-                                        onDraftChanged("")
-                                        onReasoningSelected(reasoningEffort)
-                                    }
-                                    else -> {
-                                        pendingSend = message to chat.messages.size
-                                        onDraftChanged("")
-                                        onSend(message)
-                                        followBottom = true
-                                        transcriptScope.launch {
-                                            transcriptListState.scrollToItem(
-                                                timelineLastIndex,
-                                                TranscriptEndScrollOffset,
-                                            )
-                                        }
+                        onClick = {
+                            deviceSpeechController.finish()
+                            val message = draft.trim()
+                            val reasoningEffort = reasoningEffortCommand(message)
+                            keyboardController?.hide()
+                            focusManager.clearFocus()
+                            when {
+                                isModelPickerCommand(message) -> {
+                                    pendingSend = null
+                                    onDraftChanged("")
+                                    onOpenModelPicker()
+                                }
+                                reasoningEffort != null -> {
+                                    pendingSend = null
+                                    onDraftChanged("")
+                                    onReasoningSelected(reasoningEffort)
+                                }
+                                else -> {
+                                    pendingSend = message to chat.messages.size
+                                    onDraftChanged("")
+                                    onSend(message)
+                                    followBottom = true
+                                    transcriptScope.launch {
+                                        transcriptListState.scrollToItem(
+                                            timelineLastIndex,
+                                            TranscriptEndScrollOffset,
+                                        )
                                     }
                                 }
-                            },
-                            enabled = canSend &&
-                                composerEnabled &&
-                                (draft.isNotBlank() || attachments.isNotEmpty()),
-                            colors = IconButtonDefaults.filledIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary,
-                                disabledContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
-                                disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-                            ),
-                            modifier = Modifier
-                                .size(40.dp)
-                                .semantics { contentDescription = "Send message" },
-                        ) {
-                            Icon(Icons.Outlined.ArrowUpward, contentDescription = null)
-                        }
+                            }
+                        },
+                        enabled = canSend &&
+                            composerEnabled &&
+                            !stopping &&
+                            canSubmitDuringActiveTurn &&
+                            (draft.isNotBlank() || attachments.isNotEmpty()),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            disabledContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
+                            disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                        ),
+                        modifier = Modifier
+                            .size(40.dp)
+                            .semantics { contentDescription = "Send message" },
+                    ) {
+                        Icon(Icons.Outlined.ArrowUpward, contentDescription = null)
+                    }
                     }
                 }
             }
@@ -6529,6 +6865,16 @@ private fun RunEventState.hasVisibleContent(): Boolean =
         approval != null ||
         unsupportedBlocking != null
 
+/**
+ * Whether a still-pending interactive card (clarification, approval, or secure
+ * blocking prompt) occupies the transcript tail. The jump-to-bottom FAB hides
+ * while one is present so it never overlaps that card's own action buttons.
+ */
+private fun hasPendingTailInteraction(runState: RunEventState): Boolean =
+    runState.clarification?.lifecycle == RunInteractionLifecycle.Pending ||
+        runState.approval?.lifecycle == RunInteractionLifecycle.Pending ||
+        runState.unsupportedBlocking?.lifecycle == RunInteractionLifecycle.Pending
+
 /** A transcript message paired with its stable index in the source list. */
 internal data class IndexedChatMessage(val index: Int, val message: ChatMessage)
 
@@ -6953,6 +7299,7 @@ private fun ClarificationCard(
 ) {
     var answer by remember(interaction.requestId) { mutableStateOf("") }
     var selectedChoices by remember(interaction.requestId) { mutableStateOf(emptySet<String>()) }
+    val pending = interaction.lifecycle == RunInteractionLifecycle.Pending
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(12.dp),
@@ -6960,81 +7307,136 @@ private fun ClarificationCard(
         ) {
             Text("Clarification", style = MaterialTheme.typography.titleSmall)
             Text(interaction.question)
-            if (interaction.lifecycle == RunInteractionLifecycle.Pending) {
-                if (interaction.choices.isEmpty()) {
-                    OutlinedTextField(
-                        value = answer,
-                        onValueChange = { answer = it },
-                        label = { Text("Response") },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = true,
-                    )
-                    Button(
-                        enabled = answer.isNotBlank(),
-                        onClick = dropUnlessResumed {
-                            onResponse(interaction.requestId, answer.trim())
-                        },
-                    ) {
-                        Text("Send response")
-                    }
-                } else if (interaction.multiSelect) {
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        interaction.choices.forEach { choice ->
-                            FilterChip(
-                                selected = choice in selectedChoices,
-                                onClick = {
-                                    selectedChoices = if (choice in selectedChoices) {
-                                        selectedChoices - choice
-                                    } else {
-                                        selectedChoices + choice
-                                    }
-                                },
-                                label = { Text(choice) },
-                            )
-                        }
-                    }
-                    Button(
-                        enabled = selectedChoices.isNotEmpty(),
-                        onClick = dropUnlessResumed {
-                            val answer = interaction.choices
-                                .filter { it in selectedChoices }
-                                .joinToString(", ")
-                            onResponse(interaction.requestId, answer)
-                        },
-                    ) {
-                        Text("Send response")
-                    }
-                } else {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        interaction.choices.forEach { choice ->
-                            Surface(
-                                onClick = dropUnlessResumed {
-                                    onResponse(interaction.requestId, choice)
-                                },
-                                shape = RoundedCornerShape(12.dp),
-                                color = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text(
-                                    choice,
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                                    style = MaterialTheme.typography.bodyMedium,
+            if (pending) {
+                // Grounded in the desktop clarify card: choices are shown as
+                // selectable rows, an "Other" free-text field is ALWAYS offered
+                // alongside them, and the card is confirmed with Skip / Continue.
+                // Typing in the field and picking a choice are mutually exclusive.
+                if (interaction.choices.isNotEmpty()) {
+                    if (interaction.multiSelect) {
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            interaction.choices.forEach { choice ->
+                                FilterChip(
+                                    selected = choice in selectedChoices,
+                                    onClick = {
+                                        answer = ""
+                                        selectedChoices = if (choice in selectedChoices) {
+                                            selectedChoices - choice
+                                        } else {
+                                            selectedChoices + choice
+                                        }
+                                    },
+                                    label = { Text(choice) },
                                 )
+                            }
+                        }
+                    } else {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            interaction.choices.forEach { choice ->
+                                val chosen = choice in selectedChoices
+                                Surface(
+                                    onClick = {
+                                        answer = ""
+                                        selectedChoices = setOf(choice)
+                                    },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (chosen) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.secondaryContainer
+                                    },
+                                    contentColor = if (chosen) {
+                                        MaterialTheme.colorScheme.onPrimary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSecondaryContainer
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        choice,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                }
                             }
                         }
                     }
                 }
+                OutlinedTextField(
+                    value = answer,
+                    onValueChange = {
+                        answer = it
+                        // Typing is its own answer — clear any picked choice so the
+                        // two inputs can't both look selected (desktop parity).
+                        if (it.isNotBlank()) selectedChoices = emptySet()
+                    },
+                    label = {
+                        Text(if (interaction.choices.isEmpty()) "Response" else "Other")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = true,
+                )
+                val pendingAnswer: String? = when {
+                    interaction.multiSelect && selectedChoices.isNotEmpty() ->
+                        interaction.choices.filter { it in selectedChoices }.joinToString(", ")
+                    !interaction.multiSelect && selectedChoices.isNotEmpty() ->
+                        selectedChoices.first()
+                    answer.isNotBlank() -> answer.trim()
+                    else -> null
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Skip sends an empty answer, matching desktop: the agent
+                    // treats it as "no preference / proceed".
+                    TextButton(
+                        onClick = {
+                            onResponse(interaction.requestId, "")
+                        },
+                    ) {
+                        Text("Skip")
+                    }
+                    Button(
+                        enabled = pendingAnswer != null,
+                        onClick = {
+                            pendingAnswer?.let { onResponse(interaction.requestId, it) }
+                        },
+                    ) {
+                        Text("Continue")
+                    }
+                }
             } else {
+                // Settled: a responded clarification is cleared outright (see
+                // publishClarificationResponse), so the only states that reach
+                // here are a timeout expiry or a send failure. Show a brief,
+                // non-interactive note for each.
                 Text("Clarification response", style = MaterialTheme.typography.labelMedium)
-                Text(interaction.lifecycle.name)
+                when (interaction.lifecycle) {
+                    RunInteractionLifecycle.Failed -> {
+                        Text(
+                            "Could not send response",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    else -> {
+                        Text(
+                            "Timed out",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontStyle = FontStyle.Italic,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
     }
