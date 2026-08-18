@@ -1,5 +1,6 @@
 package com.unsupportedpastels.hermesandroid.ui
 
+import android.graphics.Bitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -86,6 +87,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
+import java.io.ByteArrayOutputStream
 
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [35])
@@ -282,6 +284,11 @@ class HermesAppTest {
     @Test
     fun sessionDetailsSummarizeArtifactsAndOpenArtifactBrowser() {
         val session = sessions.first()
+        val previewBytes = ByteArrayOutputStream().use { output ->
+            val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+            output.toByteArray()
+        }
         val snapshot = connectedSnapshot.copy(
             authenticationState = AuthenticationState.Authenticated,
             chatSessions = mapOf(
@@ -301,6 +308,7 @@ class HermesAppTest {
                 HermesApp(
                     snapshot = snapshot,
                     initialRoute = SessionDetailRoute(session.id),
+                    onLoadManagedImage = { Result.success(previewBytes) },
                 )
             }
         }

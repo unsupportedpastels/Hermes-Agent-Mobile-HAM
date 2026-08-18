@@ -239,6 +239,7 @@ internal fun RemoteMediaImage(
     source: String,
     modifier: Modifier = Modifier,
     loadManagedImage: (suspend (String) -> ByteArray)? = null,
+    onImageClick: (() -> Unit)? = null,
 ) {
     val state by produceState<RemoteImageUiState>(
         initialValue = RemoteImageRuntime.cached(source)
@@ -279,10 +280,15 @@ internal fun RemoteMediaImage(
         }
     }
 
+    val fallbackModifier = if (onImageClick == null) {
+        modifier
+    } else {
+        modifier.clickable(onClick = onImageClick)
+    }
     when (val current = state) {
         RemoteImageUiState.Loading -> {
             Box(
-                modifier = modifier
+                modifier = fallbackModifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
                     .background(
@@ -301,12 +307,12 @@ internal fun RemoteMediaImage(
             }
         }
         is RemoteImageUiState.Loaded -> {
-            LoadedRemoteMediaImage(current.bitmap, modifier)
+            LoadedRemoteMediaImage(current.bitmap, modifier, onClick = onImageClick)
         }
         RemoteImageUiState.Failed -> {
             Text(
                 text = "Image unavailable",
-                modifier = modifier
+                modifier = fallbackModifier
                     .fillMaxWidth()
                     .background(
                         MaterialTheme.colorScheme.surfaceVariant,
@@ -324,11 +330,21 @@ internal fun RemoteMediaImage(
 internal fun LoadedRemoteMediaImage(
     bitmap: ImageBitmap,
     modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
 ) {
     var enlarged by remember { mutableStateOf(false) }
     var zoom by remember { mutableStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     val ratio = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1)
+    val imageClickModifier = if (onClick == null) {
+        Modifier.clickable {
+            zoom = 1f
+            pan = Offset.Zero
+            enlarged = true
+        }
+    } else {
+        Modifier.clickable(onClick = onClick)
+    }
     Image(
         bitmap = bitmap,
         contentDescription = "Generated image; tap to enlarge",
@@ -336,15 +352,11 @@ internal fun LoadedRemoteMediaImage(
             .fillMaxWidth()
             .aspectRatio(ratio.coerceIn(0.4f, 2.5f))
             .clip(RoundedCornerShape(8.dp))
-            .clickable {
-                zoom = 1f
-                pan = Offset.Zero
-                enlarged = true
-            },
+            .then(imageClickModifier),
         contentScale = ContentScale.Fit,
     )
 
-    if (enlarged) {
+    if (enlarged && onClick == null) {
         Dialog(
             onDismissRequest = { enlarged = false },
             properties = DialogProperties(

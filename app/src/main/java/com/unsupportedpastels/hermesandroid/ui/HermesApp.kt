@@ -5714,10 +5714,10 @@ private fun ArtifactBrowserSheet(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .heightIn(max = 260.dp)
-                                        .clickable { zoomedImage = artifact }
                                         .semantics {
                                             contentDescription = "Zoom image ${artifact.displayName}"
                                         },
+                                    onImageClick = { zoomedImage = artifact },
                                     loadManagedImage = if (artifact.origin == ArtifactOrigin.ManagedPath) {
                                         { path -> onLoadManagedImage(path).getOrThrow() }
                                     } else {
