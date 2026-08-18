@@ -80,6 +80,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ElevatedCard
 
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -126,6 +127,7 @@ import androidx.compose.material3.adaptive.navigation3.ListDetailSceneStrategy
 import androidx.compose.material3.adaptive.navigation3.rememberListDetailSceneStrategy
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Check
@@ -150,6 +152,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -229,7 +232,6 @@ import com.unsupportedpastels.hermesandroid.voice.ComposerVoiceConversation
 import com.unsupportedpastels.hermesandroid.voice.VoiceSettings
 import com.unsupportedpastels.hermesandroid.voice.VoiceSettingsSection
 import com.unsupportedpastels.hermesandroid.voice.MessageReadAloud
-import com.unsupportedpastels.hermesandroid.voice.MessageSpeakerButton
 import com.unsupportedpastels.hermesandroid.voice.VoiceConversationBar
 import com.unsupportedpastels.hermesandroid.voice.VoiceConversationState
 import com.unsupportedpastels.hermesandroid.voice.VoiceConversationToggleButton
@@ -257,6 +259,7 @@ import com.unsupportedpastels.hermesandroid.gateway.CronJobAction
 import com.unsupportedpastels.hermesandroid.gateway.HermesGatewaySnapshot
 import com.unsupportedpastels.hermesandroid.gateway.HostDirectoryListing
 import com.unsupportedpastels.hermesandroid.gateway.ModelProviderOption
+import com.unsupportedpastels.hermesandroid.gateway.ModelOptions
 import com.unsupportedpastels.hermesandroid.gateway.ModelSelection
 import com.unsupportedpastels.hermesandroid.gateway.ModelSwitchResult
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
@@ -269,6 +272,13 @@ import com.unsupportedpastels.hermesandroid.navigation.HomeRoute
 import com.unsupportedpastels.hermesandroid.navigation.ProjectRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import com.unsupportedpastels.hermesandroid.navigation.ServerSettingsRoute
+import com.unsupportedpastels.hermesandroid.navigation.SettingsServersRoute
+import com.unsupportedpastels.hermesandroid.navigation.SettingsConnectionRoute
+import com.unsupportedpastels.hermesandroid.navigation.SettingsModelRoute
+import com.unsupportedpastels.hermesandroid.navigation.SettingsVoiceRoute
+import com.unsupportedpastels.hermesandroid.navigation.SettingsOfflineRoute
+import com.unsupportedpastels.hermesandroid.navigation.SettingsJobsRoute
+import com.unsupportedpastels.hermesandroid.navigation.SettingsAccountRoute
 import com.unsupportedpastels.hermesandroid.session.SavedSessionFilter
 import com.unsupportedpastels.hermesandroid.session.SessionListFilter
 import com.unsupportedpastels.hermesandroid.share.SharePayload
@@ -360,6 +370,7 @@ fun HermesApp(
         ModelSwitchResult(accepted = false)
     },
     onSetProfileReasoningEffort: suspend (String) -> Result<Unit> = { Result.success(Unit) },
+    onSetModelReasoningOverride: suspend (ModelSelection, String) -> Result<Unit> = { _, _ -> Result.success(Unit) },
     onLogout: suspend () -> Unit = {},
     onSignIn: () -> Unit = {},
     onOpenProject: (ProjectId) -> Unit = {},
@@ -637,6 +648,20 @@ fun HermesApp(
         backStack.add(ServerSettingsRoute)
         Unit
     }
+    val openSettingsSection = { section: SettingsSection ->
+        backStack.add(
+            when (section) {
+                SettingsSection.Servers -> SettingsServersRoute
+                SettingsSection.Connection -> SettingsConnectionRoute
+                SettingsSection.Model -> SettingsModelRoute
+                SettingsSection.Voice -> SettingsVoiceRoute
+                SettingsSection.Offline -> SettingsOfflineRoute
+                SettingsSection.Jobs -> SettingsJobsRoute
+                SettingsSection.Account -> SettingsAccountRoute
+            },
+        )
+        Unit
+    }
     val navigateHome = {
         while (backStack.size > 1) backStack.removeLastOrNull()
         Unit
@@ -645,7 +670,7 @@ fun HermesApp(
         if (observedServerOrigin != serverOrigin) {
             while (
                 backStack.size > 1 &&
-                backStack.lastOrNull() !is ServerSettingsRoute
+                !backStack.lastOrNull().isSettingsRoute()
             ) {
                 backStack.removeLastOrNull()
             }
@@ -703,7 +728,7 @@ fun HermesApp(
                     selectedProjectId = selectedProjectId,
                     projectIcons = projectIcons,
                     canStartNewTask = snapshot.authenticationState == AuthenticationState.Authenticated,
-                    settingsSelected = backStack.lastOrNull() is ServerSettingsRoute,
+                    settingsSelected = backStack.lastOrNull().isSettingsRoute(),
                     onProjectSelected = navigateToProject,
                     onChooseProjectIcon = { iconPickerProjectId = it.value },
                     onCreateProject = { projectCreatorOpen = true },
@@ -728,6 +753,44 @@ fun HermesApp(
                         projectDockState = ProjectDockState.Hidden
                         onProjectDockStateChanged(ProjectDockState.Hidden)
                     },
+                )
+            }
+            val renderSettingsSection: @Composable (SettingsSection) -> Unit = { section ->
+                // During first-time setup the catalog is empty and the hub only
+                // offers Servers, so a successful save or Back should land on Home
+                // rather than an otherwise-empty settings hub.
+                val sectionBack =
+                    if (section == SettingsSection.Servers && effectiveServerCatalog.entries.isEmpty()) {
+                        navigateHome
+                    } else {
+                        navigateBack
+                    }
+                ServerSettingsScreen(
+                    serverOrigin = serverOrigin,
+                    serverCatalog = effectiveServerCatalog,
+                    snapshot = snapshot,
+                    showBack = !supportsListDetail,
+                    onBack = sectionBack,
+                    onSave = onSaveServerOrigin,
+                    onSaveEntry = saveServerEntry,
+                    onUpdateServerLabel = updateServerLabel,
+                    onSelectServer = onSelectServerOrigin,
+                    onRemoveServer = onRemoveServerOrigin,
+                    transcriptCachingEnabled = transcriptCachingEnabled,
+                    onTranscriptCachingChanged = onTranscriptCachingChanged,
+                    onClearOfflineCache = onClearOfflineCache,
+                    onLoadManagementSettings = onLoadManagementSettings,
+                    onSetProfileDefaultModel = onSetProfileDefaultModel,
+                    onSetProfileReasoningEffort = onSetProfileReasoningEffort,
+                    onSetModelReasoningOverride = onSetModelReasoningOverride,
+                    voiceSettings = voiceSettings,
+                    onRefreshCronJobs = onRefreshCronJobs,
+                    onCronJobAction = onCronJobAction,
+                    onRunCronJob = onRunCronJob,
+                    onToggleCronJobRuns = onToggleCronJobRuns,
+                    onLogout = onLogout,
+                    visibleSections = setOf(section),
+                    title = section.title,
                 )
             }
             Box(
@@ -981,32 +1044,43 @@ fun HermesApp(
                 }
             }
             entry<ServerSettingsRoute>(
-                metadata = ListDetailSceneStrategy.detailPane(),
+                metadata = ListDetailSceneStrategy.listPane(
+                    detailPlaceholder = { SessionPlaceholder() },
+                ) + ListDetailSceneStrategy.preferredPaneSize(width = 0.4f),
             ) {
-                ServerSettingsScreen(
-                    serverOrigin = serverOrigin,
-                    serverCatalog = effectiveServerCatalog,
-                    snapshot = snapshot,
+                val authed = snapshot.authenticationState == AuthenticationState.Authenticated
+                val available = if (authed) {
+                    SettingsSection.entries.toSet()
+                } else {
+                    setOf(SettingsSection.Servers)
+                }
+                SettingsHubScreen(
+                    availableSections = available,
                     showBack = !supportsListDetail,
                     onBack = navigateBack,
-                    onSave = onSaveServerOrigin,
-                    onSaveEntry = saveServerEntry,
-                    onUpdateServerLabel = updateServerLabel,
-                    onSelectServer = onSelectServerOrigin,
-                    onRemoveServer = onRemoveServerOrigin,
-                    transcriptCachingEnabled = transcriptCachingEnabled,
-                    onTranscriptCachingChanged = onTranscriptCachingChanged,
-                    onClearOfflineCache = onClearOfflineCache,
-                    onLoadManagementSettings = onLoadManagementSettings,
-                    onSetProfileDefaultModel = onSetProfileDefaultModel,
-                    onSetProfileReasoningEffort = onSetProfileReasoningEffort,
-                    voiceSettings = voiceSettings,
-                    onRefreshCronJobs = onRefreshCronJobs,
-                    onCronJobAction = onCronJobAction,
-                    onRunCronJob = onRunCronJob,
-                    onToggleCronJobRuns = onToggleCronJobRuns,
-                    onLogout = onLogout,
+                    onOpenSection = openSettingsSection,
                 )
+            }
+            entry<SettingsServersRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
+                renderSettingsSection(SettingsSection.Servers)
+            }
+            entry<SettingsConnectionRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
+                renderSettingsSection(SettingsSection.Connection)
+            }
+            entry<SettingsModelRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
+                renderSettingsSection(SettingsSection.Model)
+            }
+            entry<SettingsVoiceRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
+                renderSettingsSection(SettingsSection.Voice)
+            }
+            entry<SettingsOfflineRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
+                renderSettingsSection(SettingsSection.Offline)
+            }
+            entry<SettingsJobsRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
+                renderSettingsSection(SettingsSection.Jobs)
+            }
+            entry<SettingsAccountRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
+                renderSettingsSection(SettingsSection.Account)
             }
             },
                 )
@@ -3475,6 +3549,94 @@ private fun MissingProjectScreen() {
     }
 }
 
+/**
+ * The distinct areas of the settings surface. Each maps to a hub row and a
+ * section route so the settings screen renders one focused area at a time
+ * instead of a single long scroll.
+ */
+internal enum class SettingsSection(val title: String, val summary: String) {
+    Servers("Servers", "Add, switch, or remove Hermes servers"),
+    Connection("Connection & profile", "Version, sign-in, and active profile"),
+    Model("Default model", "Model and reasoning for new chats"),
+    Voice("Voice", "Dictation and hands-free conversation"),
+    Offline("Offline & privacy", "Save conversations for offline reading"),
+    Jobs("Scheduled jobs", "Cron jobs running on this server"),
+    Account("Account", "Sign out of this server"),
+}
+
+/** True for the settings hub or any of its section routes. */
+private fun NavKey?.isSettingsRoute(): Boolean = when (this) {
+    ServerSettingsRoute,
+    SettingsServersRoute,
+    SettingsConnectionRoute,
+    SettingsModelRoute,
+    SettingsVoiceRoute,
+    SettingsOfflineRoute,
+    SettingsJobsRoute,
+    SettingsAccountRoute,
+    -> true
+    else -> false
+}
+
+/**
+ * Settings landing: a compact list of sections instead of one giant scroll.
+ * Each row navigates to its own section route; [availableSections] hides rows
+ * (Connection/Model/Voice/Offline/Jobs/Account) that require an authenticated
+ * connection.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun SettingsHubScreen(
+    availableSections: Set<SettingsSection>,
+    showBack: Boolean,
+    onBack: () -> Unit,
+    onOpenSection: (SettingsSection) -> Unit,
+) {
+    Scaffold(
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings") },
+                navigationIcon = {
+                    if (showBack) {
+                        TextButton(onClick = dropUnlessResumed { onBack() }) { Text("Back") }
+                    }
+                },
+                actions = {
+                    if (!showBack) {
+                        TextButton(onClick = dropUnlessResumed { onBack() }) { Text("Close") }
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .consumeWindowInsets(innerPadding)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            SettingsSection.entries
+                .filter { it in availableSections }
+                .forEach { section ->
+                    ListItem(
+                        headlineContent = { Text(section.title) },
+                        supportingContent = { Text(section.summary) },
+                        trailingContent = {
+                            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenSection(section) }
+                            .semantics { contentDescription = "Open ${section.title} settings" },
+                    )
+                    HorizontalDivider()
+                }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun ServerSettingsScreen(
@@ -3498,12 +3660,15 @@ internal fun ServerSettingsScreen(
         ModelSwitchResult(accepted = false)
     },
     onSetProfileReasoningEffort: suspend (String) -> Result<Unit> = { Result.success(Unit) },
+    onSetModelReasoningOverride: suspend (ModelSelection, String) -> Result<Unit> = { _, _ -> Result.success(Unit) },
     onRefreshCronJobs: () -> Unit = {},
     onCronJobAction: (String, CronJobAction) -> Unit = { _, _ -> },
     onRunCronJob: (String) -> Unit = {},
     onToggleCronJobRuns: (String) -> Unit = {},
     onLogout: suspend () -> Unit = {},
     voiceSettings: VoiceSettings? = null,
+    visibleSections: Set<SettingsSection> = SettingsSection.entries.toSet(),
+    title: String = "Hermes server",
 ) {
     var value by rememberSaveable(serverOrigin?.value) {
         mutableStateOf(serverOrigin?.value.orEmpty())
@@ -3518,10 +3683,17 @@ internal fun ServerSettingsScreen(
     val coroutineScope = rememberCoroutineScope()
     var modelQuery by rememberSaveable { mutableStateOf("") }
     var pendingExpensive by remember { mutableStateOf<ModelSelection?>(null) }
-    var pendingDefault by remember { mutableStateOf<ModelSelection?>(null) }
-    var pendingProfileReasoning by remember { mutableStateOf<String?>(null) }
-    var profileReasoningMenuOpen by remember { mutableStateOf(false) }
-    var profileReasoningSaveError by remember { mutableStateOf<String?>(null) }
+    var modelPickerOpen by rememberSaveable { mutableStateOf(false) }
+    var recentModels by rememberSaveable(
+        stateSaver = listSaver(
+            save = { it.flatMap { sel -> listOf(sel.provider, sel.model) } },
+            restore = { flat ->
+                flat.chunked(2).mapNotNull { pair ->
+                    pair.takeIf { it.size == 2 }?.let { ModelSelection(it[0], it[1]) }
+                }
+            },
+        ),
+    ) { mutableStateOf(emptyList<ModelSelection>()) }
     var expensiveMessage by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(serverOrigin, snapshot.authenticationState) {
         if (serverOrigin != null && snapshot.authenticationState == AuthenticationState.Authenticated) {
@@ -3546,7 +3718,7 @@ internal fun ServerSettingsScreen(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             TopAppBar(
-                title = { Text("Hermes server") },
+                title = { Text(title) },
                 navigationIcon = {
                     if (showBack) {
                         TextButton(
@@ -3586,363 +3758,332 @@ internal fun ServerSettingsScreen(
                     .padding(horizontal = 24.dp, vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                Text("Servers", style = MaterialTheme.typography.titleMedium)
-                if (serverCatalog.entries.isEmpty()) {
-                    Text(
-                        "Add a Hermes server to get started.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        serverCatalog.entries.forEach { entry ->
-                            val selected = entry.origin == serverCatalog.activeOrigin
-                            ListItem(
-                                headlineContent = {
-                                    Text(
-                                        entry.displayLabel,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                },
-                                supportingContent = {
-                                    Text(
-                                        entry.origin.value,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                },
-                                trailingContent = {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        TextButton(
-                                            onClick = {
-                                                editingOrigin = entry.origin
-                                                value = entry.origin.value
-                                                label = entry.label
-                                                saveError = null
-                                            },
-                                            modifier = Modifier.semantics {
-                                                contentDescription = "Edit ${entry.origin.value}"
-                                            },
-                                        ) {
-                                            Text("Edit")
-                                        }
-                                        IconButton(
-                                            onClick = { pendingRemoval = entry },
-                                            enabled = !selected,
-                                            modifier = Modifier.semantics {
-                                                contentDescription = "Remove ${entry.origin.value}"
-                                            },
-                                        ) {
-                                            Icon(Icons.Outlined.Delete, contentDescription = null)
-                                        }
-                                    }
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .semantics {
-                                        this.selected = selected
-                                        contentDescription = if (selected) {
-                                            "Selected ${entry.origin.value}"
-                                        } else {
-                                            "Select ${entry.origin.value}"
-                                        }
-                                    }
-                                    .clickable(enabled = !selected) {
-                                        coroutineScope.launch {
-                                            val result = onSelectServer(entry.origin)
-                                            if (result.isFailure) {
-                                                saveError = "Could not switch server. Try again."
+                if (SettingsSection.Servers in visibleSections) {
+                    Text("Servers", style = MaterialTheme.typography.titleMedium)
+                    if (serverCatalog.entries.isEmpty()) {
+                        Text(
+                            "Add a Hermes server to get started.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            serverCatalog.entries.forEach { entry ->
+                                val selected = entry.origin == serverCatalog.activeOrigin
+                                ListItem(
+                                    headlineContent = {
+                                        Text(
+                                            entry.displayLabel,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    },
+                                    supportingContent = {
+                                        Text(
+                                            entry.origin.value,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    },
+                                    trailingContent = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            TextButton(
+                                                onClick = {
+                                                    editingOrigin = entry.origin
+                                                    value = entry.origin.value
+                                                    label = entry.label
+                                                    saveError = null
+                                                },
+                                                modifier = Modifier.semantics {
+                                                    contentDescription = "Edit ${entry.origin.value}"
+                                                },
+                                            ) {
+                                                Text("Edit")
+                                            }
+                                            IconButton(
+                                                onClick = { pendingRemoval = entry },
+                                                enabled = !selected,
+                                                modifier = Modifier.semantics {
+                                                    contentDescription = "Remove ${entry.origin.value}"
+                                                },
+                                            ) {
+                                                Icon(Icons.Outlined.Delete, contentDescription = null)
                                             }
                                         }
                                     },
-                            )
-                            if (selected) {
-                                Text(
-                                    "Active server",
-                                    color = MaterialTheme.colorScheme.primary,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.padding(start = 16.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .semantics {
+                                            this.selected = selected
+                                            contentDescription = if (selected) {
+                                                "Selected ${entry.origin.value}"
+                                            } else {
+                                                "Select ${entry.origin.value}"
+                                            }
+                                        }
+                                        .clickable(enabled = !selected) {
+                                            coroutineScope.launch {
+                                                val result = onSelectServer(entry.origin)
+                                                if (result.isFailure) {
+                                                    saveError = "Could not switch server. Try again."
+                                                }
+                                            }
+                                        },
                                 )
+                                if (selected) {
+                                    Text(
+                                        "Active server",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(start = 16.dp),
+                                    )
+                                }
                             }
                         }
                     }
-                }
-                if (serverCatalog.entries.isNotEmpty()) {
-                    TextButton(
-                        onClick = {
-                            editingOrigin = null
-                            value = ""
-                            label = ""
+                    if (serverCatalog.entries.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                editingOrigin = null
+                                value = ""
+                                label = ""
+                                saveError = null
+                            },
+                            enabled = !isSaving,
+                        ) {
+                            Text("Add server")
+                        }
+                    }
+                    Text(
+                        if (editingOrigin == null) "Add a server or edit its local label." else "Edit server label",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Text(
+                        "Enter the HTTP or HTTPS origin of your unchanged Hermes Serve instance.",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = {
+                            value = it
                             saveError = null
                         },
-                        enabled = !isSaving,
-                    ) {
-                        Text("Add server")
-                    }
-                }
-                Text(
-                    if (editingOrigin == null) "Add a server or edit its local label." else "Edit server label",
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                Text(
-                    "Enter the HTTP or HTTPS origin of your unchanged Hermes Serve instance.",
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                OutlinedTextField(
-                    value = value,
-                    onValueChange = {
-                        value = it
-                        saveError = null
-                    },
-                    label = { Text("Server origin") },
-                    supportingText = {
-                        Text(
-                            validationMessage
-                                ?: "HTTP or HTTPS origin only — no path, credentials, query, or ticket.",
-                        )
-                    },
-                    isError = validationMessage != null,
-                    enabled = !isSaving && editingOrigin == null,
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .semantics { contentDescription = "Server origin input" },
-                )
-                OutlinedTextField(
-                    value = label,
-                    onValueChange = {
-                        label = it.take(MAX_SERVER_LABEL_CHARS)
-                        saveError = null
-                    },
-                    label = { Text("Display label (optional)") },
-                    supportingText = { Text("Stored only on this device") },
-                    enabled = !isSaving,
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .semantics { contentDescription = "Display label input" },
-                )
-                saveError?.let { message ->
-                    Text(
-                        message,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        enabled = parsedOrigin != null && !isSaving,
-                        onClick = {
-                            val origin = editingOrigin ?: parsedOrigin ?: return@Button
-                            val entry = runCatching {
-                                ServerCatalogEntry(origin = origin, label = label.trim())
-                            }.getOrElse {
-                                saveError = "That server label is not valid."
-                                return@Button
-                            }
-                            coroutineScope.launch {
-                                isSaving = true
-                                saveError = null
-                                val result = if (editingOrigin != null) {
-                                    onUpdateServerLabel(entry)
-                                } else {
-                                    onSaveEntry(entry)
-                                }
-                                isSaving = false
-                                if (result.isSuccess) {
-                                    if (serverCatalog.entries.isEmpty()) {
-                                        onBack()
-                                    } else {
-                                        editingOrigin = null
-                                        value = ""
-                                        label = ""
-                                    }
-                                } else {
-                                    saveError = "Could not save server. Try again."
-                                }
-                            }
+                        label = { Text("Server origin") },
+                        supportingText = {
+                            Text(
+                                validationMessage
+                                    ?: "HTTP or HTTPS origin only — no path, credentials, query, or ticket.",
+                            )
                         },
-                    ) {
-                        Text(if (isSaving) "Saving…" else "Save")
-                    }
-                    TextButton(
+                        isError = validationMessage != null,
+                        enabled = !isSaving && editingOrigin == null,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { contentDescription = "Server origin input" },
+                    )
+                    OutlinedTextField(
+                        value = label,
+                        onValueChange = {
+                            label = it.take(MAX_SERVER_LABEL_CHARS)
+                            saveError = null
+                        },
+                        label = { Text("Display label (optional)") },
+                        supportingText = { Text("Stored only on this device") },
                         enabled = !isSaving,
-                        onClick = dropUnlessResumed { onBack() },
-                    ) {
-                        Text("Cancel")
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { contentDescription = "Display label input" },
+                    )
+                    saveError?.let { message ->
+                        Text(
+                            message,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            enabled = parsedOrigin != null && !isSaving,
+                            onClick = {
+                                val origin = editingOrigin ?: parsedOrigin ?: return@Button
+                                val entry = runCatching {
+                                    ServerCatalogEntry(origin = origin, label = label.trim())
+                                }.getOrElse {
+                                    saveError = "That server label is not valid."
+                                    return@Button
+                                }
+                                coroutineScope.launch {
+                                    isSaving = true
+                                    saveError = null
+                                    val result = if (editingOrigin != null) {
+                                        onUpdateServerLabel(entry)
+                                    } else {
+                                        onSaveEntry(entry)
+                                    }
+                                    isSaving = false
+                                    if (result.isSuccess) {
+                                        if (serverCatalog.entries.isEmpty()) {
+                                            onBack()
+                                        } else {
+                                            editingOrigin = null
+                                            value = ""
+                                            label = ""
+                                        }
+                                    } else {
+                                        saveError = "Could not save server. Try again."
+                                    }
+                                }
+                            },
+                        ) {
+                            Text(if (isSaving) "Saving…" else "Save")
+                        }
+                        TextButton(
+                            enabled = !isSaving,
+                            onClick = dropUnlessResumed { onBack() },
+                        ) {
+                            Text("Cancel")
+                        }
                     }
                 }
-                HorizontalDivider()
-                OperationalOverviewItem(
-                    snapshot = snapshot,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (snapshot.authenticationState == AuthenticationState.Authenticated) {
+                if (SettingsSection.Connection in visibleSections) {
                     HorizontalDivider()
-                    Text("Connection", style = MaterialTheme.typography.titleMedium)
-                    Text("Hermes ${snapshot.serverVersion ?: "unknown"} · Authenticated")
-                    if (snapshot.profiles.isNotEmpty()) {
-                        Text("Profile", style = MaterialTheme.typography.labelLarge)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            snapshot.profiles.forEach { profile ->
-                                FilterChip(
-                                    selected = profile == snapshot.selectedProfile,
-                                    onClick = { onLoadManagementSettings(profile) },
-                                    label = { Text(profile) },
-                                )
+                    OperationalOverviewItem(
+                        snapshot = snapshot,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (snapshot.authenticationState == AuthenticationState.Authenticated) {
+                        HorizontalDivider()
+                        Text("Connection", style = MaterialTheme.typography.titleMedium)
+                        Text("Hermes ${snapshot.serverVersion ?: "unknown"} · Authenticated")
+                        if (snapshot.profiles.isNotEmpty()) {
+                            Text("Profile", style = MaterialTheme.typography.labelLarge)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                snapshot.profiles.forEach { profile ->
+                                    FilterChip(
+                                        selected = profile == snapshot.selectedProfile,
+                                        onClick = { onLoadManagementSettings(profile) },
+                                        label = { Text(profile) },
+                                    )
+                                }
                             }
                         }
                     }
+                }
+                if (snapshot.authenticationState == AuthenticationState.Authenticated) {
                     val scopedModelOptions = snapshot.defaultModelOptions
                         ?.takeIf { it.profile == snapshot.selectedProfile }
                     val scopedCurrentModelInfo = snapshot.currentModelInfo
                         ?.takeIf { it.profile == snapshot.selectedProfile }
-                    scopedCurrentModelInfo?.let { info ->
-                        Text("Current profile model", style = MaterialTheme.typography.titleMedium)
-                        val currentLabel = listOfNotNull(info.provider, info.model).joinToString(" / ")
-                        if (currentLabel.isNotBlank()) Text(currentLabel)
-                        info.effectiveContextLength?.let { length ->
-                            Text("Effective context: $length tokens")
-                        }
-                    }
-                    Text("Default model for new chats", style = MaterialTheme.typography.titleMedium)
-                    scopedModelOptions?.current?.let { current ->
-                        Text("${current.provider} / ${current.model}")
-                    }
-                    OutlinedTextField(
-                        value = modelQuery,
-                        onValueChange = { modelQuery = it.take(128) },
-                        label = { Text("Search profile models") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        scopedModelOptions?.providers.orEmpty().forEach { provider ->
-                            provider.models
-                                .filter { modelQuery.isBlank() || it.contains(modelQuery.trim(), ignoreCase = true) }
-                                .take(8)
-                                .forEach { model ->
-                                    val selection = ModelSelection(provider.slug, model)
-                                    FilterChip(
-                                        selected = pendingDefault == selection,
-                                        onClick = { pendingDefault = selection },
-                                        label = { Text("${provider.name} · $model") },
-                                    )
-                                }
-                        }
-                    }
-                    pendingDefault?.let { selection ->
-                        Button(onClick = {
-                            coroutineScope.launch {
-                                val result = onSetProfileDefaultModel(selection, false)
-                                if (result.confirmationRequired) {
-                                    pendingExpensive = selection
-                                    expensiveMessage = result.confirmationMessage
-                                } else if (result.accepted) {
-                                    pendingDefault = null
-                                }
+                    if (SettingsSection.Model in visibleSections) {
+                        scopedCurrentModelInfo?.let { info ->
+                            Text("Current profile model", style = MaterialTheme.typography.titleMedium)
+                            val currentLabel = listOfNotNull(info.provider, info.model).joinToString(" / ")
+                            if (currentLabel.isNotBlank()) Text(currentLabel)
+                            info.effectiveContextLength?.let { length ->
+                                Text("Effective context: $length tokens")
                             }
-                        }) { Text("Set default") }
-                    }
-                    val reasoningCapabilityAvailable = scopedCurrentModelInfo?.capabilities?.reasoning == true
-                    if (reasoningCapabilityAvailable) {
-                        Text("Reasoning default for future chats", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "This changes future chats only; it does not change the active runtime.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        val reasoningLabel = pendingProfileReasoning
-                            ?: snapshot.profileReasoningEffort
-                            ?: "Provider default"
-                        Box {
-                            AssistChip(
-                                onClick = { profileReasoningMenuOpen = true },
-                                label = { Text(reasoningLabel) },
-                                modifier = Modifier.semantics {
-                                    contentDescription = "Choose future chat reasoning default"
-                                },
-                            )
-                            DropdownMenu(
-                                expanded = profileReasoningMenuOpen,
-                                onDismissRequest = { profileReasoningMenuOpen = false },
+                        }
+                        Text("Default model for new chats", style = MaterialTheme.typography.titleMedium)
+                        val currentDefault = scopedModelOptions?.current
+                        val currentDefaultCaps = scopedModelOptions?.capabilitiesFor(currentDefault)
+                        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                ValidReasoningEfforts.forEach { effort ->
-                                    DropdownMenuItem(
-                                        text = { Text(effort) },
-                                        onClick = {
-                                            pendingProfileReasoning = effort
-                                            profileReasoningMenuOpen = false
-                                            profileReasoningSaveError = null
-                                        },
+                                if (currentDefault != null) {
+                                    val providerName = scopedModelOptions.providers
+                                        .firstOrNull { it.slug == currentDefault.provider }
+                                        ?.name
+                                        ?: currentDefault.provider
+                                    Text(currentDefault.model, style = MaterialTheme.typography.titleMedium)
+                                    Text(
+                                        providerName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                }
-                            }
-                        }
-                        pendingProfileReasoning?.let { effort ->
-                            Button(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        val result = onSetProfileReasoningEffort(effort)
-                                        if (result.isSuccess) {
-                                            pendingProfileReasoning = null
-                                            profileReasoningSaveError = null
-                                        } else {
-                                            profileReasoningSaveError =
-                                                "Could not save the future-chat reasoning default."
+                                    val caps = currentDefaultCaps?.let(::modelCapabilityLabels).orEmpty()
+                                    if (caps.isNotEmpty()) {
+                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            caps.forEach { CapabilityBadge(it) }
                                         }
                                     }
-                                },
-                                modifier = Modifier.semantics {
-                                    contentDescription = "Save future chat reasoning default"
-                                },
-                            ) {
-                                Text("Set reasoning default")
+                                } else {
+                                    Text(
+                                        "No default model selected",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Button(
+                                    onClick = {
+                                        modelQuery = ""
+                                        modelPickerOpen = true
+                                    },
+                                    modifier = Modifier.semantics {
+                                        contentDescription = "Change default model"
+                                    },
+                                ) {
+                                    Text("Change model")
+                                }
                             }
                         }
-                        profileReasoningSaveError?.let { error ->
-                            Text(error, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (SettingsSection.Voice in visibleSections) {
+                        voiceSettings?.let { settings ->
+                            VoiceSettingsSection(settings)
                         }
                     }
-                    voiceSettings?.let { settings ->
-                        VoiceSettingsSection(settings)
+                    if (SettingsSection.Offline in visibleSections) {
+                        Text("Offline & privacy", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Session titles are always kept so your list works offline. " +
+                                "Turn this on to also save recent conversations — encrypted on this " +
+                                "device — so you can read them without a connection. Off by default.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Save conversations for offline reading")
+                            Switch(
+                                checked = transcriptCachingEnabled,
+                                onCheckedChange = onTranscriptCachingChanged,
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Save conversations for offline reading"
+                                },
+                            )
+                        }
+                        TextButton(onClick = onClearOfflineCache) { Text("Clear offline cache") }
                     }
-                    Text("Offline cache", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Session metadata is cached by default. Transcript tails are encrypted and opt-in.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("Cache transcript tails")
-                        Switch(
-                            checked = transcriptCachingEnabled,
-                            onCheckedChange = onTranscriptCachingChanged,
+                    if (SettingsSection.Account in visibleSections) {
+                        TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
+                        snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    }
+                    if (SettingsSection.Jobs in visibleSections) {
+                        CronJobsPanel(
+                            state = snapshot.cronJobsState,
+                            onRefresh = onRefreshCronJobs,
+                            actionJobId = snapshot.cronJobActionJobId,
+                            actionError = snapshot.cronJobActionError,
+                            onJobAction = onCronJobAction,
+                            cronServerOrigin = serverOrigin?.value,
+                            cronProfile = snapshot.selectedProfile,
+                            triggerCapability = snapshot.cronTriggerCapability,
+                            historyCapability = snapshot.cronHistoryCapability,
+                            runLoadingScopes = snapshot.cronRunLoadingScopes,
+                            runErrors = snapshot.cronRunErrors,
+                            runsByScope = snapshot.cronRunsByScope,
+                            onRunNow = onRunCronJob,
+                            onToggleRuns = onToggleCronJobRuns,
                         )
                     }
-                    TextButton(onClick = onClearOfflineCache) { Text("Clear offline cache") }
-                    TextButton(onClick = { coroutineScope.launch { onLogout() } }) { Text("Log out") }
-                    snapshot.managementError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                    CronJobsPanel(
-                        state = snapshot.cronJobsState,
-                        onRefresh = onRefreshCronJobs,
-                        actionJobId = snapshot.cronJobActionJobId,
-                        actionError = snapshot.cronJobActionError,
-                        onJobAction = onCronJobAction,
-                        cronServerOrigin = serverOrigin?.value,
-                        cronProfile = snapshot.selectedProfile,
-                        triggerCapability = snapshot.cronTriggerCapability,
-                        historyCapability = snapshot.cronHistoryCapability,
-                        runLoadingScopes = snapshot.cronRunLoadingScopes,
-                        runErrors = snapshot.cronRunErrors,
-                        runsByScope = snapshot.cronRunsByScope,
-                        onRunNow = onRunCronJob,
-                        onToggleRuns = onToggleCronJobRuns,
-                    )
                 }
             }
         }
@@ -3982,6 +4123,37 @@ internal fun ServerSettingsScreen(
             },
         )
     }
+    if (modelPickerOpen) {
+        val scopedModelOptions = snapshot.defaultModelOptions
+            ?.takeIf { it.profile == snapshot.selectedProfile }
+        ModelPickerSheet(
+            options = scopedModelOptions,
+            current = scopedModelOptions?.current,
+            recents = recentModels,
+            reasoningOverrides = snapshot.profileModelReasoningOverrides,
+            profileDefaultEffort = snapshot.profileReasoningDefault,
+            query = modelQuery,
+            onQueryChange = { modelQuery = it.take(128) },
+            onDismiss = { modelPickerOpen = false },
+            onSetReasoning = { selection, effort ->
+                coroutineScope.launch { onSetModelReasoningOverride(selection, effort) }
+                Unit
+            },
+            onSelect = { selection ->
+                coroutineScope.launch {
+                    val result = onSetProfileDefaultModel(selection, false)
+                    if (result.confirmationRequired) {
+                        pendingExpensive = selection
+                        expensiveMessage = result.confirmationMessage
+                        modelPickerOpen = false
+                    } else if (result.accepted) {
+                        recentModels = (listOf(selection) + recentModels).distinct().take(5)
+                        modelPickerOpen = false
+                    }
+                }
+            },
+        )
+    }
     pendingExpensive?.let { selection ->
         AlertDialog(
             onDismissRequest = { pendingExpensive = null },
@@ -3989,11 +4161,284 @@ internal fun ServerSettingsScreen(
             text = { Text(expensiveMessage ?: "This model may have a high per-token cost.") },
             confirmButton = {
                 TextButton(onClick = {
-                    coroutineScope.launch { onSetProfileDefaultModel(selection, true) }
+                    coroutineScope.launch {
+                        val result = onSetProfileDefaultModel(selection, true)
+                        if (result.accepted) {
+                            recentModels = (listOf(selection) + recentModels).distinct().take(5)
+                        }
+                    }
                     pendingExpensive = null
                 }) { Text("Set default") }
             },
             dismissButton = { TextButton(onClick = { pendingExpensive = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/**
+ * A searchable, provider-grouped model picker in a modal bottom sheet. Recently
+ * used models pin to the top for one-tap re-selection; the rest are grouped by
+ * provider. Tapping a row expands it inline to reveal per-model controls —
+ * Thinking on/off and a reasoning-effort scale for reasoning-capable models,
+ * plus a Fast toggle where supported — mirroring the desktop's model edit menu.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModelPickerSheet(
+    options: ModelOptions?,
+    current: ModelSelection?,
+    recents: List<ModelSelection>,
+    reasoningOverrides: Map<ModelSelection, String>,
+    profileDefaultEffort: String?,
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onSetReasoning: (ModelSelection, String) -> Unit,
+    onSelect: (ModelSelection) -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var filters by rememberSaveable(
+        stateSaver = listSaver(
+            save = { it.map(ModelCapabilityFilter::name) },
+            restore = { it.map(ModelCapabilityFilter::valueOf).toSet() },
+        ),
+    ) { mutableStateOf(emptySet<ModelCapabilityFilter>()) }
+    var expandedRow by rememberSaveable { mutableStateOf<String?>(null) }
+    val groups = remember(options, query, filters) { modelProviderGroups(options, query, filters) }
+    val recentOptions = remember(recents, options, query, filters) {
+        if (query.isNotBlank() || filters.isNotEmpty()) {
+            emptyList()
+        } else {
+            recentModelOptions(recents, options)
+        }
+    }
+    fun rowKey(selection: ModelSelection) = "${selection.provider}/${selection.model}"
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Choose a model", style = MaterialTheme.typography.titleLarge)
+            OutlinedTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                label = { Text("Search models") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics { contentDescription = "Search models" },
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ModelCapabilityFilter.entries.forEach { filter ->
+                    val active = filter in filters
+                    val label = when (filter) {
+                        ModelCapabilityFilter.Reasoning -> "Reasoning"
+                        ModelCapabilityFilter.Fast -> "Fast"
+                    }
+                    FilterChip(
+                        selected = active,
+                        onClick = {
+                            filters = if (active) filters - filter else filters + filter
+                        },
+                        label = { Text(label) },
+                        leadingIcon = if (active) {
+                            { Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                        } else {
+                            null
+                        },
+                        modifier = Modifier.semantics {
+                            selected = active
+                            contentDescription = "Filter by $label capability"
+                        },
+                    )
+                }
+            }
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (recentOptions.isNotEmpty()) {
+                    item(key = "recent-header") {
+                        Text(
+                            "Recently used",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(vertical = 4.dp),
+                        )
+                    }
+                    items(recentOptions, key = { "recent:${rowKey(it.selection)}" }) { option ->
+                        val key = rowKey(option.selection)
+                        ModelPickerRow(
+                            option = option,
+                            selected = option.selection == current,
+                            expanded = expandedRow == key,
+                            effortOverride = reasoningOverrides[option.selection],
+                            profileDefaultEffort = profileDefaultEffort,
+                            onToggleExpand = { expandedRow = if (expandedRow == key) null else key },
+                            onSelect = { onSelect(option.selection) },
+                            onSetReasoning = { effort -> onSetReasoning(option.selection, effort) },
+                        )
+                    }
+                }
+                if (groups.isEmpty()) {
+                    item(key = "empty") {
+                        Text(
+                            "No models match your search.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 8.dp),
+                        )
+                    }
+                }
+                groups.forEach { group ->
+                    item(key = "provider:${group.slug}") {
+                        Text(
+                            group.name,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+                        )
+                    }
+                    items(group.models, key = { rowKey(it.selection) }) { option ->
+                        val key = rowKey(option.selection)
+                        ModelPickerRow(
+                            option = option,
+                            selected = option.selection == current,
+                            expanded = expandedRow == key,
+                            effortOverride = reasoningOverrides[option.selection],
+                            profileDefaultEffort = profileDefaultEffort,
+                            onToggleExpand = { expandedRow = if (expandedRow == key) null else key },
+                            onSelect = { onSelect(option.selection) },
+                            onSetReasoning = { effort -> onSetReasoning(option.selection, effort) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelPickerRow(
+    option: ModelOption,
+    selected: Boolean,
+    expanded: Boolean,
+    effortOverride: String?,
+    profileDefaultEffort: String?,
+    onToggleExpand: () -> Unit,
+    onSelect: () -> Unit,
+    onSetReasoning: (String) -> Unit,
+) {
+    val labels = remember(option.capabilities) { modelCapabilityLabels(option.capabilities) }
+    val reasoningCapable = option.capabilities.reasoning == true
+    Column(modifier = Modifier.fillMaxWidth()) {
+        ListItem(
+            headlineContent = { Text(option.selection.model) },
+            supportingContent = if (labels.isEmpty()) {
+                null
+            } else {
+                { Text(labels.joinToString(" · ")) }
+            },
+            trailingContent = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (selected) {
+                        Icon(Icons.Outlined.Check, contentDescription = "Current model")
+                    }
+                    if (reasoningCapable) {
+                        Icon(
+                            if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                            contentDescription = if (expanded) {
+                                "Hide options for ${option.selection.model}"
+                            } else {
+                                "Show options for ${option.selection.model}"
+                            },
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clickable(onClick = onToggleExpand),
+                        )
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onSelect)
+                .semantics {
+                    this.selected = selected
+                    contentDescription = "Select ${option.providerName} ${option.selection.model}"
+                },
+        )
+        if (expanded && reasoningCapable) {
+            val thinkingOn = isThinkingEnabled(effortOverride)
+            val effortValue = resolveReasoningEffort(effortOverride, profileDefaultEffort)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Thinking", style = MaterialTheme.typography.bodyMedium)
+                    Switch(
+                        checked = thinkingOn,
+                        onCheckedChange = { checked ->
+                            onSetReasoning(if (checked) effortValue else "none")
+                        },
+                        modifier = Modifier.semantics {
+                            contentDescription = "Thinking for ${option.selection.model}"
+                        },
+                    )
+                }
+                if (thinkingOn) {
+                    Text(
+                        "Reasoning effort",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ReasoningEffortLevels.forEach { level ->
+                            val active = level == effortValue
+                            FilterChip(
+                                selected = active,
+                                onClick = { onSetReasoning(level) },
+                                label = { Text(reasoningEffortShortLabel(level)) },
+                                modifier = Modifier.semantics {
+                                    this.selected = active
+                                    contentDescription =
+                                        "Set ${option.selection.model} reasoning to $level"
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A non-interactive capability label (e.g. "Reasoning") shown on the current
+ * model card. Deliberately not a chip, so it does not imply a tap target.
+ */
+@Composable
+private fun CapabilityBadge(label: String) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
         )
     }
 }
@@ -4294,6 +4739,9 @@ private fun SessionDetailScreen(
                     }
                 }
                 else -> {
+                    val transcriptEntries = remember(chat.messages) {
+                        coalesceTranscriptEntries(chat.messages)
+                    }
                     LazyColumn(
                         state = transcriptListState,
                         modifier = Modifier
@@ -4302,10 +4750,36 @@ private fun SessionDetailScreen(
                             .testTag("Session timeline"),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        itemsIndexed(
-                            items = chat.messages,
-                            key = { index, _ -> "message:$index" },
-                        ) { messageIndex, message ->
+                        items(
+                            items = transcriptEntries,
+                            key = { entry ->
+                                when (entry) {
+                                    is TranscriptEntry.Single -> "message:${entry.index}"
+                                    is TranscriptEntry.ToolRun ->
+                                        "tool-run:${entry.tools.first().index}"
+                                }
+                            },
+                        ) { entry ->
+                            if (entry is TranscriptEntry.ToolRun) {
+                                var toolsExpanded by rememberSaveable(
+                                    session.id.value,
+                                    entry.tools.first().index,
+                                ) {
+                                    mutableStateOf(false)
+                                }
+                                TranscriptToolRunGroup(
+                                    tools = entry.tools,
+                                    expanded = toolsExpanded,
+                                    onToggle = { toolsExpanded = !toolsExpanded },
+                                    sessionKey = session.id.value,
+                                    loadManagedImage = { path ->
+                                        onLoadManagedImage(path).getOrThrow()
+                                    },
+                                )
+                                return@items
+                            }
+                            val messageIndex = (entry as TranscriptEntry.Single).index
+                            val message = entry.message
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 if (message.role == ChatMessageRole.System) {
                                     Text(
@@ -4405,18 +4879,6 @@ private fun SessionDetailScreen(
                                                 onLoadManagedImage(path).getOrThrow()
                                             },
                                         )
-                                        if (
-                                            readAloudSession != null &&
-                                            message.role == ChatMessageRole.Assistant &&
-                                            renderedText.isNotBlank()
-                                        ) {
-                                            MessageSpeakerButton(
-                                                session = readAloudSession,
-                                                messageKey = "message:$messageIndex",
-                                                text = renderedText,
-                                                enabled = true,
-                                            )
-                                        }
                                     }
                                 }
                             }
@@ -6067,6 +6529,52 @@ private fun RunEventState.hasVisibleContent(): Boolean =
         approval != null ||
         unsupportedBlocking != null
 
+/** A transcript message paired with its stable index in the source list. */
+internal data class IndexedChatMessage(val index: Int, val message: ChatMessage)
+
+/**
+ * A renderable transcript unit: either a single non-tool message or a run of
+ * consecutive tool messages that collapse into one dropdown.
+ */
+internal sealed interface TranscriptEntry {
+    data class Single(val index: Int, val message: ChatMessage) : TranscriptEntry
+
+    data class ToolRun(val tools: List<IndexedChatMessage>) : TranscriptEntry
+}
+
+/**
+ * Fold a flat transcript into renderable entries, coalescing every maximal run
+ * of adjacent `Tool` messages into a single [TranscriptEntry.ToolRun]. Original
+ * message indices are preserved so per-message expansion state stays stable.
+ */
+internal fun coalesceTranscriptEntries(messages: List<ChatMessage>): List<TranscriptEntry> {
+    val entries = mutableListOf<TranscriptEntry>()
+    var run: MutableList<IndexedChatMessage>? = null
+    fun flush() {
+        run?.let { entries.add(TranscriptEntry.ToolRun(it.toList())) }
+        run = null
+    }
+    messages.forEachIndexed { index, message ->
+        if (message.role == ChatMessageRole.Tool) {
+            (run ?: mutableListOf<IndexedChatMessage>().also { run = it })
+                .add(IndexedChatMessage(index, message))
+        } else {
+            flush()
+            entries.add(TranscriptEntry.Single(index, message))
+        }
+    }
+    flush()
+    return entries
+}
+
+/**
+ * The tool name is the leading segment of a transcript tool message, before the
+ * " · " context separator (see `transcriptToolText` on the ViewModel). Falls
+ * back to the trimmed text when no separator is present.
+ */
+internal fun transcriptToolName(text: String): String =
+    text.substringBefore(" · ").trim().ifEmpty { text.trim() }
+
 /**
  * Verb bucket for a gateway tool name, or null for tools this client does not
  * recognize. Buckets merge related names ("write_file" and "patch" are both
@@ -6280,6 +6788,86 @@ private fun ToolMessageBlock(
                     text,
                     loadManagedImage = loadManagedImage,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * A run of consecutive completed tool messages in the persisted transcript,
+ * collapsed into one dropdown mirroring the live [ToolActivityGroup]: a single
+ * header ("N actions, completed, <summary>") that expands to the individual
+ * tool rows, each independently expandable to its full result.
+ */
+@Composable
+private fun TranscriptToolRunGroup(
+    tools: List<IndexedChatMessage>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    sessionKey: String,
+    loadManagedImage: (suspend (String) -> ByteArray)? = null,
+) {
+    val semanticColors = LocalHermesSemanticColors.current
+    val noun = if (tools.size == 1) "action" else "actions"
+    val summary = remember(tools) {
+        toolActivitySummary(
+            completedNames = tools.map { transcriptToolName(it.message.text) },
+        )
+    }
+    Surface(
+        onClick = onToggle,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics(mergeDescendants = true) {
+                contentDescription =
+                    "${tools.size} $noun, completed, ${if (expanded) "expanded" else "collapsed"}"
+                stateDescription = if (expanded) "Expanded" else "Collapsed"
+            },
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.Check,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = semanticColors.completed,
+                )
+                Text(
+                    summary,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Icon(
+                    if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded) {
+                tools.forEach { indexed ->
+                    key(indexed.index) {
+                        var showToolMessage by rememberSaveable(sessionKey, indexed.index) {
+                            mutableStateOf(false)
+                        }
+                        ToolMessageBlock(
+                            text = indexed.message.text,
+                            expanded = showToolMessage,
+                            onToggle = { showToolMessage = !showToolMessage },
+                            loadManagedImage = loadManagedImage,
+                        )
+                    }
+                }
             }
         }
     }

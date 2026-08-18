@@ -355,6 +355,10 @@ internal fun HermesAppHost(
             connectionViewModel?.setProfileReasoningEffort(effort)
                 ?: Result.failure(IllegalStateException("Profile settings unavailable"))
         },
+        onSetModelReasoningOverride = { selection, effort ->
+            connectionViewModel?.setProfileModelReasoningOverride(selection, effort)
+                ?: Result.failure(IllegalStateException("Profile settings unavailable"))
+        },
         onLogout = { connectionViewModel?.logout() },
         onSignIn = onSignIn,
         onOpenProject = onOpenProject,

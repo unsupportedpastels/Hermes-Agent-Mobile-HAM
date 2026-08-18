@@ -18,5 +18,32 @@ data class ProjectRoute(val projectId: ProjectId) : NavKey
 @Serializable
 data object ServerSettingsRoute : NavKey
 
+/**
+ * Settings sub-section destinations. [ServerSettingsRoute] is the hub; each of
+ * these is pushed onto the same back stack and rendered in the detail pane so
+ * compact windows get native push/pop and Back, and expanded windows keep the
+ * adaptive list/detail behaviour.
+ */
+@Serializable
+data object SettingsServersRoute : NavKey
+
+@Serializable
+data object SettingsConnectionRoute : NavKey
+
+@Serializable
+data object SettingsModelRoute : NavKey
+
+@Serializable
+data object SettingsVoiceRoute : NavKey
+
+@Serializable
+data object SettingsOfflineRoute : NavKey
+
+@Serializable
+data object SettingsJobsRoute : NavKey
+
+@Serializable
+data object SettingsAccountRoute : NavKey
+
 @Serializable
 data class SessionDetailRoute(val durableSessionId: DurableSessionId) : NavKey
