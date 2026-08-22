@@ -59,11 +59,26 @@ Both paths authenticate the same way — **Sign in with Nous**. Mercury's Connec
 
 The rest of this section covers self-hosting.
 
+### Self-hosted authentication: Nous OAuth is required
+
+Mercury signs in through the Nous Portal (system-browser PKCE), so your host's dashboard must advertise **Nous OAuth**. A username/password (`dashboard.basic_auth`) setup will NOT work: Mercury reaches the server but shows *"Server reachable · Sign in required"* with no way to sign in.
+
+1. Check the agent's Nous login on the host: `hermes auth status`. If not logged in, run `hermes portal` first.
+2. Register the dashboard's OAuth client: `hermes dashboard register`. This provisions a Nous Portal client and writes `HERMES_DASHBOARD_OAUTH_CLIENT_ID` to `~/.hermes/.env`. If Hermes prompts you to choose an auth provider, **do not pick username & password**.
+3. Restart the dashboard so it picks up the registered client.
+4. Verify from the host:
+
+   ```bash
+   curl -fsS http://localhost:9119/api/status
+   ```
+
+   The JSON must show `"auth_required": true`, list `nous` in `auth_providers`, and list `native_pkce` in `auth_flows`. If `nous` is missing, repeat step 2 before continuing.
+
 ### Recommended public access: HTTPS through Cloudflare Tunnel
 
 For a remote phone connection, keep Hermes bound to loopback and publish only a public HTTPS hostname through a named [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/). Do not expose port 9119 directly to the internet.
 
-1. Configure Hermes Agent and public-host authentication: run `hermes dashboard register` on the host to provision a Nous Portal OAuth client (it writes `HERMES_DASHBOARD_OAUTH_CLIENT_ID` to `~/.hermes/.env`; log in to Nous first with `hermes portal` if needed). Mercury signs in through the Nous Portal, so the dashboard must advertise the native_pkce auth flow — a username/password/basic setup will NOT work; if Hermes prompts you to choose an auth provider, do not pick username & password. Follow the current [Hermes remote-backend documentation](https://hermes-agent.nousresearch.com/docs/user-guide/desktop#connecting-to-a-remote-backend).
+1. Configure authentication per [Self-hosted authentication](#self-hosted-authentication-nous-oauth-is-required) above — Nous OAuth, not a shared password. Follow the current [Hermes remote-backend documentation](https://hermes-agent.nousresearch.com/docs/user-guide/desktop#connecting-to-a-remote-backend).
 2. Start the recommended Dashboard backend on the host and keep it supervised by your service manager:
 
    ```bash
