@@ -363,7 +363,7 @@ class HermesAppTest {
     }
 
     @Test
-    fun homeShowsOnlyAuthoritativeRunningSubagents() {
+    fun homeShowsAuthoritativeRunningSubagents() {
         composeRule.setContent {
             HermesAndroidTheme {
                 HermesApp(
@@ -386,6 +386,7 @@ class HermesAppTest {
         composeRule.onNodeWithText("Running subagents").assertIsDisplayed()
         composeRule.onNodeWithText("Inspect lifecycle races").assertIsDisplayed()
         composeRule.onNodeWithText("running · child of parent-1").assertIsDisplayed()
+        composeRule.onAllNodesWithText("Subagent controls").assertCountEquals(0)
     }
 
     @Test

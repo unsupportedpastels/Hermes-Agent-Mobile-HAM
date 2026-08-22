@@ -51,8 +51,8 @@ class OperationalOverviewTest {
         }
 
         composeRule.onNodeWithText("Working here").assertIsDisplayed()
-        composeRule.onNodeWithText("Process-local subagents").assertIsDisplayed()
-        composeRule.onAllNodesWithText("Unavailable").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Process-local subagents").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Unavailable").assertCountEquals(0)
         composeRule.onNodeWithTag("Operational overview").performClick()
         composeRule.onNodeWithText("Status").assertIsDisplayed()
         composeRule.onNodeWithText("Memory pressure").assertIsDisplayed()

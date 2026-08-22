@@ -222,7 +222,6 @@ import com.unsupportedpastels.hermesandroid.app.RunToolState
 import com.unsupportedpastels.hermesandroid.app.UnsupportedBlockingInteraction
 import com.unsupportedpastels.hermesandroid.app.DurableSessionId
 import com.unsupportedpastels.hermesandroid.app.DelegatedSubagent
-import com.unsupportedpastels.hermesandroid.app.DelegationStatus
 import com.unsupportedpastels.hermesandroid.app.ProjectLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSessionLoadState
 import com.unsupportedpastels.hermesandroid.app.ProjectSummary
@@ -481,9 +480,6 @@ fun HermesApp(
     onApprovalResponse: (DurableSessionId, String, Boolean) -> Unit = { _, _, _ -> },
     onBlockingResponse: (DurableSessionId, UnsupportedBlockingKind, String, String) -> Unit = { _, _, _, _ -> },
     onStopSession: (DurableSessionId) -> Unit = {},
-    onSetDelegationPaused: (DurableSessionId, Boolean) -> Unit = { _, _ -> },
-    onSteerSubagent: (DurableSessionId, String, String) -> Unit = { _, _, _ -> },
-    onInterruptSubagent: (DurableSessionId, String) -> Unit = { _, _ -> },
     onCreateSession: () -> DurableSessionId? = { null },
     onCreateProjectSession: (ProjectId) -> DurableSessionId? = { null },
     onLoadHostDirectories: suspend (String?) -> Result<HostDirectoryListing> = {
@@ -1091,18 +1087,6 @@ fun HermesApp(
                         showStop = chat.isSending && hasControllerRuntime,
                         stopping = chat.isStopping,
                         onStop = { onStopSession(session.id) },
-                        delegationStatus = snapshot.delegationStatus,
-                        delegationAvailable = hasControllerRuntime &&
-                            snapshot.delegationStatus.active.isNotEmpty(),
-                        onSetDelegationPaused = { paused ->
-                            onSetDelegationPaused(session.id, paused)
-                        },
-                        onSteerSubagent = { subagentId, text ->
-                            onSteerSubagent(session.id, subagentId, text)
-                        },
-                        onInterruptSubagent = { subagentId ->
-                            onInterruptSubagent(session.id, subagentId)
-                        },
                         slashCompletion = slashCompletions[session.id]?.takeIf {
                             it.composerText == drafts[draftKey].orEmpty()
                         },
@@ -4884,11 +4868,6 @@ private fun SessionDetailScreen(
     showStop: Boolean,
     stopping: Boolean,
     onStop: () -> Unit,
-    delegationStatus: DelegationStatus,
-    delegationAvailable: Boolean,
-    onSetDelegationPaused: (Boolean) -> Unit,
-    onSteerSubagent: (String, String) -> Unit,
-    onInterruptSubagent: (String) -> Unit,
     slashCompletion: SlashCompletionState? = null,
     onSlashCompletionSelected: (SlashCompletionState, SlashCompletionItem) -> Unit = { _, _ -> },
     onLoadSessionInsights: () -> Unit,
@@ -4957,8 +4936,7 @@ private fun SessionDetailScreen(
         attachmentError = errors.takeIf { it.isNotEmpty() }?.joinToString("\n")
     }
     val hasRunStateContent = chat.runState.hasVisibleContent() ||
-        chat.processRows.isNotEmpty() ||
-        (delegationAvailable && delegationStatus.active.isNotEmpty())
+        chat.processRows.isNotEmpty()
     val timelineLastIndex = (
         chat.messages.size + if (hasRunStateContent) 1 else 0
     ).minus(1).coerceAtLeast(0)
@@ -5268,7 +5246,6 @@ private fun SessionDetailScreen(
                                     runState = chat.runState,
                                     processRows = chat.processRows,
                                     runActive = chat.isSending,
-                                    delegationStatus = if (delegationAvailable) delegationStatus else DelegationStatus(),
                                     durableSessionId = session.id,
                                     onClarificationResponse = onClarificationResponse,
                                     onApprovalResponse = onApprovalResponse,
@@ -5335,14 +5312,6 @@ private fun SessionDetailScreen(
                     notice,
                     color = MaterialTheme.colorScheme.tertiary,
                     style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            if (delegationAvailable) {
-                DelegationControls(
-                    status = delegationStatus,
-                    onSetPaused = onSetDelegationPaused,
-                    onSteer = onSteerSubagent,
-                    onInterrupt = onInterruptSubagent,
                 )
             }
             chat.billingNotice?.let { billing ->
@@ -6308,173 +6277,6 @@ private fun writeSharedArtifact(context: Context, artifact: Artifact, bytes: Byt
     ).apply { writeBytes(bytes) }
 }
 
-private const val MAX_SUBAGENT_GUIDANCE_LENGTH = 512
-
-@Composable
-private fun DelegationControls(
-    status: DelegationStatus,
-    onSetPaused: (Boolean) -> Unit,
-    onSteer: (String, String) -> Unit,
-    onInterrupt: (String) -> Unit,
-) {
-    var steeringSubagent by remember { mutableStateOf<DelegatedSubagent?>(null) }
-    var interruptingSubagentId by remember { mutableStateOf<String?>(null) }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .semantics { contentDescription = "Subagent controls" },
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text("Subagent controls", style = MaterialTheme.typography.titleMedium)
-            Button(
-                onClick = { onSetPaused(!status.paused) },
-                enabled = !status.actionLoading,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .semantics {
-                        contentDescription = if (status.paused) {
-                            "Resume spawning"
-                        } else {
-                            "Pause spawning"
-                        }
-                    },
-            ) {
-                Text(if (status.paused) "Resume spawning" else "Pause spawning")
-            }
-            status.active.forEach { subagent ->
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surfaceContainer,
-                ) {
-                    Column(
-                        modifier = Modifier.padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Text(
-                            subagent.goal,
-                            style = MaterialTheme.typography.titleSmall,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            subagent.status,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = { steeringSubagent = subagent },
-                                enabled = !status.actionLoading,
-                                modifier = Modifier.semantics {
-                                    contentDescription = "Steer subagent ${subagent.subagentId}"
-                                },
-                                contentPadding = PaddingValues(horizontal = 14.dp),
-                            ) {
-                                Text("Steer")
-                            }
-                            Button(
-                                onClick = { interruptingSubagentId = subagent.subagentId },
-                                enabled = !status.actionLoading,
-                                modifier = Modifier.semantics {
-                                    contentDescription = "Interrupt subagent ${subagent.subagentId}"
-                                },
-                                contentPadding = PaddingValues(horizontal = 14.dp),
-                            ) {
-                                Text("Interrupt")
-                            }
-                        }
-                    }
-                }
-            }
-            status.notice?.let { notice ->
-                Text(
-                    notice.take(180),
-                    color = MaterialTheme.colorScheme.tertiary,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            status.error?.let { error ->
-                Text(
-                    error.take(180),
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-    }
-    steeringSubagent?.let { subagent ->
-        var guidance by remember(subagent.subagentId) { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { steeringSubagent = null },
-            title = { Text("Steer subagent") },
-            text = {
-                OutlinedTextField(
-                    value = guidance,
-                    onValueChange = { guidance = it.take(MAX_SUBAGENT_GUIDANCE_LENGTH) },
-                    label = { Text("Guidance") },
-                    supportingText = {
-                        Text("${guidance.length}/$MAX_SUBAGENT_GUIDANCE_LENGTH")
-                    },
-                    modifier = Modifier.semantics {
-                        contentDescription = "Subagent guidance"
-                    },
-                    maxLines = 5,
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val trimmed = guidance.trim()
-                        if (!status.actionLoading && trimmed.isNotEmpty()) {
-                            steeringSubagent = null
-                            onSteer(subagent.subagentId, trimmed)
-                        }
-                    },
-                    enabled = !status.actionLoading && guidance.isNotBlank(),
-                    modifier = Modifier.semantics {
-                        contentDescription = "Confirm steer"
-                    },
-                ) {
-                    Text("Steer")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { steeringSubagent = null }) { Text("Cancel") }
-            },
-        )
-    }
-    interruptingSubagentId?.let { subagentId ->
-        AlertDialog(
-            onDismissRequest = { interruptingSubagentId = null },
-            title = { Text("Interrupt subagent?") },
-            text = { Text("Stop the active process-local subagent?") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        if (!status.actionLoading) {
-                            interruptingSubagentId = null
-                            onInterrupt(subagentId)
-                        }
-                    },
-                    enabled = !status.actionLoading,
-                    modifier = Modifier.semantics {
-                        contentDescription = "Confirm interrupt subagent $subagentId"
-                    },
-                ) {
-                    Text("Confirm interrupt")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { interruptingSubagentId = null }) { Text("Cancel") }
-            },
-        )
-    }
-}
 
 private enum class SessionMaintenanceAction {
     Compress,
@@ -6870,13 +6672,12 @@ private fun RunStateContent(
     runState: RunEventState,
     processRows: List<ProcessRow>,
     runActive: Boolean,
-    delegationStatus: DelegationStatus,
     durableSessionId: DurableSessionId,
     onClarificationResponse: (String, String) -> Unit,
     onApprovalResponse: (String, Boolean) -> Unit,
     onBlockingResponse: (UnsupportedBlockingKind, String, String) -> Unit,
 ) {
-    if (!runState.hasVisibleContent() && delegationStatus.active.isEmpty() && processRows.isEmpty()) return
+    if (!runState.hasVisibleContent() && processRows.isEmpty()) return
     val runningTools = runState.tools.filter { it.state == RunToolState.Running }
     var toolsExpanded by remember(durableSessionId.value) {
         mutableStateOf(false)
@@ -6888,10 +6689,9 @@ private fun RunStateContent(
         if (runActive || runningTools.isNotEmpty()) {
             runState.status?.let { status -> RunStatusPill(status) }
         }
-        if (runState.todos.isNotEmpty() || delegationStatus.active.isNotEmpty() || processRows.isNotEmpty()) {
+        if (runState.todos.isNotEmpty() || processRows.isNotEmpty()) {
             ActivityStack(
                 runState = runState,
-                delegationStatus = delegationStatus,
                 processRows = processRows,
                 runActive = runActive,
             )

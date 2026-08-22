@@ -43,13 +43,6 @@ internal fun workingHereCount(snapshot: HermesGatewaySnapshot): Int = snapshot.c
     }
 }
 
-internal fun processLocalSubagentCount(snapshot: HermesGatewaySnapshot): Int? =
-    if (snapshot.delegationStatusAvailable || snapshot.delegationStatus.active.isNotEmpty()) {
-        snapshot.delegationStatus.active.size
-    } else {
-        null
-    }
-
 internal fun operationalAttentionCount(snapshot: HermesGatewaySnapshot): Int {
     val status = snapshot.operationalStatusState.lastGoodOrNull()?.status
     val pressureAttention = status?.let {
@@ -83,7 +76,6 @@ internal fun OperationalOverviewItem(
         "Needs attention" -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val processLocalSubagents = processLocalSubagentCount(snapshot)
     val attentionCount = operationalAttentionCount(snapshot)
     val transient = snapshot.operationalStatusState is com.unsupportedpastels.hermesandroid.gateway.OperationalStatusState.TransientError
 
@@ -112,10 +104,6 @@ internal fun OperationalOverviewItem(
                 )
             }
             OverviewValueRow("Working here", workingHereCount(snapshot).toString())
-            OverviewValueRow(
-                "Process-local subagents",
-                processLocalSubagents?.toString() ?: "Unavailable",
-            )
             if (expanded) {
                 OverviewValueRow("Status", statusLabel, statusColor)
                 if (transient && status != null) {

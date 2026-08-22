@@ -32,8 +32,6 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.testTag
-import com.unsupportedpastels.hermesandroid.app.DelegatedSubagent
-import com.unsupportedpastels.hermesandroid.app.DelegationStatus
 import com.unsupportedpastels.hermesandroid.app.ProcessRow
 import com.unsupportedpastels.hermesandroid.app.RunEventState
 import com.unsupportedpastels.hermesandroid.app.RunTodoItem
@@ -44,45 +42,39 @@ import com.unsupportedpastels.hermesandroid.app.RunToolState
 /**
  * The selected controller's bounded activity surface. This is deliberately a
  * presentation of already-authoritative state: it does not join persisted
- * sessions, infer loops from transcript text, or claim that process-local
- * delegation is a server-wide registry.
+ * sessions, or infer loops from transcript text.
  */
 @Composable
 internal fun ActivityStack(
     runState: RunEventState,
-    delegationStatus: DelegationStatus = DelegationStatus(),
     processRows: List<ProcessRow> = emptyList(),
     runActive: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val toolCount = runState.tools.size
-    val subagentCount = delegationStatus.active.size
     val processCount = processRows.size
     val countedTodos = runState.todos.filter { it.status != RunTodoStatus.Cancelled }
     val completedTodos = countedTodos.count { it.status == RunTodoStatus.Completed }
     val hasActivity = runState.status != null ||
         runState.tools.isNotEmpty() ||
         runState.todos.isNotEmpty() ||
-        delegationStatus.active.isNotEmpty() ||
         processRows.isNotEmpty()
     if (!hasActivity) return
 
     var expanded by remember { mutableStateOf(false) }
     val taskLabel = "$completedTodos/${countedTodos.size} tasks"
     val noun = if (toolCount == 1) "tool" else "tools"
-    val subagentLabel = if (subagentCount == 1) "1 subagent" else "$subagentCount subagents"
     val processLabel = if (processCount == 1) "1 process-local process" else "$processCount process-local processes"
     val stateLabel = if (
         runActive ||
         runState.tools.any { it.state == RunToolState.Running } ||
         runState.todos.any { it.status == RunTodoStatus.Pending || it.status == RunTodoStatus.InProgress } ||
-        delegationStatus.active.isNotEmpty() ||
         processRows.any { it.status.equals("running", ignoreCase = true) }
     ) "running" else "completed"
-    val accessibilityLabel = if (subagentCount == 0 && runState.todos.isEmpty() && processCount == 0) {
+    val accessibilityLabel = if (runState.todos.isEmpty() && processCount == 0) {
         "$toolCount actions, $stateLabel, " + if (expanded) "expanded" else "collapsed"
     } else {
-        "Activity stack, $toolCount $noun, $subagentLabel, $taskLabel" +
+        "Activity stack, $toolCount $noun, $taskLabel" +
             (if (processCount == 0) "" else ", $processLabel") +
             ", " + if (expanded) "expanded" else "collapsed"
     }
@@ -127,7 +119,7 @@ internal fun ActivityStack(
                     )
                 }
                 Text(
-                    activitySummary(toolCount, subagentCount, completedTodos, countedTodos.size, processCount),
+                    activitySummary(toolCount, completedTodos, countedTodos.size, processCount),
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium,
                     maxLines = 1,
@@ -168,14 +160,6 @@ internal fun ActivityStack(
                         }
                     }
                 }
-                if (delegationStatus.active.isNotEmpty()) {
-                    ActivitySectionLabel("Subagents · process-local")
-                    delegationStatus.active.forEach { subagent ->
-                        key("subagent:${subagent.subagentId}") {
-                            SubagentActivityRow(subagent)
-                        }
-                    }
-                }
             }
         }
     }
@@ -183,7 +167,6 @@ internal fun ActivityStack(
 
 private fun activitySummary(
     toolCount: Int,
-    subagentCount: Int,
     completedTodos: Int,
     todoCount: Int,
     processCount: Int,
@@ -192,9 +175,6 @@ private fun activitySummary(
     append(" · ")
     append(toolCount)
     append(if (toolCount == 1) " tool" else " tools")
-    append(" · ")
-    append(subagentCount)
-    append(if (subagentCount == 1) " subagent" else " subagents")
     append(" · ")
     append(completedTodos)
     append('/')
@@ -341,32 +321,6 @@ private fun ProcessActivityRow(process: ProcessRow) {
             } else {
                 MaterialTheme.colorScheme.onSurfaceVariant
             },
-        )
-    }
-}
-
-@Composable
-private fun SubagentActivityRow(subagent: DelegatedSubagent) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .semantics {
-                contentDescription = "Subagent ${subagent.subagentId}: ${subagent.goal}, ${subagent.status}"
-            },
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Text(
-            subagent.goal,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            subagent.status,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary,
         )
     }
 }

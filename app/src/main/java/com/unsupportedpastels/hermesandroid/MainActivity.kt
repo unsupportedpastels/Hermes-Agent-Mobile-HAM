@@ -496,15 +496,6 @@ internal fun HermesAppHost(
         onApprovalResponse = onApprovalResponse,
         onBlockingResponse = onBlockingResponse,
         onStopSession = onStopSession,
-        onSetDelegationPaused = { sessionId, paused ->
-            connectionViewModel?.setDelegationPaused(sessionId, paused)
-        },
-        onSteerSubagent = { sessionId, subagentId, text ->
-            connectionViewModel?.steerSubagent(sessionId, subagentId, text)
-        },
-        onInterruptSubagent = { sessionId, subagentId ->
-            connectionViewModel?.interruptSubagent(sessionId, subagentId)
-        },
         onCreateSession = { connectionViewModel?.createNewSession() },
         onLoadHostDirectories = { path ->
             connectionViewModel?.let { viewModel ->

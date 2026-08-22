@@ -1,15 +1,11 @@
 package com.unsupportedpastels.hermesandroid.ui
 
-import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
-import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.unsupportedpastels.hermesandroid.app.DelegatedSubagent
-import com.unsupportedpastels.hermesandroid.app.DelegationStatus
 import com.unsupportedpastels.hermesandroid.app.ProcessRow
 import com.unsupportedpastels.hermesandroid.app.RunEventState
 import com.unsupportedpastels.hermesandroid.app.RunTodoItem
@@ -29,7 +25,7 @@ class ActivityStackTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun activityStackIsCollapsedAndExpandsToolsTodosAndSubagents() {
+    fun activityStackIsCollapsedAndExpandsToolsAndTodos() {
         composeRule.setContent {
             HermesAndroidTheme {
                 ActivityStack(
@@ -44,27 +40,17 @@ class ActivityStackTest {
                             RunTodoItem("todo-2", "Render activity stack", RunTodoStatus.InProgress),
                         ),
                     ),
-                    delegationStatus = DelegationStatus(
-                        active = listOf(
-                            DelegatedSubagent(
-                                subagentId = "child-1",
-                                goal = "Audit the runtime",
-                                status = "running",
-                            ),
-                        ),
-                    ),
                 )
             }
         }
 
         composeRule.onNodeWithContentDescription(
-            "Activity stack, 2 tools, 1 subagent, 1/2 tasks, collapsed",
+            "Activity stack, 2 tools, 1/2 tasks, collapsed",
         ).assertIsDisplayed().performClick()
         composeRule.onNodeWithText("Inspect gateway").assertIsDisplayed()
         composeRule.onNodeWithText("Render activity stack").assertIsDisplayed()
-        composeRule.onAllNodesWithText("Audit the runtime").assertCountEquals(1)
         composeRule.onNodeWithContentDescription(
-            "Activity stack, 2 tools, 1 subagent, 1/2 tasks, expanded",
+            "Activity stack, 2 tools, 1/2 tasks, expanded",
         ).assertIsDisplayed()
     }
 
@@ -86,7 +72,7 @@ class ActivityStackTest {
         }
 
         composeRule.onNodeWithContentDescription(
-            "Activity stack, 0 tools, 0 subagents, 0/0 tasks, 1 process-local process, collapsed",
+            "Activity stack, 0 tools, 0/0 tasks, 1 process-local process, collapsed",
         ).assertIsDisplayed().performClick()
         composeRule.onNodeWithText("Processes · process-local").assertIsDisplayed()
         composeRule.onNodeWithText("python server.py").assertIsDisplayed()

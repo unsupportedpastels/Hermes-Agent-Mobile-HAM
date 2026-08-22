@@ -1,12 +1,8 @@
 package com.unsupportedpastels.hermesandroid.ui
 
-import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.v2.createComposeRule
-import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.unsupportedpastels.hermesandroid.app.DelegatedSubagent
 import com.unsupportedpastels.hermesandroid.app.DelegationStatus
@@ -22,7 +18,6 @@ import com.unsupportedpastels.hermesandroid.gateway.RuntimeAccess
 import com.unsupportedpastels.hermesandroid.gateway.RuntimeSessionId
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
-import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -35,62 +30,61 @@ class SubagentControlsUiTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun exactControllerExposesPauseSteerAndConfirmedInterruptForActiveChildren() {
+    fun sessionDetailDoesNotRenderProcessLocalSubagentState() {
         val sessionId = DurableSessionId("durable-delegation")
-        var paused: Pair<DurableSessionId, Boolean>? = null
-        var steered: Triple<DurableSessionId, String, String>? = null
-        var interrupted: Pair<DurableSessionId, String>? = null
         composeRule.setContent {
             HermesAndroidTheme {
                 HermesApp(
-                    snapshot = HermesGatewaySnapshot(
-                        connectionState = ConnectionState.Connected,
-                        authenticationState = AuthenticationState.Authenticated,
-                        durableSessions = listOf(SessionSummary(sessionId, "Delegation session")),
-                        chatSessions = mapOf(sessionId to ChatSessionSnapshot()),
-                        activeRuntimes = listOf(
-                            ActiveRuntimeSession(
-                                runtimeSessionId = RuntimeSessionId("runtime-parent"),
-                                durableSessionId = sessionId,
-                                title = "Delegation session",
-                                access = RuntimeAccess.Controller,
-                            ),
-                        ),
-                        delegationStatus = DelegationStatus(
-                            active = listOf(
-                                DelegatedSubagent(
-                                    subagentId = "child-1",
-                                    goal = "Inspect the focused tests",
-                                    status = "running",
-                                ),
-                            ),
-                            notice = "Guidance queued",
-                            error = "A previous delegation failed",
-                        ),
-                    ),
+                    snapshot = delegationSnapshot(sessionId),
                     initialRoute = SessionDetailRoute(sessionId),
                     serverSettingsState = ServerSettingsState.Ready(null),
-                    onSetDelegationPaused = { id, value -> paused = id to value },
-                    onSteerSubagent = { id, childId, text -> steered = Triple(id, childId, text) },
-                    onInterruptSubagent = { id, childId -> interrupted = id to childId },
                 )
             }
         }
 
-        composeRule.onNodeWithContentDescription("Pause spawning").assertIsDisplayed().performClick()
-        composeRule.onNodeWithContentDescription("Steer subagent child-1").performClick()
-        composeRule.onNodeWithContentDescription("Subagent guidance").performTextInput("  Focus on Android tests  ")
-        composeRule.onNodeWithContentDescription("Confirm steer").performClick()
-        composeRule.onNodeWithContentDescription("Interrupt subagent child-1").performClick()
-        composeRule.onNodeWithText("Interrupt subagent?").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Confirm interrupt subagent child-1").performClick()
-
-        composeRule.onNodeWithText("Guidance queued").assertIsDisplayed()
-        composeRule.onNodeWithText("A previous delegation failed").assertIsDisplayed()
-        composeRule.runOnIdle {
-            assertEquals(sessionId to true, paused)
-            assertEquals(Triple(sessionId, "child-1", "Focus on Android tests"), steered)
-            assertEquals(sessionId to "child-1", interrupted)
-        }
+        composeRule.onAllNodesWithText("Subagent controls").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Running subagents").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Inspect the focused tests").assertCountEquals(0)
     }
+
+    @Test
+    fun homeRendersProcessLocalSubagentState() {
+        val sessionId = DurableSessionId("durable-delegation-home")
+        composeRule.setContent {
+            HermesAndroidTheme {
+                HermesApp(
+                    snapshot = delegationSnapshot(sessionId),
+                    serverSettingsState = ServerSettingsState.Ready(null),
+                )
+            }
+        }
+
+        composeRule.onAllNodesWithText("Running subagents").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Inspect the focused tests").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Subagent controls").assertCountEquals(0)
+    }
+
+    private fun delegationSnapshot(sessionId: DurableSessionId) = HermesGatewaySnapshot(
+        connectionState = ConnectionState.Connected,
+        authenticationState = AuthenticationState.Authenticated,
+        durableSessions = listOf(SessionSummary(sessionId, "Delegation session")),
+        chatSessions = mapOf(sessionId to ChatSessionSnapshot()),
+        activeRuntimes = listOf(
+            ActiveRuntimeSession(
+                runtimeSessionId = RuntimeSessionId("runtime-parent"),
+                durableSessionId = sessionId,
+                title = "Delegation session",
+                access = RuntimeAccess.Controller,
+            ),
+        ),
+        delegationStatus = DelegationStatus(
+            active = listOf(
+                DelegatedSubagent(
+                    subagentId = "child-1",
+                    goal = "Inspect the focused tests",
+                    status = "running",
+                ),
+            ),
+        ),
+    )
 }
