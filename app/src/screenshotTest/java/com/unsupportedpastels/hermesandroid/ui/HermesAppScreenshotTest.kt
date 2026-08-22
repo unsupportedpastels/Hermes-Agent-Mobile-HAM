@@ -51,7 +51,7 @@ private val screenshotBetaProjectId = ProjectId("project-beta")
 private const val screenshotAlphaWorkspace = "/workspaces/hermes-android"
 private const val screenshotBetaWorkspace = "/workspaces/hermes-docs"
 private val screenshotServerSettings = ServerSettingsState.Ready(
-    ServerOrigin.parse("https://ham.sdhost.cc"),
+    ServerOrigin.parse("https://hermes.example.com"),
 )
 private val screenshotHostListing = HostDirectoryListing(
     path = "/srv/projects",

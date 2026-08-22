@@ -783,13 +783,13 @@ class HermesAppTest {
                 HermesApp(
                     snapshot = connectedSnapshot,
                     serverSettingsState = ServerSettingsState.Ready(
-                        ServerOrigin.parse("https://ham.sdhost.cc:8443"),
+                        ServerOrigin.parse("https://hermes.example.com:8443"),
                     ),
                 )
             }
         }
 
-        composeRule.onNodeWithText("ham.sdhost.cc").assertIsDisplayed()
+        composeRule.onNodeWithText("hermes.example.com").assertIsDisplayed()
         composeRule.onNodeWithText("Hermes").assertDoesNotExist()
         composeRule.onNodeWithText("Agent workspace").assertIsDisplayed()
         composeRule.onNodeWithText("Connected").assertIsDisplayed()
@@ -817,13 +817,13 @@ class HermesAppTest {
                 HermesApp(
                     snapshot = connectedSnapshot,
                     serverSettingsState = ServerSettingsState.Ready(
-                        ServerOrigin.parse("https://ham.sdhost.cc"),
+                        ServerOrigin.parse("https://hermes.example.com"),
                     ),
                 )
             }
         }
 
-        composeRule.onAllNodesWithText("ham.sdhost.cc").assertCountEquals(1)
+        composeRule.onAllNodesWithText("hermes.example.com").assertCountEquals(1)
         composeRule.onAllNodesWithText("Hermes").assertCountEquals(0)
     }
 
@@ -3511,7 +3511,7 @@ class HermesAppTest {
                     snapshot = snapshot,
                     initialRoute = ProjectRoute(project.id),
                     serverSettingsState = ServerSettingsState.Ready(
-                        ServerOrigin.parse("https://ham.sdhost.cc"),
+                        ServerOrigin.parse("https://hermes.example.com"),
                     ),
                 )
             }
@@ -3519,7 +3519,7 @@ class HermesAppTest {
 
         composeRule.onNodeWithContentDescription("Project dock, expanded").assertIsDisplayed()
         composeRule.onAllNodesWithText("H").assertCountEquals(0)
-        composeRule.onAllNodesWithText("ham.sdhost.cc").assertCountEquals(0)
+        composeRule.onAllNodesWithText("hermes.example.com").assertCountEquals(0)
         composeRule.onNodeWithContentDescription("Collapse project dock").assertIsDisplayed()
     }
 
