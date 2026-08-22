@@ -63,7 +63,7 @@ The rest of this section covers self-hosting.
 
 For a remote phone connection, keep Hermes bound to loopback and publish only a public HTTPS hostname through a named [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/). Do not expose port 9119 directly to the internet.
 
-1. Configure Hermes Agent and public-host authentication. For a publicly reachable host, use an OAuth provider (Nous Portal is the documented option), not a shared password. Follow the current [Hermes remote-backend documentation](https://hermes-agent.nousresearch.com/docs/user-guide/desktop#connecting-to-a-remote-backend).
+1. Configure Hermes Agent and public-host authentication: run `hermes dashboard register` on the host to provision a Nous Portal OAuth client (it writes `HERMES_DASHBOARD_OAUTH_CLIENT_ID` to `~/.hermes/.env`; log in to Nous first with `hermes portal` if needed). Mercury signs in through the Nous Portal, so the dashboard must advertise the native_pkce auth flow — a username/password/basic setup will NOT work; if Hermes prompts you to choose an auth provider, do not pick username & password. Follow the current [Hermes remote-backend documentation](https://hermes-agent.nousresearch.com/docs/user-guide/desktop#connecting-to-a-remote-backend).
 2. Start the recommended Dashboard backend on the host and keep it supervised by your service manager:
 
    ```bash
@@ -99,7 +99,7 @@ Tailscale is appropriate for private Tailnet-only access; use the Cloudflare plu
 
 ### Already running the dashboard for the desktop app?
 
-If you've already run `hermes dashboard` with Nous Portal auth for the Hermes desktop app, you're set — just make sure it's bound to an address your phone can reach (not `127.0.0.1`) and go straight to Mercury's Connect screen. Verify the surface Mercury needs with `GET /api/status`: it should report `auth_required: true` and list `native_pkce` in `auth_flows`.
+If you've already run `hermes dashboard` with Nous Portal auth for the Hermes desktop app, you're set — just make sure it's bound to an address your phone can reach (not `127.0.0.1`) and go straight to Mercury's Connect screen. Verify the surface Mercury needs with `GET /api/status`: it should report `auth_required: true`, list `nous` in `auth_providers`, and list `native_pkce` in `auth_flows`. If `nous` is missing from `auth_providers`, run `hermes dashboard register` on the host — a username/password setup will not work.
 
 ### Keeping it available and troubleshooting
 
