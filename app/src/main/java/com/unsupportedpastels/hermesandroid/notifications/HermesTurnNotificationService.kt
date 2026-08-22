@@ -106,7 +106,7 @@ internal object SessionNotificationPoster {
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(openAppIntent(context, sessionId.value))
-            .addAction(0, "Review in HAM", openAppIntent(context, sessionId.value))
+            .addAction(0, "Review in Mercury", openAppIntent(context, sessionId.value))
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -124,9 +124,9 @@ internal object SessionNotificationPoster {
         val manager = notificationManager(context)
         val preview = finalResponsePreview(text)
         val heading = when (status?.lowercase()) {
-            "error", "failed" -> "Hermes task failed"
-            "cancelled", "canceled", "interrupted" -> "Hermes task was cancelled"
-            else -> "Hermes finished"
+            "error", "failed" -> "Mercury task failed"
+            "cancelled", "canceled", "interrupted" -> "Mercury task was cancelled"
+            else -> "Mercury finished"
         }
         manager.cancel(notificationId(sessionId.value, INPUT_KIND))
         if (!shouldPostSessionNotification(sessionId, SessionNotificationVisibilityRegistry.states.value)) {
@@ -157,7 +157,7 @@ internal object SessionNotificationPoster {
         NotificationCompat.Builder(context, CHANNEL_ACTIVE)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(activeTurnTitle(count))
-            .setContentText("HAM is keeping live responses connected")
+            .setContentText("Mercury is keeping live responses connected")
             .setContentIntent(openAppIntent(context, null))
             .setOngoing(true)
             .setOnlyAlertOnce(true)

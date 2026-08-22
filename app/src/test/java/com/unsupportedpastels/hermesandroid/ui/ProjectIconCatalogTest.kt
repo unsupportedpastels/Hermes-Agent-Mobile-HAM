@@ -19,6 +19,8 @@ class ProjectIconCatalogTest {
         assertEquals(ProjectIconId.Home, defaultProjectIconId(project("Home")))
         assertEquals(ProjectIconId.Shield, defaultProjectIconId(project("Overwatch")))
         assertEquals(ProjectIconId.Factory, defaultProjectIconId(project("Foundry")))
+        assertEquals(ProjectIconId.Terminal, defaultProjectIconId(project("Mercury")))
+        // Legacy label keeps its icon after the Mercury rebrand.
         assertEquals(ProjectIconId.Terminal, defaultProjectIconId(project("HAM")))
         assertEquals(ProjectIconId.Fire, defaultProjectIconId(project("firecrawl")))
         assertEquals(ProjectIconId.Folder, defaultProjectIconId(project("Future project")))

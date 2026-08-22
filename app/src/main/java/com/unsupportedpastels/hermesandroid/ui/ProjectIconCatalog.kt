@@ -129,7 +129,7 @@ fun defaultProjectIconId(project: ProjectSummary): ProjectIconId = when (
     "home" -> ProjectIconId.Home
     "overwatch" -> ProjectIconId.Shield
     "foundry" -> ProjectIconId.Factory
-    "ham" -> ProjectIconId.Terminal
+    "ham", "mercury" -> ProjectIconId.Terminal
     "firecrawl" -> ProjectIconId.Fire
     else -> ProjectIconId.Folder
 }

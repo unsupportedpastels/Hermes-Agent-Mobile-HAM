@@ -1,10 +1,10 @@
-# Contributing to HAM
+# Contributing to Mercury
 
-Thanks for helping improve HAM (Hermes Agent Mobile).
+Thanks for helping improve Mercury — a Hermes companion.
 
 ## Product boundary
 
-HAM is a native Android client for the released, official interfaces of an unchanged shared `hermes serve` process. Contributions must not require a custom server route, dashboard extension, plugin, gateway worker, or Hermes fork.
+Mercury's Android app is a native client for the released, official interfaces of an unchanged shared `hermes serve` process. Contributions must not require a custom server route, dashboard extension, plugin, gateway worker, or Hermes fork.
 
 The app must remain an observer by default: it may not resume, take control of, or close another remote client’s runtime without explicit user action.
 

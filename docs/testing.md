@@ -32,7 +32,7 @@ Behavior checks must cover:
 - unfolded list/detail selection;
 - fold/unfold with selected session and composer draft preserved;
 - resize while streaming and while blocking input is pending;
-- two concurrent HAM-started turns with independent completion and Stop behavior;
+- two concurrent Mercury-started turns with independent completion and Stop behavior;
 - Back from a running session, opening another session, and reopening the first without losing its partial output or amber working state;
 - idle attached controllers never appearing as active work;
 - cold- and warm-notification taps opening the exact durable session;
